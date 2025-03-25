@@ -37,6 +37,7 @@ def gpt_model_init(
     rotary_percent: float = 1.0,
     rotary_base: int = 10000,
     rope_scaling: bool = False,
+    rope_scaling_factor: float = 8.0,
     scatter_embedding_sequence_parallel: bool = True,
     seq_len_interpolation_factor: Optional[float] = None,
     mtp_spec: ModuleSpec = None
@@ -83,9 +84,12 @@ def gpt_model_init(
             seq_len_interpolation_factor=seq_len_interpolation_factor,
             rotary_base=rotary_base,
             rope_scaling=rope_scaling,
+            rope_scaling_factor=rope_scaling_factor,
             use_cpu_initialization=self.config.use_cpu_initialization,
         )
 
+    # Cache for RoPE tensors which do not change between iterations.
+    self.rotary_pos_emb_cache = {}
     # Transformer.
     self.decoder = TransformerBlock(
         config=self.config,
