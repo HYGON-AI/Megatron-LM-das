@@ -147,9 +147,12 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
+        from ..training.initialize import initialize_megatron
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer)
+        MegatronAdaptation.register('megatron.training.initialize.initialize_megatron',
+                                    initialize_megatron)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args
