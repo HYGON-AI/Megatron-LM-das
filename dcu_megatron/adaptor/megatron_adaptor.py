@@ -84,6 +84,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_core_distributed()
         self.patch_core_models()
         self.patch_core_transformers()
+        self.patch_core_extentions()
         self.patch_tensor_parallel()
         self.patch_training()
         self.patch_miscellaneous()
@@ -137,6 +138,12 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
                                     MLATransformerConfig)
 
+    def patch_core_extentions(self):
+        from ..core.extensions.transformer_engine import te_dot_product_attention_init
+
+        MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
+                                    te_dot_product_attention_init)
+
     def patch_tensor_parallel(self):
         from ..core import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
 
@@ -147,12 +154,15 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
-        from ..training.initialize import initialize_megatron
+        from ..training.initialize import _initialize_distributed
+        from ..training.initialize import _compile_dependencies
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer)
-        MegatronAdaptation.register('megatron.training.initialize.initialize_megatron',
-                                    initialize_megatron)
+        MegatronAdaptation.register('megatron.training.initialize._initialize_distributed',
+                                    _initialize_distributed)
+        MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
+                                    _compile_dependencies)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args
