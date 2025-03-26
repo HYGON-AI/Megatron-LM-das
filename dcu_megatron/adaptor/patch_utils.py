@@ -17,7 +17,7 @@ def dummy_function_wrapper(func_name):
 
 
 class Patch:
-    def __init__(self, orig_func_name, new_func, create_dummy):
+    def __init__(self, orig_func_name, new_func, create_dummy, apply_wrapper=False):
         split_name = orig_func_name.rsplit('.', 1)
         if len(split_name) == 1:
             self.orig_module_name, self.orig_func_name = orig_func_name, None
@@ -30,7 +30,7 @@ class Patch:
         self.wrappers = []
         if new_func is None:
             new_func = dummy_function_wrapper(orig_func_name)
-        self.set_patch_func(new_func)
+        self.set_patch_func(new_func, apply_wrapper=apply_wrapper)
         self.is_applied = False
         self.create_dummy = create_dummy
 
@@ -42,8 +42,11 @@ class Patch:
     def patch_func_id(self):
         return id(self.patch_func)
 
-    def set_patch_func(self, new_func, force_patch=False):
-        if hasattr(new_func, '__name__') and new_func.__name__.endswith(('wrapper', 'decorator')):
+    def set_patch_func(self, new_func, force_patch=False, apply_wrapper=False):
+        if (
+            apply_wrapper
+            or (hasattr(new_func, '__name__') and new_func.__name__.endswith(('wrapper', 'decorator')))
+        ):
             self.wrappers.append(new_func)
         else:
             if self.patch_func and not force_patch:

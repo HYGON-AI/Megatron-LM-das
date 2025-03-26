@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, Qwen2Tokenizer
 from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
 from megatron.training.tokenizer.tokenizer import (
     _BertWordPieceTokenizer,
@@ -46,6 +46,11 @@ def build_tokenizer(args, **kwargs):
     elif args.tokenizer_type == 'Llama2Tokenizer':
         assert args.tokenizer_model is not None
         tokenizer = _Llama2Tokenizer(args.tokenizer_model)
+    elif args.tokenizer_type == 'Llama3Tokenizer':
+        assert args.tokenizer_model is not None
+        tokenizer = _Llama3Tokenizer(args.tokenizer_model)
+    elif args.tokenizer_type == 'QwenTokenizer':
+        tokenizer = _Qwen2Tokenizer(args.vocab_file, args.merge_file)
     elif args.tokenizer_type == 'TikTokenizer':
         assert args.tokenizer_model is not None
         assert args.tiktoken_pattern is not None
@@ -99,6 +104,96 @@ def build_tokenizer(args, **kwargs):
         args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size, args)
 
     return tokenizer
+
+
+class _Llama3Tokenizer(MegatronTokenizer):
+    """tiktokenTokenizer-Megatron llama3 改写"""
+    # https://github.com/meta-llama/llama3/blob/main/llama/tokenizer.py
+
+    def __init__(self, model_file):
+        super().__init__(model_file)
+        from pathlib import Path
+        import tiktoken
+        from tiktoken.load import load_tiktoken_bpe
+        tokenizer_path=model_file
+        special_tokens = [
+            "<|begin_of_text|>",
+            "<|end_of_text|>",
+            "<|reserved_special_token_0|>",
+            "<|reserved_special_token_1|>",
+            "<|reserved_special_token_2|>",
+            "<|reserved_special_token_3|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|reserved_special_token_4|>",
+            "<|eot_id|>",  # end of turn
+            ] + [f"<|reserved_special_token_{i}|>" for i in range (5, 256 - 5)]
+        mergeable_ranks = load_tiktoken_bpe(tokenizer_path)
+        self.tokenizer = tiktoken.Encoding(tokenizer_path,
+            pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
+            mergeable_ranks=mergeable_ranks,
+            special_tokens={token: len (mergeable_ranks) + i for i, token in enumerate (special_tokens)},
+            )
+
+        self.eod_id = self.tokenizer.encode("<|end_of_text|>", allowed_special="all")[0]
+    @property
+    def vocab_size(self):
+        return self.tokenizer.n_vocab
+
+    @property
+    def vocab(self):
+        return self.tokenizer.encode
+
+    @property
+    def inv_vocab(self):
+        return self.tokenizer.encode
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.encode(token_ids)
+
+    @property
+    def eod(self):
+        return self.eod_id
+
+class _Qwen2Tokenizer(MegatronTokenizer):
+    def __init__(self, vocab_file, merge_file,extra_vocab_size=0):
+        super().__init__(vocab_file, merge_file)
+        self.tokenizer = Qwen2Tokenizer(vocab_file, merge_file)
+        self.extra_vocab_size = extra_vocab_size
+        self.tokenizer.add_special_tokens(special_tokens_dict=dict(pad_token="<|extra_0|>"))
+
+    @property
+    def vocab_size(self):
+        return len(self.tokenizer.encoder) + self.extra_vocab_size
+
+    @property
+    def vocab(self):
+        return self.tokenizer.encoder
+
+    @property
+    def inv_vocab(self):
+        return self.tokenizer.decoder
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.decode(token_ids)
+
+    @property
+    def eod(self):
+        return self.tokenizer.eos_token_id
+
+    @property
+    def eos_token(self):
+        return self.tokenizer.eos_token
+
+    @property
+    def pad_token_id(self):
+        return self.tokenizer.pad_token_id
 
 
 class _DeepSeekV2Tokenizer(MegatronTokenizer):

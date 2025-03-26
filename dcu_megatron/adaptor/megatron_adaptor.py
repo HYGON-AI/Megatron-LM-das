@@ -1,18 +1,4 @@
-# coding=utf-8
-# Copyright (c) 2024, HUAWEI CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+import os
 import abc
 import sys
 import types
@@ -38,15 +24,15 @@ class MegatronAdaptation:
         # MegatronAdaptation.post_execute()
 
     @classmethod
-    def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False):
+    def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False):
         """
         Register adaptations into collection.
         """
         if orig_func_name not in cls._patch_info_collection:
             from .patch_utils import Patch
-            cls._patch_info_collection[orig_func_name] = Patch(orig_func_name, new_func, create_dummy)
+            cls._patch_info_collection[orig_func_name] = Patch(orig_func_name, new_func, create_dummy, apply_wrapper=apply_wrapper)
         else:
-            cls._patch_info_collection.get(orig_func_name).set_patch_func(new_func, force_patch)
+            cls._patch_info_collection.get(orig_func_name).set_patch_func(new_func, force_patch, apply_wrapper=apply_wrapper)
 
     @classmethod
     def apply(cls):
@@ -138,24 +124,50 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
                                     MLATransformerConfig)
 
+        # Moe
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
+                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
+                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
+                                    torch.compile(mode='max-autotune-no-cudagraphs'),
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.unpermute',
+                                    torch.compile(mode='max-autotune-no-cudagraphs'),
+                                    apply_wrapper=True)
+
     def patch_core_extentions(self):
-        from ..core.extensions.transformer_engine import te_dot_product_attention_init
+        import transformer_engine as te
+
+        from ..core.extensions.transformer_engine import te_dot_product_attention_init, TEGroupedLinear
 
         MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
                                     te_dot_product_attention_init)
 
+        if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
+            TEGroupedLinear.__bases__ = (te.pytorch.BatchLinear,)
+
     def patch_tensor_parallel(self):
         from ..core import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
 
+        # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
                                     vocab_parallel_embedding_forward)
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.__init__',
                                     vocab_parallel_embedding_init)
 
+        # _VocabParallelCrossEntropy
+        MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
+                                    torch.compile(mode='max-autotune-no-cudagraphs'),
+                                    apply_wrapper=True)
+
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
         from ..training.initialize import _initialize_distributed
         from ..training.initialize import _compile_dependencies
+        from ..training.training import train
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer)
@@ -163,6 +175,10 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     _initialize_distributed)
         MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
                                     _compile_dependencies)
+
+        # traing.train
+        MegatronAdaptation.register('megatron.training.training.train',
+                                    train)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args
@@ -176,7 +192,22 @@ class LegacyAdaptation(MegatronAdaptationABC):
     """
 
     def execute(self):
-        pass
+        self.patch_legacy_models()
+
+    def patch_legacy_models(self):
+        from ..legacy.model.transformer import ParallelMLP, ParallelAttention
+
+        # ParallecMLP
+        MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
+                                    ParallelMLP.__init__)
+
+        MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.forward',
+                                    ParallelAttention.forward)
+
+        # rms_norm.RMSNorm
+        MegatronAdaptation.register('megatron.legacy.model.rms_norm.RMSNorm.forward',
+                                    torch.compile(mode="max-autotune-no-cudagraphs"),
+                                    apply_wrapper=True)
 
 
 MegatronAdaptation.execute()
