@@ -120,7 +120,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         # Transformer config
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
                                     TransformerConfig)
-        # Transformer config
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
                                     MLATransformerConfig)
 
