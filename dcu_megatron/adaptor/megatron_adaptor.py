@@ -91,6 +91,7 @@ class CoreAdaptation(MegatronAdaptationABC):
             gpt_model_init,
             shared_embedding_or_mtp_embedding_weight
         )
+        from ..training.utils import get_batch_on_this_tp_rank
 
         # Embedding
         MegatronAdaptation.register(
@@ -99,6 +100,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register(
             'megatron.core.models.common.embeddings.language_model_embedding.LanguageModelEmbedding.forward',
             language_model_embedding_forward)
+
+        MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward', gpt_model_forward)
@@ -151,6 +154,7 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_tensor_parallel(self):
         from ..core import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
+        from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -158,6 +162,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.__init__',
                                     vocab_parallel_embedding_init)
 
+        # VocabParallelCrossEntropy
+        MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy.VocabParallelCrossEntropy.calculate_predicted_logits',
+                                    VocabParallelCrossEntropy.calculate_predicted_logits)
         # _VocabParallelCrossEntropy
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
