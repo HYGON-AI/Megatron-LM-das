@@ -143,11 +143,11 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_extentions(self):
         import transformer_engine as te
 
-        from ..core.extensions.transformer_engine import te_dot_product_attention_init
+        from ..core.extensions.transformer_engine import TEDotProductAttentionPatch
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
         MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
-                                    te_dot_product_attention_init)
+                                    TEDotProductAttentionPatch.__init__)
 
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchLinear,)
