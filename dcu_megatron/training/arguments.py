@@ -510,8 +510,12 @@ def _add_training_args(parser):
     group.add_argument('--disable-tp-comm-split-rs', action='store_false',
                        help='Disables the Reduce-Scatter overlap with fprop GEMM.',
                        dest='tp_comm_split_rs')
+    group.add_argument('--use-hip-profiler', action='store_true',
+                       help='Use HIP PROFILER',
+                       dest='use_hip_profiler')
     group.add_argument('--profile-dir', type=str, default="./",
                        help='profile dir to save.')
+    
     return parser
 
 
