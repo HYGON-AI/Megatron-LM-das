@@ -68,6 +68,7 @@ def unpermute(
 
 ### 使用方式
 在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
+```
 examples
 ├── gpt3
 │   ├── hostfile_gpt_567B
@@ -90,4 +91,5 @@ examples
     ├── train_mixtral_8x22B_multinodes.sh
     ├── train_mixtral_8x7B_1nodes.sh
     └── train_mixtral_8x7B_multinodes.sh
+```
 
