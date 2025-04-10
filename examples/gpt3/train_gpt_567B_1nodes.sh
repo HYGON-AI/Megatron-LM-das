@@ -124,8 +124,8 @@ HIP_PROFIE_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 2
     --pipeline-model-parallel-size 1
-    --expert-model-parallel-size 8
-    --expert-tensor-parallel-size 1
+    --expert-model-parallel-size 4
+    --expert-tensor-parallel-size 2
     --use-distributed-optimizer
     --sequence-parallel
 )
