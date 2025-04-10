@@ -1,2 +1,1 @@
-from .tensor_parallel.layers import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
 from .transformer.transformer_block import transformer_block_init_wrapper, transformer_block_forward
