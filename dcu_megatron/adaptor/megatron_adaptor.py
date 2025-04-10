@@ -123,7 +123,7 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper, transformer_block_forward
-        from ..core.transformer.transformer_config import TransformerConfig, MLATransformerConfig
+        from ..core.transformer.transformer_config import TransformerConfigPatch, MLATransformerConfigPatch
         
         # Transformer block
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
@@ -133,9 +133,9 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # Transformer config
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
-                                    TransformerConfig)
+                                    TransformerConfigPatch)
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
-                                    MLATransformerConfig)
+                                    MLATransformerConfigPatch)
 
         # Moe
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
@@ -154,18 +154,19 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_extentions(self):
         import transformer_engine as te
 
-        from ..core.extensions.transformer_engine import te_dot_product_attention_init
+        from ..core.extensions.transformer_engine import TEDotProductAttentionPatch
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
         MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
-                                    te_dot_product_attention_init)
+                                    TEDotProductAttentionPatch.__init__)
 
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchLinear,)
 
     def patch_tensor_parallel(self):
-        from ..core import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
+        from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
+        from ..core.tensor_parallel import ColumnParallelLinearPatch, RowParallelLinearPatch, parallel_linear_init_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -185,6 +186,19 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
                                     staticmethod,
                                     apply_wrapper=True)
+
+        # flux
+        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
+                                    parallel_linear_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
+                                    ColumnParallelLinearPatch.forward)
+        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
+                                    parallel_linear_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
+                                    RowParallelLinearPatch.forward)
+
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
