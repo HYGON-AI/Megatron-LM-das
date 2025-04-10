@@ -80,6 +80,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_ft_package_args(parser)
     parser = _add_config_logger_args(parser)
     parser = _add_rerun_machine_args(parser)
+    parser = _add_flux_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:

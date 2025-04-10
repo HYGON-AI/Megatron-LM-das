@@ -1,5 +1,5 @@
 from .layers import (
-    parallel_linear_init_wrapper
+    parallel_linear_init_wrapper,
     ColumnParallelLinearPatch,
     RowParallelLinearPatch,
     vocab_parallel_embedding_forward,
