@@ -109,7 +109,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_gpt_1nodes_tp2-pp1-ep8-ep_tp1-cp1
+    --profile-dir torch_prof_gpt_1nodes_tp2-pp1-ep4-ep_tp2-cp1
     --use-pytorch-profiler
 )
 
