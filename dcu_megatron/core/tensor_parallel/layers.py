@@ -1,4 +1,7 @@
-from typing import Callable
+import os
+import warnings
+from functools import wraps
+from typing import Callable, List, Optional
 
 import flux
 import torch
@@ -20,19 +23,24 @@ from megatron.core.tensor_parallel.layers import (
     VocabParallelEmbedding,
 )
 from megatron.core.tensor_parallel.mappings import (
+    copy_to_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
 )
 from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.core.tensor_parallel.mappings import _reduce
+from megatron.core.tensor_parallel.layers import (
+    custom_fwd,
+    custom_bwd,
+    linear_with_frozen_weight,
+    linear_with_grad_accumulation_and_async_allreduce
+)
 
 _grad_accum_fusion_available = True
 try:
     import fused_weight_gradient_mlp_cuda
 except ImportError:
     _grad_accum_fusion_available = False
-
-from flux.cpp_mod import ReduceScatterOption
 
 
 def vocab_parallel_embedding_init(
@@ -351,7 +359,7 @@ class AGLinear(torch.autograd.Function):
         if ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
 
 
 def ag_linear(
@@ -652,7 +660,7 @@ class LinearRS(torch.autograd.Function):
             grad_weight = grad_output.t().matmul(total_input)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
 
 
 def linear_rs(
@@ -862,7 +870,6 @@ class ColumnParallelLinearPatch(torch.nn.Module):
             self._forward_impl = linear_with_frozen_weight
         else:
             self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
-
 
         allreduce_dgrad = False if self.explicit_expert_comm else self.allreduce_dgrad
 

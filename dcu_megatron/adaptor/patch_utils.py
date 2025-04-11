@@ -17,7 +17,7 @@ def dummy_function_wrapper(func_name):
 
 
 class Patch:
-    def __init__(self, orig_func_or_cls_name, new_func_or_cls, create_dummy, apply_wrapper=False):
+    def __init__(self, orig_func_or_cls_name, new_func_or_cls, create_dummy, apply_wrapper=False, remove_origin_wrappers=False):
         split_name = orig_func_or_cls_name.rsplit('.', 1)
         if len(split_name) == 1:
             self.orig_module_name, self.orig_func_or_cls_name = orig_func_or_cls_name, None
@@ -28,9 +28,14 @@ class Patch:
 
         self.patch_func_or_cls = None
         self.wrappers = []
-        if new_func_or_cls is None:
+        self.remove_origin_wrappers = False
+        if (
+            new_func_or_cls is None
+            and not remove_origin_wrappers
+        ):
             new_func_or_cls = dummy_function_wrapper(orig_func_or_cls_name)
-        self.set_patch_func(new_func_or_cls, apply_wrapper=apply_wrapper)
+
+        self.set_patch_func(new_func_or_cls, apply_wrapper=apply_wrapper, remove_origin_wrappers=remove_origin_wrappers)
         self.is_applied = False
         self.create_dummy = create_dummy
 
@@ -42,7 +47,33 @@ class Patch:
     def patch_func_id(self):
         return id(self.patch_func_or_cls)
 
-    def set_patch_func(self, new_func_or_cls, force_patch=False, apply_wrapper=False):
+    @staticmethod
+    def remove_wrappers(module, func_name, func):
+        while True:
+            if (
+                module.__dict__
+                and func_name in module.__dict__
+                and isinstance(module.__dict__[func_name], (staticmethod, classmethod))
+            ):
+                func = module.__dict__[func_name].__func__
+            if hasattr(func, '__wrapped__') and func.__wrapped__ is not None:
+                func = func.__wrapped__
+            elif hasattr(func, '__closure__') and func.__closure__ is not None:
+                func = func.__closure__[0].cell_contents
+            else:
+                return func
+
+        return func
+
+    def set_patch_func(self, new_func_or_cls=None, force_patch=False, apply_wrapper=False, remove_origin_wrappers=False):
+        if remove_origin_wrappers:
+            self.remove_origin_wrappers = True
+        else:
+            assert new_func_or_cls is not None
+
+        if new_func_or_cls is None:
+            return
+
         if (
             apply_wrapper
             or (hasattr(new_func_or_cls, '__name__') and new_func_or_cls.__name__.endswith(('wrapper', 'decorator')))
@@ -64,6 +95,11 @@ class Patch:
         if self.patch_func_or_cls is not None:
             final_patch_func_or_cls = self.patch_func_or_cls
 
+        # remove original wrappers
+        if self.remove_origin_wrappers:
+            final_patch_func_or_cls = self.remove_wrappers(self.orig_module, self.orig_func_or_cls_name, final_patch_func_or_cls)
+
+        # add new wrappers
         for wrapper in self.wrappers:
             final_patch_func_or_cls = wrapper(final_patch_func_or_cls)
 
@@ -73,6 +109,7 @@ class Patch:
             if self.orig_func_or_cls_name is not None and hasattr(value, self.orig_func_or_cls_name) \
                     and id(getattr(value, self.orig_func_or_cls_name)) == self.orig_func_or_cls_id:
                 setattr(value, self.orig_func_or_cls_name, final_patch_func_or_cls)
+
         self.is_applied = True
 
     @staticmethod

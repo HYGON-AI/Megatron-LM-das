@@ -24,15 +24,26 @@ class MegatronAdaptation:
         # MegatronAdaptation.post_execute()
 
     @classmethod
-    def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False):
+    def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False, remove_origin_wrappers=False):
         """
         Register adaptations into collection.
         """
         if orig_func_name not in cls._patch_info_collection:
             from .patch_utils import Patch
-            cls._patch_info_collection[orig_func_name] = Patch(orig_func_name, new_func, create_dummy, apply_wrapper=apply_wrapper)
+            cls._patch_info_collection[orig_func_name] = Patch(
+                orig_func_name,
+                new_func,
+                create_dummy,
+                apply_wrapper=apply_wrapper,
+                remove_origin_wrappers=remove_origin_wrappers
+            )
         else:
-            cls._patch_info_collection.get(orig_func_name).set_patch_func(new_func, force_patch, apply_wrapper=apply_wrapper)
+            cls._patch_info_collection.get(orig_func_name).set_patch_func(
+                new_func,
+                force_patch,
+                apply_wrapper=apply_wrapper,
+                remove_origin_wrappers=remove_origin_wrappers
+            )
 
     @classmethod
     def apply(cls):
@@ -168,7 +179,12 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     VocabParallelCrossEntropy.calculate_predicted_logits)
         # _VocabParallelCrossEntropy
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
+                                    remove_origin_wrappers=True)        
+        MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
+                                    staticmethod,
                                     apply_wrapper=True)
 
         # flux

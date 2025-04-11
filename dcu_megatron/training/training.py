@@ -182,6 +182,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             #on_trace_ready=torch.profiler.tensorboard_trace_handler('./torch_prof_data'))
             on_trace_ready=trace_handler)
         prof.start()
+    elif args.profile and torch.distributed.get_rank() in args.profile_ranks and args.use_hip_profiler:
+        import ctypes
+        roctracer = ctypes.cdll.LoadLibrary("/opt/dtk/roctracer/lib/libroctracer64.so")
 
     start_iteration = iteration
     # Disable forward pre-hook to start training to ensure that errors in checkpoint loading
@@ -206,6 +209,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             if args.use_pytorch_profiler:
                 prof.step()
+            elif args.use_hip_profiler:
+                if iteration == args.profile_step_start: roctracer.roctracer_start()
+                if iteration == args.profile_step_end: roctracer.roctracer_stop()
             elif iteration == args.profile_step_start:
                 torch.cuda.cudart().cudaProfilerStart()
                 torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()

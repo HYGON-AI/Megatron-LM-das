@@ -1,7 +1,10 @@
 # Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
 """Pretrain GPT."""
 
-import os
+import os, sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+megatron_path = os.path.join(current_dir, "Megatron-LM")
+sys.path.append(megatron_path)
 import torch
 from functools import partial
 from contextlib import nullcontext

@@ -67,9 +67,29 @@ def unpermute(
 ```
 
 ### 使用方式
-在使用时，需要安装megatron，或者将megatron放到dcu_megatron同一级目录下
-project/   
-├── dcu_megatron  
-├── megatron   
-└── pretrain_gpt.py
+在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
+```
+examples
+├── gpt3
+│   ├── hostfile_gpt_567B
+│   ├── README.md
+│   ├── run_gpt_567B_1nodes.sh
+│   ├── run_gpt_567B_multinodes.sh
+│   ├── topo-input.xml
+│   ├── train_gpt_567B_1nodes.sh
+│   └── train_gpt_567B_multinodes.sh
+└── mixtral
+    ├── hostfile_mixtral_8x22B
+    ├── hostfile_mixtral_8x7B
+    ├── README.md
+    ├── run_mixtral_8x22B_1nodes.sh
+    ├── run_mixtral_8x22B_multinodes.sh
+    ├── run_mixtral_8x7B_1nodes.sh
+    ├── run_mixtral_8x7B_multinodes.sh
+    ├── topo-input.xml
+    ├── train_mixtral_8x22B_1nodes.sh
+    ├── train_mixtral_8x22B_multinodes.sh
+    ├── train_mixtral_8x7B_1nodes.sh
+    └── train_mixtral_8x7B_multinodes.sh
+```
 
