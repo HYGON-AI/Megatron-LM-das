@@ -199,4 +199,3 @@ def transformer_block_forward(
         )
 
     return hidden_states
-

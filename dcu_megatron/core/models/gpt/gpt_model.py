@@ -22,154 +22,48 @@ from dcu_megatron.core.transformer.mtp.multi_token_predictor import MultiTokenPr
 from dcu_megatron.core.transformer.transformer_config import TransformerConfig
 
 
-def gpt_model_init(
-    self,
-    config: TransformerConfig,
-    transformer_layer_spec: ModuleSpec,
-    vocab_size: int,
-    max_sequence_length: int,
-    pre_process: bool = True,
-    post_process: bool = True,
-    fp16_lm_cross_entropy: bool = False,
-    parallel_output: bool = True,
-    share_embeddings_and_output_weights: bool = False,
-    position_embedding_type: Literal['learned_absolute', 'rope', 'none'] = 'learned_absolute',
-    rotary_percent: float = 1.0,
-    rotary_base: int = 10000,
-    rope_scaling: bool = False,
-    rope_scaling_factor: float = 8.0,
-    scatter_embedding_sequence_parallel: bool = True,
-    seq_len_interpolation_factor: Optional[float] = None,
-    mtp_spec: ModuleSpec = None
-) -> None:
-    super(GPTModel, self).__init__(config=config)
+def gpt_model_init_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        fn(self, *args, **kwargs)
 
-    if has_config_logger_enabled(config):
-        log_config_to_disk(config, locals(), prefix=type(self).__name__)
-
-    self.transformer_layer_spec: ModuleSpec = transformer_layer_spec
-    self.vocab_size = vocab_size
-    self.max_sequence_length = max_sequence_length
-    self.pre_process = pre_process
-    self.post_process = post_process
-    self.fp16_lm_cross_entropy = fp16_lm_cross_entropy
-    self.parallel_output = parallel_output
-    self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
-    self.position_embedding_type = position_embedding_type
-
-    # megatron core pipelining currently depends on model type
-    # TODO: remove this dependency ?
-    self.model_type = ModelType.encoder_or_decoder
-
-    # These 4 attributes are needed for TensorRT-LLM export.
-    self.max_position_embeddings = max_sequence_length
-    self.rotary_percent = rotary_percent
-    self.rotary_base = rotary_base
-    self.rotary_scaling = rope_scaling
-
-    if self.pre_process:
-        self.embedding = LanguageModelEmbedding(
-            config=self.config,
-            vocab_size=self.vocab_size,
-            max_sequence_length=self.max_sequence_length,
-            position_embedding_type=position_embedding_type,
-            scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
-        )
-
-    if self.position_embedding_type == 'rope' and not self.config.multi_latent_attention:
-        self.rotary_pos_emb = RotaryEmbedding(
-            kv_channels=self.config.kv_channels,
-            rotary_percent=rotary_percent,
-            rotary_interleaved=self.config.rotary_interleaved,
-            seq_len_interpolation_factor=seq_len_interpolation_factor,
-            rotary_base=rotary_base,
-            rope_scaling=rope_scaling,
-            rope_scaling_factor=rope_scaling_factor,
-            use_cpu_initialization=self.config.use_cpu_initialization,
-        )
-
-    # Cache for RoPE tensors which do not change between iterations.
-    self.rotary_pos_emb_cache = {}
-    # Transformer.
-    self.decoder = TransformerBlock(
-        config=self.config,
-        spec=transformer_layer_spec,
-        pre_process=self.pre_process,
-        post_process=self.post_process
-    )
-
-    # Output
-    if post_process:
-        if self.config.defer_embedding_wgrad_compute:
-            # The embedding activation buffer preserves a reference to the input activations
-            # of the final embedding projection layer GEMM. It will hold the activations for
-            # all the micro-batches of a global batch for the last pipeline stage. Once we are
-            # done with all the back props for all the microbatches for the last pipeline stage,
-            # it will be in the pipeline flush stage. During this pipeline flush we use the
-            # input activations stored in embedding activation buffer and gradient outputs
-            # stored in gradient buffer to calculate the weight gradients for the embedding
-            # final linear layer.
-            self.embedding_activation_buffer = []
-            self.grad_output_buffer = []
-        else:
-            self.embedding_activation_buffer = None
-            self.grad_output_buffer = None
-
-        self.output_layer = tensor_parallel.ColumnParallelLinear(
-            config.hidden_size,
-            self.vocab_size,
-            config=config,
-            init_method=config.init_method,
-            bias=False,
-            skip_bias_add=False,
-            gather_output=not self.parallel_output,
-            skip_weight_param_allocation=self.pre_process
-            and self.share_embeddings_and_output_weights,
-            embedding_activation_buffer=self.embedding_activation_buffer,
-            grad_output_buffer=self.grad_output_buffer,
-        )
-
-    # add mtp
-    self.mtp_spec: ModuleSpec = mtp_spec
-    self.num_nextn_predict_layers = self.config.num_nextn_predict_layers
-    self.share_mtp_embedding_and_output_weight = self.config.share_mtp_embedding_and_output_weight
-    self.recompute_mtp_norm = self.config.recompute_mtp_norm
-    self.recompute_mtp_layer = self.config.recompute_mtp_layer
-    self.mtp_loss_scale = self.config.mtp_loss_scale
-    if self.post_process and self.training and self.num_nextn_predict_layers:
-        self.mtp_layers = torch.nn.ModuleList(
-            [
-                MultiTokenPredictor(
-                    config,
-                    self.mtp_spec.submodules,
-                    vocab_size=self.vocab_size,
-                    max_sequence_length=self.max_sequence_length,
-                    layer_number=i,
-                    pre_process=self.pre_process,
-                    fp16_lm_cross_entropy=self.fp16_lm_cross_entropy,
-                    parallel_output=self.parallel_output,
-                    position_embedding_type=self.position_embedding_type,
-                    rotary_percent=self.rotary_percent,
-                    seq_len_interpolation_factor=seq_len_interpolation_factor,
-                    share_mtp_embedding_and_output_weight=self.share_mtp_embedding_and_output_weight,
-                    recompute_mtp_norm=self.recompute_mtp_norm,
-                    recompute_mtp_layer=self.recompute_mtp_layer,
-                    add_output_layer_bias=False
+        # add mtp
+        self.num_nextn_predict_layers = self.config.num_nextn_predict_layers
+        if self.num_nextn_predict_layers:
+            assert hasattr(self.config, "mtp_spec")
+            self.mtp_spec: ModuleSpec = self.config.mtp_spec
+            self.share_mtp_embedding_and_output_weight = self.config.share_mtp_embedding_and_output_weight
+            self.recompute_mtp_norm = self.config.recompute_mtp_norm
+            self.recompute_mtp_layer = self.config.recompute_mtp_layer
+            self.mtp_loss_scale = self.config.mtp_loss_scale
+            if self.post_process and self.training:
+                self.mtp_layers = torch.nn.ModuleList(
+                    [
+                        MultiTokenPredictor(
+                            config,
+                            self.mtp_spec.submodules,
+                            vocab_size=self.vocab_size,
+                            max_sequence_length=self.max_sequence_length,
+                            layer_number=i,
+                            pre_process=self.pre_process,
+                            fp16_lm_cross_entropy=self.fp16_lm_cross_entropy,
+                            parallel_output=self.parallel_output,
+                            position_embedding_type=self.position_embedding_type,
+                            rotary_percent=self.rotary_percent,
+                            seq_len_interpolation_factor=seq_len_interpolation_factor,
+                            share_mtp_embedding_and_output_weight=self.share_mtp_embedding_and_output_weight,
+                            recompute_mtp_norm=self.recompute_mtp_norm,
+                            recompute_mtp_layer=self.recompute_mtp_layer,
+                            add_output_layer_bias=False
+                        )
+                        for i in range(self.num_nextn_predict_layers)
+                    ]
                 )
-                for i in range(self.num_nextn_predict_layers)
-            ]
-        )
 
-    if self.pre_process or self.post_process:
-        self.setup_embeddings_and_output_layer()
+            if self.pre_process or self.post_process:
+                setup_mtp_embeddings(self)
 
-    if has_config_logger_enabled(self.config):
-        log_config_to_disk(
-            self.config, self.state_dict(), prefix=f'{type(self).__name__}_init_ckpt'
-        )
-
-    if self.num_nextn_predict_layers and (self.pre_process or self.post_process):
-        setup_mtp_embeddings(self)
+    return wrapper
 
 
 def shared_embedding_or_mtp_embedding_weight(self) -> Tensor:

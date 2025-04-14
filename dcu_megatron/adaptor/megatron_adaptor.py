@@ -116,7 +116,9 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward', gpt_model_forward)
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__', gpt_model_init)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
+                                    gpt_model_init_wrapper,
+                                    apply_wrapper=True)
 
         from megatron.core.models.gpt.gpt_model import GPTModel
         setattr(GPTModel, 'shared_embedding_or_mtp_embedding_weight', shared_embedding_or_mtp_embedding_weight)
@@ -240,6 +242,7 @@ class LegacyAdaptation(MegatronAdaptationABC):
 
     def patch_legacy_models(self):
         from ..legacy.model.transformer import ParallelMLP, ParallelAttention
+        from ..legacy.model.utils import get_norm
 
         # ParallecMLP
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
@@ -252,6 +255,8 @@ class LegacyAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.legacy.model.rms_norm.RMSNorm.forward',
                                     torch.compile(mode="max-autotune-no-cudagraphs"),
                                     apply_wrapper=True)
+        MegatronAdaptation.register('megatron.legacy.model.utils.get_norm',
+                                    get_norm)
 
 
 MegatronAdaptation.execute()
