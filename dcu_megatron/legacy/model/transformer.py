@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from megatron.training import get_args
 from megatron.core import tensor_parallel
 from megatron.legacy.model.module import MegatronModule
+from megatron.legacy.model.transformer import ParallelMLP
 from megatron.legacy.model.utils import (
     erf_gelu,
     openai_gelu,
