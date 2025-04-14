@@ -241,15 +241,15 @@ class LegacyAdaptation(MegatronAdaptationABC):
         self.patch_legacy_models()
 
     def patch_legacy_models(self):
-        from ..legacy.model.transformer import ParallelMLP, ParallelAttention
+        from ..legacy.model.transformer import ParallelMLPPatch, ParallelAttentionPatch
         from ..legacy.model.utils import get_norm
 
         # ParallecMLP
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
-                                    ParallelMLP.__init__)
+                                    ParallelMLPPatch.__init__)
 
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.forward',
-                                    ParallelAttention.forward)
+                                    ParallelAttentionPatch.forward)
 
         # rms_norm.RMSNorm
         MegatronAdaptation.register('megatron.legacy.model.rms_norm.RMSNorm.forward',

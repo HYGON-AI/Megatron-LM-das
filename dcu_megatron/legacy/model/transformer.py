@@ -10,7 +10,7 @@ from megatron.legacy.model.utils import (
 )
 
 
-class ParallelMLP(MegatronModule):
+class ParallelMLPPatch(MegatronModule):
     """MLP.
 
     MLP will take the input with h hidden state, project it to 4*h
@@ -74,7 +74,7 @@ class ParallelMLP(MegatronModule):
         )
 
 
-class ParallelAttention(MegatronModule):
+class ParallelAttentionPatch(MegatronModule):
     """Parallel self-attention layer abstract class.
 
     Self-attention layer takes input with size [s, b, h]
