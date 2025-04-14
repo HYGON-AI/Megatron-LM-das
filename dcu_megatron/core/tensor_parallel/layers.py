@@ -581,7 +581,7 @@ class LinearRS(torch.autograd.Function):
                 wgrad_compute = False
 
         if wgrad:
-            if ctx.sequence_parallel
+            if ctx.sequence_parallel:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * world_size
 
