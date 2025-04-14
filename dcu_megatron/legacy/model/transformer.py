@@ -3,6 +3,8 @@ import torch.nn.functional as F
 
 from megatron.training import get_args
 from megatron.core import tensor_parallel
+from megatron.legacy.model.enums import AttnType
+from megatron.core.models.common.embeddings import apply_rotary_pos_emb
 from megatron.legacy.model.module import MegatronModule
 from megatron.legacy.model.transformer import ParallelMLP
 from megatron.legacy.model.utils import (
@@ -10,6 +12,10 @@ from megatron.legacy.model.utils import (
     openai_gelu,
 )
 
+try:
+    from einops import rearrange
+except ImportError:
+    rearrange = None
 
 class ParallelMLPPatch(MegatronModule):
     """MLP.

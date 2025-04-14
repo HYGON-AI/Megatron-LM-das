@@ -17,7 +17,6 @@ def get_norm(config):
             raise NotImplementedError('RMSNorm does not currently support the layernorm_1p formulation.')
 
         return LightopRMSNorm(dim=config.hidden_size,
-                              eps=config.layernorm_epsilon,
-                              sequence_parallel=config.sequence_parallel)
+                              eps=config.layernorm_epsilon)
     else:
         raise Exception(f"unsupported norm type '{args.normalization}'.")

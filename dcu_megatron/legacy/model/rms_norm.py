@@ -20,23 +20,23 @@ class _LightopRMSNorm(torch.autograd.Function):
     # @custom_fwd
     def forward(ctx,
                 inp: torch.Tensor,
-                ln_out: torch.Tensor,
                 weight: torch.Tensor,
+                ln_out: torch.Tensor,
                 eps: float,
                 is_grad_enabled):
         output = lightop.rmsnorm_forward(inp, weight, ln_out, eps, training=True)# output = (output, weight)
         rsigma = output[1]
         if is_grad_enabled:
-            ctx.save_for_backward(inp, weight, ln_out, rsigma)
+            ctx.save_for_backward(inp, weight, rsigma)
         return output[0]
 
     @staticmethod
     # @custom_bwd
     def backward(ctx, grad_output):
-        inp, weight, ln_out, rsigma = ctx.saved_tensors
+        inp, weight, rsigma = ctx.saved_tensors
 
         dgrad, dgamma = lightop.rmsnorm_backward(grad_output, inp, rsigma, weight)
-        return dgrad, None, dgamma, None, None, None, None, None, None
+        return dgrad, dgamma, None, None, None
 
 
 class LightopRMSNorm(torch.nn.Module):
@@ -62,6 +62,6 @@ class LightopRMSNorm(torch.nn.Module):
             fwd_fn = _LightopRMSNorm.forward
             args = [None]
         ln_out = torch.empty_like(inp, dtype=inp.dtype, memory_format=torch.contiguous_format)
-        args += (inp, ln_out, self.weight, self.eps, torch.is_grad_enabled())
+        args += (inp, self.weight, ln_out, self.eps, torch.is_grad_enabled())
         out = fwd_fn(*args)
         return out
