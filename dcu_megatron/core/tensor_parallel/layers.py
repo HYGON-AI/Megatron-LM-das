@@ -3,7 +3,12 @@ import warnings
 from functools import wraps
 from typing import Callable, List, Optional
 
-import flux
+try:
+    import flux
+except ImportError:
+    from megatron.training import print_rank_0
+    print_rank_0(f"flux is NOT installed")
+
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
