@@ -99,7 +99,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         )
         from ..core.models.gpt.gpt_model import (
             gpt_model_forward,
-            gpt_model_init,
+            gpt_model_init_wrapper,
             shared_embedding_or_mtp_embedding_weight
         )
         from ..training.utils import get_batch_on_this_tp_rank
