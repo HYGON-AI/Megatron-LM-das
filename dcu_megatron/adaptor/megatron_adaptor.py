@@ -143,9 +143,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
                                     torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
-                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
-                                    apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
+        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
+        #                             apply_wrapper=True)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
@@ -197,17 +197,16 @@ class CoreAdaptation(MegatronAdaptationABC):
             HAS_FLUX = False
 
         if HAS_FLUX:
-            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
-                                        parallel_linear_init_wrapper,
-                                        apply_wrapper=True)
-            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
-                                        ColumnParallelLinearPatch.forward)
+            # MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
+            #                             parallel_linear_init_wrapper,
+            #                             apply_wrapper=True)
+            # MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
+            #                             ColumnParallelLinearPatch.forward)
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
                                         parallel_linear_init_wrapper,
                                         apply_wrapper=True)
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
                                         RowParallelLinearPatch.forward)
-
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
