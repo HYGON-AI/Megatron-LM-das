@@ -168,7 +168,12 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
-        from ..core.tensor_parallel import ColumnParallelLinearPatch, RowParallelLinearPatch, parallel_linear_init_wrapper
+        from ..core.tensor_parallel import (
+            ColumnParallelLinearPatch,
+            RowParallelLinearPatch,
+            column_parallel_linear_init_wrapper,
+            row_parallel_linear_init_wrapper
+        )
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -198,12 +203,12 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         if HAS_FLUX:
             # MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
-            #                             parallel_linear_init_wrapper,
+            #                             column_parallel_linear_init_wrapper,
             #                             apply_wrapper=True)
             # MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
             #                             ColumnParallelLinearPatch.forward)
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
-                                        parallel_linear_init_wrapper,
+                                        row_parallel_linear_init_wrapper,
                                         apply_wrapper=True)
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
                                         RowParallelLinearPatch.forward)
