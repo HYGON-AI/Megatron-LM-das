@@ -1,0 +1,20 @@
+trl
+transformers >= 4.43.0
+packaging
+six
+regex
+pyyaml
+sentencepiece
+pybind11
+blobfile
+flux
+
+# ==== test ====
+nltk
+pytest
+requests 
+wrapt
+tensorboard
+tensorboardX
+scipy
+psutil
