@@ -1,6 +1,6 @@
 from megatron.training import get_args
 from megatron.legacy.model import LayerNorm
-from .rms_norm import LightopRMSNorm
+from .rms_norm import RMSNorm, LightopRMSNorm
 
 
 def get_norm(config):
@@ -15,8 +15,12 @@ def get_norm(config):
     elif args.normalization == "RMSNorm":
         if args.apply_layernorm_1p:
             raise NotImplementedError('RMSNorm does not currently support the layernorm_1p formulation.')
-
+    
+        return RMSNorm(dim=config.hidden_size,
+                       eps=config.layernorm_epsilon,
+                       sequence_parallel=config.sequence_parallel)
+    elif args.normalization == "LightopRMSNorm":
         return LightopRMSNorm(dim=config.hidden_size,
-                              eps=config.layernorm_epsilon)
+                       eps=config.layernorm_epsilon)
     else:
         raise Exception(f"unsupported norm type '{args.normalization}'.")

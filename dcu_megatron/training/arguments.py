@@ -51,6 +51,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
     # Standard arguments.
     parser = _add_network_size_args(parser)
+    parser = _add_extra_network_size_args(parser)
     parser = _add_regularization_args(parser)
     parser = _add_training_args(parser)
     parser = _add_extra_training_args(parser)
@@ -104,6 +105,18 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     #args.world_size = int(os.getenv("WORLD_SIZE", '1'))
 
     return args
+
+
+def _add_extra_network_size_args(parser):
+    # 删除原参数
+    remove_original_params(parser, ["normalization"])
+
+    # 重定义参数
+    group = parser.add_argument_group(title='extra network size args')
+    group.add_argument('--normalization', default='LayerNorm',
+                       choices=['LayerNorm', 'RMSNorm', 'LightopRMSNorm'],
+                       help='Which normalization technique to use.')
+    return parser
 
 
 def _add_extra_distributed_args(parser):
