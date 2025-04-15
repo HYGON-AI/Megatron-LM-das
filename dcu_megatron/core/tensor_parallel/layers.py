@@ -546,7 +546,9 @@ class LinearRS(torch.autograd.Function):
                 grad_output_buffer.append(grad_output)
                 wgrad_compute = False
 
-        if wgrad:
+        world_size = get_tensor_model_parallel_world_size()
+
+        if wgrad_compute:
             if ctx.sequence_parallel:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * world_size
@@ -565,12 +567,10 @@ class LinearRS(torch.autograd.Function):
                 total_grad_output = grad_output
 
         if ctx.sequence_parallel:
-            world_size = get_tensor_model_parallel_world_size()
-
             sequence_len, batch_size, output_hidden_size = grad_output.size()
             input_hidden_size = weight.size(-1)
 
-            if bw_gemm_rs_op is None:
+            if bw_ag_gemm_op is None:
                 bw_ag_gemm_op = flux.AGKernel(
                     get_tensor_model_parallel_group(),
                     1, #world_size // torch.cuda.device_count(),
@@ -1013,7 +1013,7 @@ class RowParallelLinearPatch(torch.nn.Module):
             assert HAS_FLUX, "flux is NOT installed"
 
             sequence_len, batch_size, input_hidden_size = input_parallel.size()
-            output_hidden_size = weight.size(0)
+            output_hidden_size = self.weight.size(0)
             world_size = get_tensor_model_parallel_world_size()
             if self.sequence_parallel:
                 current_flux_params = (

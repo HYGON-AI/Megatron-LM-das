@@ -207,11 +207,11 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         apply_wrapper=True)
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
                                         ColumnParallelLinearPatch.forward)
-            # MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
-            #                             row_parallel_linear_init_wrapper,
-            #                             apply_wrapper=True)
-            # MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
-            #                             RowParallelLinearPatch.forward)
+            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
+                                        row_parallel_linear_init_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
+                                        RowParallelLinearPatch.forward)
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
