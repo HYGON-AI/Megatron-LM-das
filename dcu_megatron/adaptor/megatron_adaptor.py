@@ -5,6 +5,8 @@ import types
 import argparse
 import torch
 
+from megatron.training import get_args
+
 
 class MegatronAdaptation:
     """
@@ -168,12 +170,6 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
-        from ..core.tensor_parallel import (
-            ColumnParallelLinearPatch,
-            RowParallelLinearPatch,
-            column_parallel_linear_init_wrapper,
-            row_parallel_linear_init_wrapper
-        )
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -195,13 +191,18 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
 
         # flux
-        try:
+        args = get_args()
+        if args.use_flux:
             import flux
-            HAS_FLUX = True
-        except ImportError:
-            HAS_FLUX = False
 
-        if HAS_FLUX:
+            from ..core.tensor_parallel import (
+                ColumnParallelLinearPatch,
+                RowParallelLinearPatch,
+                column_parallel_linear_init_wrapper,
+                row_parallel_linear_init_wrapper
+            )
+            from ..core.models.gpt.gpt_layer_specs import get_gpt_layer_with_flux_spec
+
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
                                         column_parallel_linear_init_wrapper,
                                         apply_wrapper=True)
@@ -212,6 +213,8 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         apply_wrapper=True)
             MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
                                         RowParallelLinearPatch.forward)
+            MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_local_spec",
+                                        get_gpt_layer_with_flux_spec)
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
