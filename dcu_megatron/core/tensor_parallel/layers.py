@@ -284,7 +284,7 @@ class AGLinear(torch.autograd.Function):
             )
 
             torch.cuda.current_stream().synchronize()
-            grad_input = grad_input.view(sequence_len // get_tensor_model_parallel_world_size(), batch_size, -1)
+            grad_input = grad_input.view(sequence_len // world_size, batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
 

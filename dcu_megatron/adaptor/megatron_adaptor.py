@@ -5,8 +5,6 @@ import types
 import argparse
 import torch
 
-from megatron.training import get_args
-
 
 class MegatronAdaptation:
     """
@@ -191,8 +189,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
 
         # flux
-        args = get_args()
-        if args.use_flux:
+        if os.getenv("USE_FLUX_OVERLAP", 0):
             import flux
 
             from ..core.tensor_parallel import (
