@@ -1012,7 +1012,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         return output, output_bias
 
 
-class FluxRowParallelLinear(torch.nn.Module):
+class FluxRowParallelLinear(RowParallelLinear):
     """Linear layer with row parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along its first dimension and X
@@ -1064,7 +1064,7 @@ class FluxRowParallelLinear(torch.nn.Module):
         tp_comm_buffer_name: str = None,  # Not used
     ):
 
-        super(FluxRowParallelLinear, self)__init__(
+        super(FluxRowParallelLinear, self).__init__(
             input_size=input_size,
             output_size=output_size,
             config=config,
@@ -1161,7 +1161,7 @@ class FluxRowParallelLinear(torch.nn.Module):
             bias=self.bias if not self.skip_bias_add and self.sequence_parallel else None,
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             allreduce_dgrad=False,
-            sequence_parallel=False if explicit_expert_comm else self.sequence_parallel,
+            sequence_parallel=False if self.explicit_expert_comm else self.sequence_parallel,
             grad_output_buffer=None,
             transpose_weight=self.flux_transpose_weight,
             fw_gemm_rs_op=self.fw_gemm_rs_op,

@@ -30,7 +30,7 @@ except ImportError:
     LNImpl = WrappedTorchNorm
 
 
-def get_mtp_spec(transformer_layer, use_te=False, use_flux=False):
+def get_mtp_spec(transformer_layer, use_te=False):
     """
     Multi Token Predication Layer Specification.
     """
@@ -39,11 +39,11 @@ def get_mtp_spec(transformer_layer, use_te=False, use_flux=False):
         module=MultiTokenPredictor,
         submodules=MultiTokenPredicationSubmodules(
             embedding=None,
-            enorm=TENorm if use_te or use_flux else LNImpl,
-            hnorm=TENorm if use_te or use_flux else LNImpl,
+            enorm=TENorm if use_te else LNImpl,
+            hnorm=TENorm if use_te else LNImpl,
             eh_proj=TEColumnParallelLinear if use_te else ColumnParallelLinear,
             transformer_layer=transformer_layer,
-            final_layernorm=TENorm if use_te or use_flux else LNImpl,
+            final_layernorm=TENorm if use_te else LNImpl,
             output_layer=None,
         )
     )
