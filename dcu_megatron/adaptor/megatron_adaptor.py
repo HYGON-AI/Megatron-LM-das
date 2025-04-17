@@ -190,27 +190,17 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # flux
         if os.getenv("USE_FLUX_OVERLAP", 0):
-            import flux
-
             from ..core.tensor_parallel import (
-                ColumnParallelLinearPatch,
-                RowParallelLinearPatch,
-                column_parallel_linear_init_wrapper,
-                row_parallel_linear_init_wrapper
+                FluxColumnParallelLinear,
+                FluxRowParallelLinear
             )
             from ..core.models.gpt.gpt_layer_specs import get_gpt_layer_with_flux_spec
 
-            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
-                                        column_parallel_linear_init_wrapper,
-                                        apply_wrapper=True)
-            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
-                                        ColumnParallelLinearPatch.forward)
-            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
-                                        row_parallel_linear_init_wrapper,
-                                        apply_wrapper=True)
-            MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
-                                        RowParallelLinearPatch.forward)
-            MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_local_spec",
+            MegatronAdaptation.register("megatron.core.extensions.transformer_engine.TEColumnParallelLinear",
+                                        FluxColumnParallelLinear)
+            MegatronAdaptation.register("megatron.core.extensions.transformer_engine.TERowParallelLinear",
+                                        FluxRowParallelLinear)
+            MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
                                         get_gpt_layer_with_flux_spec)
 
     def patch_training(self):
