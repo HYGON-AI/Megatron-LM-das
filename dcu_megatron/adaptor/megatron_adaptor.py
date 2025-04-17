@@ -124,14 +124,12 @@ class CoreAdaptation(MegatronAdaptationABC):
         setattr(GPTModel, 'shared_embedding_or_mtp_embedding_weight', shared_embedding_or_mtp_embedding_weight)
 
     def patch_core_transformers(self):
-        from ..core import transformer_block_init_wrapper, transformer_block_forward
+        from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import TransformerConfigPatch, MLATransformerConfigPatch
         
         # Transformer block
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
                                     transformer_block_init_wrapper)
-        MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.forward',
-                                    transformer_block_forward)
 
         # Transformer config
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',

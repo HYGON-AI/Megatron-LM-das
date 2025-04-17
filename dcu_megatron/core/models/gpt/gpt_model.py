@@ -318,10 +318,10 @@ def gpt_model_forward(
    
     if (
         self.num_nextn_predict_layers
-        and getattr(self.decoder, "final_layernorm", None) is not None
+        and getattr(self.decoder, "main_final_layernorm", None) is not None
     ):
         # move block main model final norms here
-        hidden_states = self.decoder.final_layernorm(hidden_states)
+        hidden_states = self.decoder.main_final_layernorm(hidden_states)
 
     logits, _ = self.output_layer(
         hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
