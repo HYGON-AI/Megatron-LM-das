@@ -61,7 +61,7 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         Union[GPTModel, megatron.legacy.model.GPTModel]: The returned model
     """
     args = get_args()
-    use_te = args.transformer_impl == "transformer_engine" or bool(os.getenv("USE_FLUX_OVERLAP", 0))
+    use_te = args.transformer_impl == "transformer_engine" or bool(int(os.getenv("USE_FLUX_OVERLAP", "0")))
 
     if args.record_memory_history:
         torch.cuda.memory._record_memory_history(True,

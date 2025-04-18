@@ -182,9 +182,7 @@ def _add_mtp_args(parser):
 
 
 def _add_flux_args(parser):
-    group = parser.add_argument_group(title='multi token prediction')
-    group.add_argument('--use-flux', action='store_true', default=False,
-                       help='If set, flux will be used in ColumnParallelLinear and RowParallelLinear')
+    group = parser.add_argument_group(title='flux args')
     group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                        help='Whether to transpose weight when using flux kernel')
     return parser

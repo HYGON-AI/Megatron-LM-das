@@ -187,7 +187,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
 
         # flux
-        if os.getenv("USE_FLUX_OVERLAP", 0):
+        if int(os.getenv("USE_FLUX_OVERLAP", "0")):
             from ..core.tensor_parallel import (
                 FluxColumnParallelLinear,
                 FluxRowParallelLinear

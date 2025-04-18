@@ -16,6 +16,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
+from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 
 from dcu_megatron.core.utils import tensor_slide
 from dcu_megatron.core.transformer.mtp.multi_token_predictor import MultiTokenPredictor
@@ -40,7 +41,7 @@ def gpt_model_init_wrapper(fn):
                 self.mtp_layers = torch.nn.ModuleList(
                     [
                         MultiTokenPredictor(
-                            config,
+                            self.config,
                             self.mtp_spec.submodules,
                             vocab_size=self.vocab_size,
                             max_sequence_length=self.max_sequence_length,

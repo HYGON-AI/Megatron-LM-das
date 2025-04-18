@@ -11,6 +11,7 @@ from megatron.core.models.common.embeddings.language_model_embedding import Lang
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross_entropy
 
 from megatron.core.transformer import ModuleSpec, TransformerConfig, build_module
