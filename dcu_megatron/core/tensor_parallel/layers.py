@@ -230,7 +230,7 @@ class AGLinear(torch.autograd.Function):
                 output_scale=None,
                 fast_accum=False
             )
-            torch.distributed.barrier()
+
             torch.cuda.current_stream().synchronize()
             output = output.view(sequence_len * world_size, batch_size, -1)
         else:
@@ -1172,7 +1172,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         output_parallel = self._forward_impl(
             input=input_parallel,
             weight=self.weight,
-            bias=self.bias if not self.skip_bias_add and self.sequence_parallel else None,
+            bias=None,
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             allreduce_dgrad=False,
             sequence_parallel=False if self.explicit_expert_comm else self.sequence_parallel,
@@ -1192,8 +1192,7 @@ class FluxRowParallelLinear(RowParallelLinear):
 
         if not self.skip_bias_add:
             output_bias = None
-            if not self.sequence_parallel:
-                output = (output_ + self.bias) if self.bias is not None else output_
+            output = (output_ + self.bias) if self.bias is not None else output_
         else:
             output = output_
             output_bias = self.bias

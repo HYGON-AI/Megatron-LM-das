@@ -45,7 +45,7 @@ def get_gpt_layer_with_flux_spec(
     fp8: Optional[str] = None,  # pylint: disable=unused-arguments
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
 ) -> ModuleSpec:
-    """Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
+    """Use this spec to use flux modules (required for fp8 training).
 
 
     Args:
@@ -57,7 +57,7 @@ def get_gpt_layer_with_flux_spec(
                                                       Defaults to False.
 
     Returns:
-        ModuleSpec: Module specification with TE modules
+        ModuleSpec: Module specification with flux modules
     """
     if fp8 is not None:
         warnings.warn(

@@ -1,3 +1,4 @@
+import os
 import logging
 from typing import Literal, Optional
 from functools import wraps
@@ -21,12 +22,33 @@ from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 from dcu_megatron.core.utils import tensor_slide
 from dcu_megatron.core.transformer.mtp.multi_token_predictor import MultiTokenPredictor
 from dcu_megatron.core.transformer.transformer_config import TransformerConfig
+from dcu_megatron.core.tensor_parallel import FluxColumnParallelLinear
 
 
 def gpt_model_init_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
         fn(self, *args, **kwargs)
+
+        if (
+            self.post_process
+            and int(os.getenv("USE_FLUX_OVERLAP", "0"))
+        ):
+            self.output_layer = FluxColumnParallelLinear(
+                self.config.hidden_size,
+                self.vocab_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                gather_output=not self.parallel_output,
+                skip_weight_param_allocation=self.pre_process
+                and self.share_embeddings_and_output_weights,
+                embedding_activation_buffer=self.embedding_activation_buffer,
+                grad_output_buffer=self.grad_output_buffer,
+            )
+
+            self.setup_embeddings_and_output_layer()
 
         # add mtp
         self.num_nextn_predict_layers = self.config.num_nextn_predict_layers
