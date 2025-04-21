@@ -99,7 +99,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         )
         from ..core.models.gpt.gpt_model import (
             gpt_model_forward,
-            gpt_model_init,
+            gpt_model_init_wrapper,
             shared_embedding_or_mtp_embedding_weight
         )
         from ..training.utils import get_batch_on_this_tp_rank
@@ -116,20 +116,20 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward', gpt_model_forward)
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__', gpt_model_init)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
+                                    gpt_model_init_wrapper,
+                                    apply_wrapper=True)
 
         from megatron.core.models.gpt.gpt_model import GPTModel
         setattr(GPTModel, 'shared_embedding_or_mtp_embedding_weight', shared_embedding_or_mtp_embedding_weight)
 
     def patch_core_transformers(self):
-        from ..core import transformer_block_init_wrapper, transformer_block_forward
+        from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import TransformerConfigPatch, MLATransformerConfigPatch
         
         # Transformer block
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
                                     transformer_block_init_wrapper)
-        MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.forward',
-                                    transformer_block_forward)
 
         # Transformer config
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
@@ -141,9 +141,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
                                     torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
-                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
-                                    apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
+        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
+        #                             apply_wrapper=True)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
@@ -166,7 +166,6 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
-        from ..core.tensor_parallel import ColumnParallelLinearPatch, RowParallelLinearPatch, parallel_linear_init_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -188,17 +187,19 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
 
         # flux
-        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.__init__",
-                                    parallel_linear_init_wrapper,
-                                    apply_wrapper=True)
-        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
-                                    ColumnParallelLinearPatch.forward)
-        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.__init__",
-                                    parallel_linear_init_wrapper,
-                                    apply_wrapper=True)
-        MegatronAdaptation.register("megatron.core.tensor_parallel.layers.RowParallelLinear.forward",
-                                    RowParallelLinearPatch.forward)
+        if int(os.getenv("USE_FLUX_OVERLAP", "0")):
+            from ..core.tensor_parallel import (
+                FluxColumnParallelLinear,
+                FluxRowParallelLinear
+            )
+            from ..core.models.gpt.gpt_layer_specs import get_gpt_layer_with_flux_spec
 
+            MegatronAdaptation.register("megatron.core.extensions.transformer_engine.TEColumnParallelLinear",
+                                        FluxColumnParallelLinear)
+            MegatronAdaptation.register("megatron.core.extensions.transformer_engine.TERowParallelLinear",
+                                        FluxRowParallelLinear)
+            MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
+                                        get_gpt_layer_with_flux_spec)
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
@@ -232,19 +233,22 @@ class LegacyAdaptation(MegatronAdaptationABC):
         self.patch_legacy_models()
 
     def patch_legacy_models(self):
-        from ..legacy.model.transformer import ParallelMLP, ParallelAttention
+        from ..legacy.model.transformer import ParallelMLPPatch, ParallelAttentionPatch
+        from ..legacy.model.utils import get_norm
 
         # ParallecMLP
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
-                                    ParallelMLP.__init__)
+                                    ParallelMLPPatch.__init__)
 
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.forward',
-                                    ParallelAttention.forward)
+                                    ParallelAttentionPatch.forward)
 
         # rms_norm.RMSNorm
         MegatronAdaptation.register('megatron.legacy.model.rms_norm.RMSNorm.forward',
                                     torch.compile(mode="max-autotune-no-cudagraphs"),
                                     apply_wrapper=True)
+        MegatronAdaptation.register('megatron.legacy.model.utils.get_norm',
+                                    get_norm)
 
 
 MegatronAdaptation.execute()

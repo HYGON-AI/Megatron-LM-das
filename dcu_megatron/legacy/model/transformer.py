@@ -3,14 +3,21 @@ import torch.nn.functional as F
 
 from megatron.training import get_args
 from megatron.core import tensor_parallel
+from megatron.legacy.model.enums import AttnType
+from megatron.core.models.common.embeddings import apply_rotary_pos_emb
 from megatron.legacy.model.module import MegatronModule
+from megatron.legacy.model.transformer import ParallelMLP
 from megatron.legacy.model.utils import (
     erf_gelu,
     openai_gelu,
 )
 
+try:
+    from einops import rearrange
+except ImportError:
+    rearrange = None
 
-class ParallelMLP(MegatronModule):
+class ParallelMLPPatch(MegatronModule):
     """MLP.
 
     MLP will take the input with h hidden state, project it to 4*h
@@ -74,7 +81,7 @@ class ParallelMLP(MegatronModule):
         )
 
 
-class ParallelAttention(MegatronModule):
+class ParallelAttentionPatch(MegatronModule):
     """Parallel self-attention layer abstract class.
 
     Self-attention layer takes input with size [s, b, h]

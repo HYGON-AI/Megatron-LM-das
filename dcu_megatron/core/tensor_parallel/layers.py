@@ -1,15 +1,23 @@
 import os
+import socket
 import warnings
 from functools import wraps
 from typing import Callable, List, Optional
 
-import flux
+try:
+    import flux
+except ImportError:
+    raise ImportError("flux is NOT installed")
+
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from megatron.training import print_rank_0
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
+    get_global_memory_buffer,
+    get_tensor_model_parallel_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -26,15 +34,24 @@ from megatron.core.tensor_parallel.mappings import (
     copy_to_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
+    _reduce_scatter_along_first_dim,
+    _gather_along_first_dim,
 )
 from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.core.tensor_parallel.mappings import _reduce
+from megatron.core.tensor_parallel import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from megatron.core.tensor_parallel.layers import (
     custom_fwd,
     custom_bwd,
+    dist_all_gather_func,
     linear_with_frozen_weight,
     linear_with_grad_accumulation_and_async_allreduce
 )
+from dcu_megatron.core.utils import is_flux_min_version
+
 
 _grad_accum_fusion_available = True
 try:
@@ -146,6 +163,19 @@ def vocab_parallel_embedding_forward(self, input_, weight=None):
     return output
 
 
+def get_tensor_model_parallel_node_size(group=None):
+    """ 获取节点数
+    """
+    if group is None:
+        group=get_tensor_model_parallel_group()
+
+    hostname = socket.gethostname()
+    hostnames = [None] * get_tensor_model_parallel_world_size()
+    torch.distributed.all_gather_object(hostnames, hostname, group=group)
+    num_nodes = len(set(hostnames))
+    return num_nodes
+
+
 class AGLinear(torch.autograd.Function):
     @staticmethod
     @custom_fwd
@@ -160,6 +190,8 @@ class AGLinear(torch.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         transpose_weight=False,
+        fw_ag_gemm_op=None,
+        bw_gemm_rs_op=None,
     ):
         """Forward."""
         ctx.save_for_backward(input, weight)
@@ -170,63 +202,44 @@ class AGLinear(torch.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
-
-        sequence_len = input.size(0)
-        # input: 3D tensor whose order of dimension is [sequence, batch, hidden]
-        input = input.view(
-            input.shape[0] * input.shape[1], input.shape[2]
-        )
-
-        M, K = list(input.size())
-        N = weight.size(0)
-        M = M * get_tensor_model_parallel_world_size()
-
-        if transpose_weight:
-            weight = weight.t().contiguous()
+        ctx.bw_gemm_rs_op = bw_gemm_rs_op
 
         if sequence_parallel:
-            ag_gemm_kernel = flux.AGKernel(
-                get_tensor_model_parallel_group(),
-                get_tensor_model_parallel_world_size() // torch.cuda.device_count(),
-                M,
-                N,
-                K,
-                input.dtype,
-                output_dtype=input.dtype,
-                transpose_weight=transpose_weight,
-                local_copy=False,
-                ring_mode=flux.AgRingMode.Auto,
-            )
-            output = ag_gemm_kernel.forward(
-                input,
-                weight,
+            sequence_len, batch_size, input_hidden_size = input.size()
+            output_hidden_size = weight.size(0)
+            world_size = get_tensor_model_parallel_world_size()
+
+            if fw_ag_gemm_op is None:
+                if not is_flux_min_version("1.1.0"):
+                    fw_ag_gemm_op = flux.AGKernel(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size * world_size,
+                        output_hidden_size,
+                        input_hidden_size,
+                        input.dtype,
+                        output_dtype=input.dtype,
+                        transpose_weight=transpose_weight,
+                        local_copy=False,
+                        ring_mode=flux.AgRingMode.Auto,
+                    )
+
+            output = fw_ag_gemm_op.forward(
+                input.view(sequence_len * batch_size, -1),
+                weight.t().contiguous() if transpose_weight else weight,
                 bias=bias,
-                input_scale=input_scale,
-                weight_scale=weight_scale,
-                output_scale=None,
-                fast_accum=False
-            )
-        else:
-            output_buf = torch.empty([M, N], dtype=input.dtype, device=input.device)
-            gemm_only_op = flux.GemmOnly(
-                input_dtype=input.dtype,
-                output_dtype=input.dtype,
-                transpose_weight=transpose_weight,
-                use_fp8_gemm=False,
-            )
-            output = gemm_only_op.forward(
-                input,
-                weight,
-                bias=bias,
-                output_buf=output_buf,
                 input_scale=None,
                 weight_scale=None,
                 output_scale=None,
-                fast_accum=False,
+                fast_accum=False
             )
 
-        torch.cuda.current_stream().synchronize()
-        output = output.view(sequence_len, input.size(0) // sequence_len, -1)
+            torch.cuda.current_stream().synchronize()
+            output = output.view(sequence_len * world_size, batch_size, -1)
+        else:
+            output = torch.matmul(input, weight.t())
+            if bias is not None:
+                output = output + bias
 
         return output
 
@@ -239,8 +252,9 @@ class AGLinear(torch.autograd.Function):
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         transpose_weight = ctx.transpose_weight
+        bw_gemm_rs_op = ctx.bw_gemm_rs_op
 
-        wgrad_compute = True
+        wgrad_compute = weight.requires_grad
         if grad_output_buffer is not None:
             if wgrad_deferral_limit == 0 or len(grad_output_buffer) < wgrad_deferral_limit:
                 grad_output_buffer.append(grad_output)
@@ -266,29 +280,25 @@ class AGLinear(torch.autograd.Function):
                 total_input = input
 
         if ctx.sequence_parallel:
-            sequence_len, batch_size, output_hidden_size = grad_output.size()
+            sequence_len, batch_size, _ = grad_output.size()
 
-            # input: 3D tensor whose order of dimension is [sequence, batch, hidden]
-            grad_output = grad_output.view(
-                sequence_len * batch_size, output_hidden_size
-            )
+            if bw_gemm_rs_op is None:
+                input_hidden_size = weight.size(-1)
+                if not is_flux_min_version("1.1.0"):
+                    bw_gemm_rs_op = flux.GemmRS(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size,
+                        input_hidden_size,
+                        input.dtype,
+                        input.dtype,
+                        transpose_weight=transpose_weight,
+                        fuse_reduction=False
+                    )
 
-            if not transpose_weight:
-                weight = weight.t().contiguous()
-
-            gemm_rs_op = flux.GemmRS(
-                get_tensor_model_parallel_group(),
-                world_size // torch.cuda.device_count(),
-                sequence_len * batch_size,
-                output_hidden_size,
-                input.dtype,
-                input.dtype,
-                transpose_weight=transpose_weight,
-                fuse_reduction=False
-            )
-            grad_input = gemm_rs_op.forward(
-                grad_output,
-                weight,
+            grad_input = bw_gemm_rs_op.forward(
+                grad_output.view(sequence_len * batch_size, -1),
+                weight if transpose_weight else weight.t().contiguous(),
                 bias=None,
                 input_scale=None,
                 weight_scale=None,
@@ -297,7 +307,7 @@ class AGLinear(torch.autograd.Function):
             )
 
             torch.cuda.current_stream().synchronize()
-            grad_input = grad_input.view(sequence_len // get_tensor_model_parallel_group(), batch_size, -1)
+            grad_input = grad_input.view(sequence_len // world_size, batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
 
@@ -310,12 +320,14 @@ class AGLinear(torch.autograd.Function):
             )
 
         if not ctx.sequence_parallel and ctx.allreduce_dgrad:
-            # Asynchronous all-reduce
-            handle = torch.distributed.all_reduce(
-                grad_input, group=get_tensor_model_parallel_group(), async_op=True
-            )
-            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
-            # all-reduce is scheduled before the weight gradient computation
+            if weight.requires_grad:
+                # Asynchronous all-reduce
+                handle = torch.distributed.all_reduce(
+                    grad_input, group=get_tensor_model_parallel_group(), async_op=True
+                )
+            else:
+                grad_input = _reduce(grad_input)
+                return grad_input, None, None, None, None, None, None, None, None, None, None
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -356,10 +368,10 @@ class AGLinear(torch.autograd.Function):
             grad_weight = grad_output.t().matmul(total_input)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
-        if ctx.allreduce_dgrad:
+        if not ctx.sequence_parallel and ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None
 
 
 def ag_linear(
@@ -372,6 +384,8 @@ def ag_linear(
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
     transpose_weight: Optional[bool] = False,
+    fw_ag_gemm_op=None,
+    bw_gemm_rs_op=None
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -433,6 +447,11 @@ def ag_linear(
             deferred. Disable by setting this to 0. Defaults to 0.
 
         transpose_weight: transpose weight.
+
+        fw_ag_gemm_op: flux AGKernel for forward.
+
+        bw_gemm_rs_op: flux GemmRS for backward.
+
     """
 
     args = [
@@ -445,6 +464,8 @@ def ag_linear(
         grad_output_buffer,
         wgrad_deferral_limit,
         transpose_weight,
+        fw_ag_gemm_op,
+        bw_gemm_rs_op,
     ]
 
     if not ag_linear.warned:
@@ -485,6 +506,8 @@ class LinearRS(torch.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         transpose_weight=False,
+        fw_gemm_rs_op=None,
+        bw_ag_gemm_op=None
     ):
         """Forward."""
         ctx.save_for_backward(input, weight)
@@ -495,66 +518,40 @@ class LinearRS(torch.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
+        ctx.bw_ag_gemm_op = bw_ag_gemm_op
 
         world_size = get_tensor_model_parallel_world_size()
 
-        input_dim = input.dim()
-        sequence_len = input.size(0)
-        # input: 3D tensor whose order of dimension is [sequence, batch, hidden]
-        input = input.view(
-            input.shape[0] * input.shape[1], input.shape[2]
-        )
-
-        M = input.size(0)
-        N = weight.size(0)
+        sequence_len, batch_size, _ = input.size()
+        output_hidden_size = weight.size(0)
 
         if sequence_parallel:
-            if transpose_weight:
-                weight = weight.t().contiguous()
+            if fw_gemm_rs_op is None:
+                if not is_flux_min_version("1.1.0"):
+                    fw_gemm_rs_op = flux.GemmRS(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size,
+                        output_hidden_size,
+                        input.dtype,
+                        input.dtype,
+                        transpose_weight=transpose_weight,
+                        fuse_reduction=False,
+                    )
 
-            gemm_rs_op = flux.GemmRS(
-                get_tensor_model_parallel_group(),
-                world_size // torch.cuda.device_count(),
-                M,
-                N,
-                input.dtype,
-                input.dtype,
-                transpose_weight=transpose_weight,
-                fuse_reduction=False,
-            )
-            output = gemm_rs_op.forward(
-                input,
-                weight,
+            output = fw_gemm_rs_op.forward(
+                input.view(sequence_len * batch_size, -1),
+                weight.t().contiguous() if transpose_weight else weight,
                 bias=bias,
                 input_scale=None,
                 weight_scale=None,
                 output_scale=None,
                 fast_accum=False,
             )
+            torch.cuda.current_stream().synchronize()
+            output = output.view(sequence_len // world_size, batch_size, -1)
         else:
-            output = torch.empty([M, N], dtype=input.dtype, device=input.device)
-            gemm_only_op = flux.GemmOnly(
-                input_dtype=input.dtype,
-                output_dtype=input.dtype,
-                transpose_weight=transpose_weight,
-                use_fp8_gemm=False,
-            )
-            output = gemm_only_op.forward(
-                input,
-                weight,
-                bias=bias,
-                output_buf=output,
-                input_scale=None,
-                weight_scale=None,
-                output_scale=None,
-                fast_accum=False,
-            )
-
-        torch.cuda.current_stream().synchronize()
-        output = output.view(sequence_len, input.size(0) // sequence_len, -1)
-
-        if not sequence_parallel:
-            _reduce(output)
+            output = torch.matmul(input, weight.t())
 
         return output
 
@@ -567,69 +564,86 @@ class LinearRS(torch.autograd.Function):
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         transpose_weight = ctx.transpose_weight
+        bw_ag_gemm_op = ctx.bw_ag_gemm_op
 
-        wgrad_compute = True
+        wgrad_compute = weight.requires_grad
         if grad_output_buffer is not None:
             if wgrad_deferral_limit == 0 or len(grad_output_buffer) < wgrad_deferral_limit:
                 grad_output_buffer.append(grad_output)
                 wgrad_compute = False
 
+        world_size = get_tensor_model_parallel_world_size()
+
+        if wgrad_compute:
+            if ctx.sequence_parallel:
+                dim_size = list(grad_output.size())
+                dim_size[0] = dim_size[0] * world_size
+
+                all_gather_buffer = get_global_memory_buffer().get_tensor(
+                    dim_size, grad_output.dtype, "mpu"
+                )
+                handle = dist_all_gather_func(
+                    all_gather_buffer, grad_output, group=get_tensor_model_parallel_group(), async_op=True
+                )
+
+                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                # gather is scheduled before the input gradient computation
+                total_grad_output = all_gather_buffer
+            else:
+                total_grad_output = grad_output
+
         if ctx.sequence_parallel:
-            world_size = get_tensor_model_parallel_world_size()
+            sequence_len, batch_size, output_hidden_size = grad_output.size()
+            input_hidden_size = weight.size(-1)
 
-            sequence_len, batch_size, _ = grad_output.size()
-            grad_output = grad_output.view(sequence_len * batch_size, -1)
-
-            M, K = list(grad_output.size())
-            M = M * world_size
-            N = weight.size(-1)
-
-            if not transpose_weight:
-                weight = weight.t().contiguous()
-
-            grad_input = torch.empty([M, N], dtype=input.dtype, device=input.device)
-
-            ag_kernel = flux.AGKernel(
-                get_tensor_model_parallel_group(),
-                world_size // torch.cuda.device_count(),
-                M,
-                N,
-                K,
-                input.dtype,
-                output_dtype=input.dtype,
-                transpose_weight=transpose_weight,
-                local_copy=False,
-                ring_mode=flux.AgRingMode.Auto,
-            )
-
-            output = ag_kernel.forward(
-                grad_output,
-                weight,
+            if bw_ag_gemm_op is None:
+                if not is_flux_min_version("1.1.0"):
+                    bw_ag_gemm_op = flux.AGKernel(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size * world_size,
+                        input_hidden_size,
+                        output_hidden_size,
+                        grad_output.dtype,
+                        output_dtype=input.dtype,
+                        transpose_weight=transpose_weight,
+                        local_copy=False,
+                        ring_mode=flux.AgRingMode.Auto,
+                    )
+            grad_input = bw_ag_gemm_op.forward(
+                grad_output.view(sequence_len * batch_size, -1),
+                weight if transpose_weight else weight.t().contiguous(),
                 bias=None,
                 input_scale=None,
                 weight_scale=None,
                 output_scale=None,
                 fast_accum=False,
             )
-
             torch.cuda.current_stream().synchronize()
+            grad_input = grad_input.view(sequence_len * world_size, batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
 
+        if not weight.requires_grad:
+            grad_input, None, None, None, None, None, None, None, None, None, None
+
+        if ctx.sequence_parallel and wgrad_compute:
+            handle.wait()
+
         if wgrad_compute:
-            grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                grad_output, input
+            total_grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
+                total_grad_output, input
             )
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
                 if weight.main_grad.dtype == torch.float32:
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
-                        total_input, grad_output, weight.main_grad
+                        total_input, total_grad_output, weight.main_grad
                     )
                 elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
-                        total_input, grad_output, weight.main_grad
+                        total_input, total_grad_output, weight.main_grad
                     )
                 else:
                     raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
@@ -657,10 +671,10 @@ class LinearRS(torch.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = grad_output.t().matmul(total_input)
-        grad_bias = grad_output.sum(dim=0) if use_bias else None
+            grad_weight = total_grad_output.t().matmul(total_input)
+        grad_bias = total_grad_output.sum(dim=0) if use_bias else None
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None
 
 
 def linear_rs(
@@ -673,6 +687,8 @@ def linear_rs(
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
     transpose_weight: Optional[bool] = False,
+    fw_gemm_rs_op=None,
+    bw_ag_gemm_op=None,
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -734,6 +750,11 @@ def linear_rs(
             deferred. Disable by setting this to 0. Defaults to 0.
 
         transpose_weight: transpose weight.
+
+        fw_gemm_rs_op: flux AGKernel for forward.
+
+        bw_ag_gemm_op: flux GemmRS for backward.
+
     """
 
     args = [
@@ -746,6 +767,8 @@ def linear_rs(
         grad_output_buffer,
         wgrad_deferral_limit,
         transpose_weight,
+        fw_gemm_rs_op,
+        bw_ag_gemm_op,
     ]
 
     if not linear_rs.warned:
@@ -772,34 +795,98 @@ def linear_rs(
 linear_rs.warned = False
 
 
-def parallel_linear_init_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        fn(self, *args, **kwargs)
-
-        # flux params
-        self.use_flux = False
-        if "use_flux" in kwargs:
-            self.use_flux = kwargs["use_flux"]
-        elif hasattr(self.config, "use_flux"):
-            self.use_flux = self.config.use_flux
-
-        self.flux_transpose_weight = False
-        if "flux_transpose_weight" in kwargs:
-            self.flux_transpose_weight = kwargs["flux_transpose_weight"]
-        elif hasattr(self.config, "flux_transpose_weight"):
-            self.flux_transpose_weight = self.config.flux_transpose_weight
-
-    return wrapper
-
-
-class ColumnParallelLinearPatch(torch.nn.Module):
+class FluxColumnParallelLinear(ColumnParallelLinear):
     """Linear layer with column parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along
     its second dimension as A = [A_1, ..., A_p].
 
+    Args:
+        input_size:
+            first dimension of matrix A.
+        output_size:
+            second dimension of matrix A.
+        bias:
+            If true, add bias
+        gather_output:
+            If true, call all-gather on output and make Y available to all GPUs,
+            otherwise, every GPU will have its output which is Y_i = XA_i
+        init_method:
+            method to initialize weights. Note that bias is always set to zero.
+        stride:
+            For the strided linear layers.
+        keep_master_weight_for_test:
+            This was added for testing and should be set to False. It
+            returns the master weights used for initialization.
+        skip_bias_add:
+            If True, do not add the bias term, instead return it to be added by the
+            caller. This enables performance optimations where bias can be fused with other
+            elementwise operations.
+        skip_weight_param_allocation:
+            If True, weight parameter is not allocated and must be passed
+            as a keyword argument `weight` during the forward pass. Note that this does not
+            affect bias, which will be allocated if bias is True. Defaults to False.
+        embedding_activation_buffer:
+            This buffer holds the input activations of the final embedding
+            linear layer on the last pipeline stage when defer_embedding_wgrad_compute is enabled.
+        grad_output_buffer:
+            This buffer holds the gradient outputs of the final embedding linear
+            layer on the last pipeline stage when defer_embedding_wgrad_compute is enabled.
+        is_expert:
+            If True, the layer is treated as an MoE expert layer.
+        config:
+            ModelParallelConfig object
+        tp_comm_buffer_name:
+            Communication buffer name is not used in non-Transformer-Engine modules.
+        disable_grad_reduce:
+            If True, reduction of output gradients across tensor-parallel ranks
+            will be disabled. Defaults to False. This feature is used by Lora Adapter in Nemo to
+            delay and fuse reduction along with other gradients for performance optimization.
     """
+
+    def __init__(
+        self,
+        input_size,
+        output_size,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias=True,
+        gather_output=False,
+        stride=1,
+        keep_master_weight_for_test=False,
+        skip_bias_add=False,
+        skip_weight_param_allocation: bool = False,
+        embedding_activation_buffer: Optional[List[torch.Tensor]] = None,
+        grad_output_buffer: Optional[List[torch.Tensor]] = None,
+        is_expert: bool = False,
+        tp_comm_buffer_name: str = None,  # Not used
+        disable_grad_reduce: bool = False,
+    ):
+        super(FluxColumnParallelLinear, self).__init__(
+            input_size=input_size,
+            output_size=output_size,
+            config=config,
+            init_method=init_method,
+            bias=bias,
+            gather_output=gather_output,
+            stride=stride,
+            keep_master_weight_for_test=keep_master_weight_for_test,
+            skip_bias_add=skip_bias_add,
+            skip_weight_param_allocation=skip_weight_param_allocation,
+            embedding_activation_buffer=embedding_activation_buffer,
+            grad_output_buffer=grad_output_buffer,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            disable_grad_reduce=disable_grad_reduce,
+        )
+
+        # flux params
+        self._forward_impl = ag_linear
+        self.flux_transpose_weight = getattr(self.config, "flux_transpose_weight", False)
+        self.previous_flux_params = (None,) * 5
+        self.fw_ag_gemm_op = None
+        self.bw_gemm_rs_op = None
 
     def forward(
         self,
@@ -863,30 +950,65 @@ class ColumnParallelLinearPatch(torch.nn.Module):
             ):
                 self.embedding_activation_buffer.append(input_parallel)
 
-        # Matrix multiply.
-        if self.use_flux:
-            self._forward_impl = ag_linear
-        elif not weight.requires_grad:
-            self._forward_impl = linear_with_frozen_weight
-        else:
-            self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+        # flux kernels.
+        if self.sequence_parallel:
+            sequence_len, batch_size, input_hidden_size = input_parallel.size()
+            output_hidden_size = weight.size(0)
+            world_size = get_tensor_model_parallel_world_size()
+            current_flux_params = (
+                sequence_len,
+                batch_size,
+                input_hidden_size,
+                output_hidden_size,
+                input_parallel.dtype
+            )
+
+            if (
+                self.fw_ag_gemm_op is None
+                or current_flux_params != self.previous_flux_params
+            ):
+                if not is_flux_min_version("1.1.0"):
+                    self.fw_ag_gemm_op = flux.AGKernel(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size * world_size,
+                        output_hidden_size,
+                        input_hidden_size,
+                        input_parallel.dtype,
+                        output_dtype=input_parallel.dtype,
+                        transpose_weight=self.flux_transpose_weight,
+                        local_copy=False,
+                        ring_mode=flux.AgRingMode.Auto,
+                    )
+
+                    self.bw_gemm_rs_op = flux.GemmRS(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size * world_size,
+                        input_hidden_size,
+                        input_parallel.dtype,
+                        input_parallel.dtype,
+                        transpose_weight=self.flux_transpose_weight,
+                        fuse_reduction=False
+                    )
+
+            self.previous_flux_params = current_flux_params
 
         allreduce_dgrad = False if self.explicit_expert_comm else self.allreduce_dgrad
 
-        forward_params = {
-            "input": input_parallel,
-            "weight": weight,
-            "bias": bias,
-            "gradient_accumulation_fusion": self.gradient_accumulation_fusion,
-            "allreduce_dgrad": allreduce_dgrad,
-            "sequence_parallel": False if self.explicit_expert_comm else self.sequence_parallel,
-            "grad_output_buffer": self.grad_output_buffer if self.config.defer_embedding_wgrad_compute else None,
-            "wgrad_deferral_limit": self.config.wgrad_deferral_limit if self.config.defer_embedding_wgrad_compute else None,
-        }
-        if self.use_flux:
-            forward_params.update({"transpose_weight": self.flux_transpose_weight})
-
-        output_parallel = self._forward_impl(**forward_params)
+        output_parallel = self._forward_impl(
+            input=input_parallel,
+            weight=weight,
+            bias=bias,
+            gradient_accumulation_fusion=self.gradient_accumulation_fusion,
+            allreduce_dgrad=allreduce_dgrad,
+            sequence_parallel=False if self.explicit_expert_comm else self.sequence_parallel,
+            grad_output_buffer=self.grad_output_buffer if self.config.defer_embedding_wgrad_compute else None,
+            wgrad_deferral_limit=self.config.wgrad_deferral_limit if self.config.defer_embedding_wgrad_compute else None,
+            transpose_weight=self.flux_transpose_weight,
+            fw_ag_gemm_op=self.fw_ag_gemm_op,
+            bw_gemm_rs_op=self.bw_gemm_rs_op
+        )
 
         gather_output = self.gather_output
         # Use the runtime gather output if it's set explicitly.
@@ -902,14 +1024,88 @@ class ColumnParallelLinearPatch(torch.nn.Module):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def __repr__(self):
+        tp = self.output_size // self.output_size_per_partition
+        use_bias = self.bias is not None and self.bias is True
+        return (
+            f"{type(self).__name__}(in_features={self.input_size}, "
+            f"out_features={self.output_size_per_partition}, bias={use_bias}, TP={tp})"
+        )
 
-class RowParallelLinearPatch(torch.nn.Module):
+
+class FluxRowParallelLinear(RowParallelLinear):
     """Linear layer with row parallelism.
 
     The linear layer is defined as Y = XA + b. A is parallelized along its first dimension and X
     along its second dimension. A = transpose([A_1 .. A_p]) X = [X_1, ..., X_p]
 
+    Args:
+        input_size:
+            first dimension of matrix A.
+        output_size:
+            second dimension of matrix A.
+        bias:
+            If true, add bias. Note that bias is not parallelized.
+        input_is_parallel:
+            If true, we assume that the input is already split across the GPUs
+            and we do not split again.
+        init_method:
+            method to initialize weights. Note that bias is always set to zero.
+        stride:
+            For the strided linear layers.
+        keep_master_weight_for_test:
+            This was added for testing and should be set to False. It returns the master weights
+            used for initialization.
+        skip_bias_add:
+            If True, do not add the bias term, instead return it to be added by the
+            caller. This enables performance optimations where bias can be fused with other
+            elementwise operations.
+        is_expert:
+            If True, the layer is treated as an MoE expert layer
+        tp_comm_buffer_name:
+            Communication buffer name. Not used in non-Transformer-Engine modules.
+        config:
+            ModelParallelConfig object
+
     """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        input_is_parallel: bool,
+        skip_bias_add: bool,
+        stride: int = 1,
+        keep_master_weight_for_test: bool = False,
+        is_expert: bool = False,
+        tp_comm_buffer_name: str = None,  # Not used
+    ):
+
+        super(FluxRowParallelLinear, self).__init__(
+            input_size=input_size,
+            output_size=output_size,
+            config=config,
+            init_method=init_method,
+            bias=bias,
+            input_is_parallel=input_is_parallel,
+            skip_bias_add=skip_bias_add,
+            stride=stride,
+            keep_master_weight_for_test=keep_master_weight_for_test,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name
+        )
+
+        # flux params
+        self._forward_impl = linear_rs
+        self.flux_transpose_weight = getattr(self.config, "flux_transpose_weight", False)
+        self.previous_flux_params = (None,) * 5
+        self.fw_gemm_rs_op = None
+        self.bw_ag_gemm_op = None
+
 
     def forward(self, input_):
         """Forward of RowParallelLinear
@@ -934,45 +1130,86 @@ class RowParallelLinearPatch(torch.nn.Module):
         else:
             assert not self.sequence_parallel
             input_parallel = scatter_to_tensor_model_parallel_region(input_)
-        # Matrix multiply.
-        if self.use_flux:
-            self._forward_impl = linear_rs
-        elif not self.weight.requires_grad:
-            self._forward_impl = linear_with_frozen_weight
-        else:
-            self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        allreduce_dgrad = False
+        # flux kernels
 
-        forward_params = {
-            "input": input_parallel,
-            "weight": self.weight,
-            "bias": None if not self.use_flux or self.skip_bias_add else self.bias,
-            "gradient_accumulation_fusion": self.gradient_accumulation_fusion,
-            "allreduce_dgrad": allreduce_dgrad,
-            "sequence_parallel": False if not self.use_flux else self.sequence_parallel,
-            "grad_output_buffer": False,
-        }
+        if self.sequence_parallel:
+            sequence_len, batch_size, input_hidden_size = input_parallel.size()
+            output_hidden_size = self.weight.size(0)
+            world_size = get_tensor_model_parallel_world_size()
 
-        if self.use_flux:
-            forward_params.update({"transpose_weight": self.flux_transpose_weight})
+            current_flux_params = (
+                sequence_len,
+                batch_size,
+                input_hidden_size,
+                output_hidden_size,
+                input_parallel.dtype
+            )
 
-        output_parallel = self._forward_impl(**forward_params)
-        if self.use_flux:
-            return output_parallel, None if skip_bias_add else self.bias
+            if (
+                self.fw_gemm_rs_op is None
+                or current_flux_params != self.previous_flux_params
+            ):
+                if not is_flux_min_version("1.1.0"):
+                    self.fw_gemm_rs_op = flux.GemmRS(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size,
+                        output_hidden_size,
+                        input_parallel.dtype,
+                        input_parallel.dtype,
+                        transpose_weight=self.flux_transpose_weight,
+                        fuse_reduction=False
+                    )
 
-        # All-reduce across all the partitions.
+                    self.bw_ag_gemm_op = flux.AGKernel(
+                        get_tensor_model_parallel_group(),
+                        get_tensor_model_parallel_node_size(),
+                        sequence_len * batch_size,
+                        input_hidden_size,
+                        output_hidden_size,
+                        input_parallel.dtype,
+                        output_dtype=input_parallel.dtype,
+                        transpose_weight=self.flux_transpose_weight,
+                        local_copy=False,
+                        ring_mode=flux.AgRingMode.Auto,
+                    )
+
+            self.previous_flux_params = current_flux_params
+
+        output_parallel = self._forward_impl(
+            input=input_parallel,
+            weight=self.weight,
+            bias=None,
+            gradient_accumulation_fusion=self.gradient_accumulation_fusion,
+            allreduce_dgrad=False,
+            sequence_parallel=False if self.explicit_expert_comm else self.sequence_parallel,
+            grad_output_buffer=None,
+            transpose_weight=self.flux_transpose_weight,
+            fw_gemm_rs_op=self.fw_gemm_rs_op,
+            bw_ag_gemm_op=self.bw_ag_gemm_op
+        )
+
         if self.explicit_expert_comm:
             assert self.skip_bias_add
             output_ = output_parallel
         elif self.sequence_parallel:
-            output_ = reduce_scatter_to_sequence_parallel_region(output_parallel)
+            output_ = output_parallel
         else:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
+
         if not self.skip_bias_add:
-            output = (output_ + self.bias) if self.bias is not None else output_
             output_bias = None
+            output = (output_ + self.bias) if self.bias is not None else output_
         else:
             output = output_
             output_bias = self.bias
         return output, output_bias
+
+    def __repr__(self):
+        tp = self.input_size // self.input_size_per_partition
+        use_bias = self.bias is not None and self.bias is True
+        return (
+            f"{type(self).__name__}(in_features={self.input_size_per_partition}, "
+            f"out_features={self.output_size}, bias={use_bias}, TP={tp})"
+        )

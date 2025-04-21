@@ -26,9 +26,6 @@ class ExtraTransformerConfig:
     ##################
     # flux
     ##################
-    use_flux: bool = False
-    """If set, flux will be used in ColumnParallelLinear and RowParallelLinear"""
-
     flux_transpose_weight: bool = False
 
 

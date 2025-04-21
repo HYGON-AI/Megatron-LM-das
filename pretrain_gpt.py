@@ -61,6 +61,10 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         Union[GPTModel, megatron.legacy.model.GPTModel]: The returned model
     """
     args = get_args()
+
+    if bool(int(os.getenv("USE_FLUX_OVERLAP", "0"))):
+        assert args.transformer_impl == "transformer_engine"
+
     use_te = args.transformer_impl == "transformer_engine"
 
     if args.record_memory_history:
@@ -86,8 +90,6 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         config = core_transformer_config_from_yaml(args, "language_model")
     else:
         config = core_transformer_config_from_args(args)
-
-    print_rank_0(f"config: {config}")
 
     if args.use_legacy_models:
         model = megatron.legacy.model.GPTModel(
@@ -136,8 +138,8 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         else:
             mtp_transformer_layer_spec = transformer_layer_spec
 
-        mtp_spec = get_mtp_spec(mtp_transformer_layer_spec, use_te=use_te)
         with build_model_context(**build_model_context_args):
+            config.mtp_spec = get_mtp_spec(mtp_transformer_layer_spec, use_te=use_te)
             model = GPTModel(
                 config=config,
                 transformer_layer_spec=transformer_layer_spec,
@@ -151,8 +153,7 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 position_embedding_type=args.position_embedding_type,
                 rotary_percent=args.rotary_percent,
                 rotary_base=args.rotary_base,
-                rope_scaling=args.use_rope_scaling,
-                mtp_spec=mtp_spec
+                rope_scaling=args.use_rope_scaling
             )
     # model = torch.compile(model,mode='max-autotune-no-cudagraphs')
     print_rank_0(model)
@@ -196,7 +197,7 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     args = get_args()
 
     losses = output_tensor.float()
-    if args.num_nextn_predict_layers > 0:
+    if getattr(args, "num_nextn_predict_layers", 0) > 0:
         loss_mask = tensor_slide(loss_mask, args.num_nextn_predict_layers, return_first=True)[0]
     loss_mask = loss_mask.view(-1).float()
     total_tokens = loss_mask.sum()
@@ -288,7 +289,7 @@ def core_gpt_dataset_config_from_args(args):
 
     return GPTDatasetConfig(
         random_seed=args.seed,
-        sequence_length=args.seq_length + args.num_nextn_predict_layers,
+        sequence_length=args.seq_length + getattr(args, "num_nextn_predict_layers", 0),
         blend=blend,
         blend_per_split=blend_per_split,
         split=args.split,
