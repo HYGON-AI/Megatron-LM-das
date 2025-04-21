@@ -51,6 +51,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
     # Standard arguments.
     parser = _add_network_size_args(parser)
+    parser = _add_extra_network_size_args(parser)
     parser = _add_regularization_args(parser)
     parser = _add_training_args(parser)
     parser = _add_extra_training_args(parser)
@@ -104,6 +105,18 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     #args.world_size = int(os.getenv("WORLD_SIZE", '1'))
 
     return args
+
+
+def _add_extra_network_size_args(parser):
+    # 删除原参数
+    remove_original_params(parser, ["normalization"])
+
+    # 重定义参数
+    group = parser.add_argument_group(title='extra network size args')
+    group.add_argument('--normalization', default='LayerNorm',
+                       choices=['LayerNorm', 'RMSNorm', 'LightopRMSNorm'],
+                       help='Which normalization technique to use.')
+    return parser
 
 
 def _add_extra_distributed_args(parser):
@@ -169,9 +182,7 @@ def _add_mtp_args(parser):
 
 
 def _add_flux_args(parser):
-    group = parser.add_argument_group(title='multi token prediction')
-    group.add_argument('--use-flux', action='store_true', default=False,
-                       help='If set, flux will be used in ColumnParallelLinear and RowParallelLinear')
+    group = parser.add_argument_group(title='flux args')
     group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                        help='Whether to transpose weight when using flux kernel')
     return parser

@@ -66,6 +66,10 @@ def unpermute(
 ):
 ```
 
+### 项目支持使用[flux kernel](http://10.6.10.68/dcutoolkit/deeplearing/flux)
+在tp场景下，用户可以选择使用flux通算融合算子，获得更好的训练和推理性能。项目通过替换transformer engine方法集成flux，使用时需要设置环境变量USE_FLUX_OVERLAP=1，并设置transformer-impl为transformer_engine。
+
+
 ### 使用方式
 在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
 ```
