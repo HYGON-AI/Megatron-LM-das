@@ -1,4 +1,4 @@
-#  Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+import os
 import logging
 from dataclasses import dataclass
 from typing import Union, Optional, Literal
@@ -137,18 +137,22 @@ class MultiTokenPredictor(MegatronModule):
             self.embedding_activation_buffer = None
             self.grad_output_buffer = None
 
-        self.output_layer = tensor_parallel.ColumnParallelLinear(
-            config.hidden_size,
-            self.vocab_size,
-            config=config,
-            init_method=config.init_method,
-            bias=self.add_output_layer_bias,
-            skip_bias_add=False,
-            gather_output=not self.parallel_output,
-            skip_weight_param_allocation=self.share_mtp_embedding_and_output_weight,
-            embedding_activation_buffer=self.embedding_activation_buffer,
-            grad_output_buffer=self.grad_output_buffer,
-        )
+        if int(os.getenv("USE_FLUX_OVERLAP", "0")):
+            column_parallel_linear_impl = FluxColumnParallelLinear
+        else:
+            column_parallel_linear_impl = tensor_parallel.ColumnParallelLinear
+        self.output_layer = column_parallel_linear_impl(
+                self.config.hidden_size,
+                self.vocab_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                gather_output=not self.parallel_output,
+                skip_weight_param_allocation=self.share_mtp_embedding_and_output_weight,
+                embedding_activation_buffer=self.embedding_activation_buffer,
+                grad_output_buffer=self.grad_output_buffer,
+            )
 
     def forward(
             self,
