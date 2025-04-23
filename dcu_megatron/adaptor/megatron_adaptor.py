@@ -141,9 +141,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
                                     torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
                                     apply_wrapper=True)
-        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
-        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
-        #                             apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
+                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
+                                    apply_wrapper=True)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
@@ -233,13 +233,21 @@ class LegacyAdaptation(MegatronAdaptationABC):
         self.patch_legacy_models()
 
     def patch_legacy_models(self):
-        from ..legacy.model.transformer import ParallelMLPPatch, ParallelAttentionPatch
+        from ..legacy.model.transformer import (
+            parallel_mlp_init_wrapper,
+            ParallelAttentionPatch,
+            parallel_attention_init_wrapper
+        )
         from ..legacy.model.utils import get_norm
 
         # ParallecMLP
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
-                                    ParallelMLPPatch.__init__)
+                                    parallel_mlp_init_wrapper,
+                                    apply_wrapper=True)
 
+        MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.__init__',
+                                    parallel_attention_init_wrapper,
+                                    apply_wrapper=True)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.forward',
                                     ParallelAttentionPatch.forward)
 
