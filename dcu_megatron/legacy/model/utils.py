@@ -1,6 +1,6 @@
 from megatron.training import get_args
-from megatron.legacy.model import LayerNorm
-from .rms_norm import RMSNorm, LightopRMSNorm
+from megatron.legacy.model import LayerNorm, RMSNorm
+from .rms_norm import LightopRMSNorm
 
 
 def get_norm(config):
