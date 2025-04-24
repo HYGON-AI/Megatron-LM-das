@@ -19,11 +19,6 @@ try: # 使用定长fa
 except ImportError:
     flash_attn_func = None
 
-try:
-    from einops import rearrange
-except ImportError:
-    rearrange = None
-
 
 def parallel_mlp_init_wrapper(fn):
     @wraps(fn)

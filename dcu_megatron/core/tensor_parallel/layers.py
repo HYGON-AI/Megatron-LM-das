@@ -53,9 +53,6 @@ from megatron.core.tensor_parallel.layers import (
     linear_with_frozen_weight,
     linear_with_grad_accumulation_and_async_allreduce
 )
-from dcu_megatron.core.utils import is_flux_min_version
-
-
 
 _grad_accum_fusion_available = True
 try:
