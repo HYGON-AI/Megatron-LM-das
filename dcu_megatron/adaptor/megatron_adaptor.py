@@ -165,13 +165,14 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
-        from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
+        from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
                                     vocab_parallel_embedding_forward)
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.__init__',
-                                    vocab_parallel_embedding_init)
+                                    vocab_parallel_embedding_init_wrapper,
+                                    apply_wrapper=True)
 
         # VocabParallelCrossEntropy
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy.VocabParallelCrossEntropy.calculate_predicted_logits',

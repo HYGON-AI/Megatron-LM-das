@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from functools import wraps
+
 from megatron.training import get_args
 from megatron.core import tensor_parallel
 from megatron.legacy.model.enums import AttnType
