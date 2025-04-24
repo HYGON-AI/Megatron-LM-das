@@ -165,13 +165,14 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
-        from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init
+        from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
                                     vocab_parallel_embedding_forward)
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.__init__',
-                                    vocab_parallel_embedding_init)
+                                    vocab_parallel_embedding_init_wrapper,
+                                    apply_wrapper=True)
 
         # VocabParallelCrossEntropy
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy.VocabParallelCrossEntropy.calculate_predicted_logits',
@@ -233,13 +234,20 @@ class LegacyAdaptation(MegatronAdaptationABC):
         self.patch_legacy_models()
 
     def patch_legacy_models(self):
-        from ..legacy.model.transformer import ParallelMLPPatch, ParallelAttentionPatch
+        from ..legacy.model.transformer import (
+            parallel_mlp_init_wrapper,
+            ParallelAttentionPatch,
+            parallel_attention_init_wrapper
+        )
         from ..legacy.model.utils import get_norm
 
         # ParallecMLP
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
-                                    ParallelMLPPatch.__init__)
-
+                                    parallel_mlp_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.__init__',
+                                    parallel_attention_init_wrapper,
+                                    apply_wrapper=True)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.forward',
                                     ParallelAttentionPatch.forward)
 

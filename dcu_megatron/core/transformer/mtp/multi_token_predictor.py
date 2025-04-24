@@ -16,6 +16,7 @@ from megatron.core.fusions.fused_cross_entropy import fused_vocab_parallel_cross
 
 from megatron.core.transformer import ModuleSpec, TransformerConfig, build_module
 from ...tensor_parallel.random import CheckpointWithoutOutput
+from ...tensor_parallel import FluxColumnParallelLinear
 
 
 @dataclass
