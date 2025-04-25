@@ -73,7 +73,7 @@ def gpt_model_init_wrapper(fn):
                             parallel_output=self.parallel_output,
                             position_embedding_type=self.position_embedding_type,
                             rotary_percent=self.rotary_percent,
-                            seq_len_interpolation_factor=seq_len_interpolation_factor,
+                            seq_len_interpolation_factor=kwargs.get("seq_len_interpolation_factor", None),
                             share_mtp_embedding_and_output_weight=self.share_mtp_embedding_and_output_weight,
                             recompute_mtp_norm=self.recompute_mtp_norm,
                             recompute_mtp_layer=self.recompute_mtp_layer,

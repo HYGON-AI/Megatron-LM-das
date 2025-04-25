@@ -5,7 +5,7 @@ import warnings
 from functools import wraps
 from typing import Callable, List, Optional
 
-if int(os.getenv("USE_FLUX_OVERLAP", "0"))
+if int(os.getenv("USE_FLUX_OVERLAP", "0")):
     try:
         import flux
         from dcu_megatron.core.utils import is_flux_min_version
