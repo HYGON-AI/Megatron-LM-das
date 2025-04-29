@@ -10,8 +10,10 @@ from megatron.core.utils import (
     StragglerDetector,
 )
 from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
 
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.training.initialize import write_args_to_tensorboard
 from megatron.core.num_microbatches_calculator import (
     get_current_global_batch_size,
@@ -36,6 +38,7 @@ from megatron.training import one_logger_utils
 from megatron.training import ft_integration
 from megatron.training.training import (
     print_datetime,
+    should_disable_forward_pre_hook,
     disable_forward_pre_hook,
     train_step,
     save_checkpoint_and_time,

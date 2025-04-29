@@ -8,7 +8,6 @@ do
     fi
 done
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
-echo $CURRENT_DIR
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
