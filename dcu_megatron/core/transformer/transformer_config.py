@@ -1,28 +1,33 @@
+from typing import Optional
+from functools import wraps
 from dataclasses import dataclass
 
+from megatron.training import get_args
 from megatron.core.transformer.transformer_config import TransformerConfig, MLATransformerConfig
+
+
+def transformer_config_post_init_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self):
+        fn(self)
+        args = get_args()
+
+        """Number of Multi-Token Prediction (MTP) Layers."""
+        self.mtp_num_layers = args.mtp_num_layers
+
+        """Weighting factor of Multi-Token Prediction (MTP) loss."""
+        self.mtp_loss_scaling_factor = args.mtp_loss_scaling_factor
+
+        ##################
+        # flux
+        ##################
+        self.flux_transpose_weight = args.flux_transpose_weight
+
+    return wrapper
 
 
 @dataclass
 class ExtraTransformerConfig:
-    ##################
-    # multi-token prediction
-    ##################
-    num_nextn_predict_layers: int = 0
-    """The number of multi-token prediction layers"""
-
-    mtp_loss_scale: float = 0.3
-    """Multi-token prediction loss scale"""
-
-    recompute_mtp_norm: bool = False
-    """Whether to recompute mtp normalization"""
-
-    recompute_mtp_layer: bool = False
-    """Whether to recompute mtp layer"""
-
-    share_mtp_embedding_and_output_weight: bool = False
-    """share embedding and output weight with mtp layer."""
-
     ##################
     # flux
     ##################

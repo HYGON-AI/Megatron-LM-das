@@ -170,14 +170,16 @@ def _add_extra_tokenizer_args(parser):
 
 def _add_mtp_args(parser):
     group = parser.add_argument_group(title='multi token prediction')
-    group.add_argument('--num-nextn-predict-layers', type=int, default=0, help='Multi-Token prediction layer num')
-    group.add_argument('--mtp-loss-scale', type=float, default=0.3, help='Multi-Token prediction loss scale')
-    group.add_argument('--recompute-mtp-norm', action='store_true', default=False,
-                       help='Multi-Token prediction recompute norm')
-    group.add_argument('--recompute-mtp-layer', action='store_true', default=False,
-                       help='Multi-Token prediction recompute layer')
-    group.add_argument('--share-mtp-embedding-and-output-weight', action='store_true', default=False,
-                       help='Main model share embedding and output weight with mtp layer.')
+    group.add_argument('--mtp-num-layers', type=int, default=None,
+                       help='Number of Multi-Token Prediction (MTP) Layers.'
+                       'MTP extends the prediction scope to multiple future tokens at each position.'
+                       'This MTP implementation sequentially predict additional tokens '
+                       'by using D sequential modules to predict D additional tokens.')
+    group.add_argument('--mtp-loss-scaling-factor', type=float, default=0.3,
+                       help='Scaling factor of Multi-Token Prediction (MTP) loss. '
+                       'We compute the average of the MTP losses across all depths, '
+                       'and multiply it the scaling factor to obtain the overall MTP loss, '
+                       'which serves as an additional training objective.')
     return parser
 
 

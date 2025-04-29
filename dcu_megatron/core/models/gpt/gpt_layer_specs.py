@@ -1,5 +1,5 @@
 import warnings
-from typing import Optional
+from typing import Optional, Union
 
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
@@ -12,12 +12,12 @@ from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttentionSubmodules,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
+from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
+from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSubmodules,
 )
-
-from dcu_megatron.core.tensor_parallel.layers import FluxColumnParallelLinear, FluxRowParallelLinear
 
 from megatron.core.utils import is_te_min_version
 
@@ -35,6 +35,17 @@ try:
     from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 except ImportError:
     warnings.warn('Apex is not installed.')
+
+from dcu_megatron.core.tensor_parallel.layers import (
+    FluxColumnParallelLinear,
+    FluxRowParallelLinear
+)
+from dcu_megatron.core.transformer.multi_token_prediction import (
+    MultiTokenPredictionBlockSubmodules,
+    get_mtp_layer_offset,
+    get_mtp_layer_spec,
+    get_mtp_num_layers_to_build,
+)
 
 
 def get_gpt_layer_with_flux_spec(

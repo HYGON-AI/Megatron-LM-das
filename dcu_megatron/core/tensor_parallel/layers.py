@@ -1,47 +1,27 @@
 import os
-import copy
 import socket
 import warnings
-from functools import wraps
 from typing import Callable, List, Optional
 
-if int(os.getenv("USE_FLUX_OVERLAP", "0")):
-    try:
-        import flux
-        from dcu_megatron.core.utils import is_flux_min_version
-    except ImportError:
-        raise ImportError("flux is NOT installed")
+try:
+    import flux
+except ImportError:
+    raise ImportError("flux is NOT installed")
 
 import torch
-import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 
-from megatron.training import print_rank_0
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
     get_global_memory_buffer,
     get_tensor_model_parallel_group,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from megatron.core.utils import (
-    is_torch_min_version,
-    prepare_input_tensors_for_wgrad_compute
-)
-from megatron.core.tensor_parallel.layers import (
-    _initialize_affine_weight_cpu,
-    _initialize_affine_weight_gpu,
-    VocabParallelEmbedding,
-)
+from megatron.core.utils import prepare_input_tensors_for_wgrad_compute
 from megatron.core.tensor_parallel.mappings import (
+    _reduce,
     copy_to_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
-    reduce_scatter_to_sequence_parallel_region,
-    _reduce_scatter_along_first_dim,
-    _gather_along_first_dim,
 )
-from megatron.core.tensor_parallel.utils import VocabUtility
-from megatron.core.tensor_parallel.mappings import _reduce
 from megatron.core.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -50,83 +30,15 @@ from megatron.core.tensor_parallel.layers import (
     custom_fwd,
     custom_bwd,
     dist_all_gather_func,
-    linear_with_frozen_weight,
-    linear_with_grad_accumulation_and_async_allreduce
 )
+from dcu_megatron.core.utils import is_flux_min_version
+
 
 _grad_accum_fusion_available = True
 try:
     import fused_weight_gradient_mlp_cuda
 except ImportError:
     _grad_accum_fusion_available = False
-
-
-def vocab_parallel_embedding_init_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self,
-                *args,
-                skip_weight_param_allocation: bool = False,
-                **kwargs
-        ):
-
-        if (
-            skip_weight_param_allocation
-            and "config" in kwargs
-            and hasattr(kwargs["config"], "perform_initialization")
-        ):
-            config = copy.deepcopy(kwargs["config"])
-            config.perform_initialization = False
-            kwargs["config"] = config
-
-        fn(self, *args, **kwargs)
-
-        if skip_weight_param_allocation:
-            self.weight = None
-
-    return wrapper
-
-
-@torch.compile(mode='max-autotune-no-cudagraphs')
-def vocab_parallel_embedding_forward(self, input_, weight=None):
-    """Forward.
-
-    Args:
-        input_ (torch.Tensor): Input tensor.
-    """
-    if weight is None:
-        if self.weight is None:
-            raise RuntimeError(
-                "weight was not supplied to VocabParallelEmbedding forward pass "
-                "and skip_weight_param_allocation is True."
-            )
-        weight = self.weight
-
-    if self.tensor_model_parallel_size > 1:
-        # Build the mask.
-        input_mask = (input_ < self.vocab_start_index) | (input_ >= self.vocab_end_index)
-        # Mask the input.
-        masked_input = input_.clone() - self.vocab_start_index
-        masked_input[input_mask] = 0
-    else:
-        masked_input = input_
-    # Get the embeddings.
-    if self.deterministic_mode:
-        output_parallel = weight[masked_input]
-    else:
-        # F.embedding currently has a non-deterministic backward function
-        output_parallel = F.embedding(masked_input, weight)
-    # Mask the output embedding.
-    if self.tensor_model_parallel_size > 1:
-        output_parallel[input_mask, :] = 0.0
-
-    if self.reduce_scatter_embeddings:
-        # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
-        output_parallel = output_parallel.transpose(0, 1).contiguous()
-        output = reduce_scatter_to_sequence_parallel_region(output_parallel)
-    else:
-        # Reduce across all the model parallel GPUs.
-        output = reduce_from_tensor_model_parallel_region(output_parallel)
-    return output
 
 
 def get_tensor_model_parallel_node_size(group=None):

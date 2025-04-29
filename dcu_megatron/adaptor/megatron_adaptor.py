@@ -21,7 +21,6 @@ class MegatronAdaptation:
         for adaptation in [CoreAdaptation(), LegacyAdaptation()]:
             adaptation.execute()
         MegatronAdaptation.apply()
-        # MegatronAdaptation.post_execute()
 
     @classmethod
     def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False, remove_origin_wrappers=False):
@@ -87,47 +86,23 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_miscellaneous()
 
     def patch_core_distributed(self):
-        # Mtp share embedding
-        from ..core.distributed.finalize_model_grads import _allreduce_word_embedding_grads
-        MegatronAdaptation.register('megatron.core.distributed.finalize_model_grads._allreduce_word_embedding_grads',
-                                    _allreduce_word_embedding_grads)
+        pass
 
     def patch_core_models(self):
-        from ..core.models.common.embeddings.language_model_embedding import (
-            language_model_embedding_forward,
-            language_model_embedding_init_func
-        )
-        from ..core.models.gpt.gpt_model import (
-            gpt_model_forward,
-            gpt_model_init_wrapper,
-            shared_embedding_or_mtp_embedding_weight
-        )
-        from ..training.utils import get_batch_on_this_tp_rank
-
-        # Embedding
-        MegatronAdaptation.register(
-            'megatron.core.models.common.embeddings.language_model_embedding.LanguageModelEmbedding.__init__',
-            language_model_embedding_init_func)
-        MegatronAdaptation.register(
-            'megatron.core.models.common.embeddings.language_model_embedding.LanguageModelEmbedding.forward',
-            language_model_embedding_forward)
-
-        MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
+        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_forward
 
         # GPT Model
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward', gpt_model_forward)
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
                                     gpt_model_init_wrapper,
                                     apply_wrapper=True)
-
-        from megatron.core.models.gpt.gpt_model import GPTModel
-        setattr(GPTModel, 'shared_embedding_or_mtp_embedding_weight', shared_embedding_or_mtp_embedding_weight)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
+                                    gpt_model_forward)
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import TransformerConfigPatch, MLATransformerConfigPatch
         
-        # Transformer block
+        # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
                                     transformer_block_init_wrapper)
 
@@ -141,9 +116,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
                                     torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
-                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
-                                    apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
+        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
+        #                             apply_wrapper=True)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
@@ -157,6 +132,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.extensions.transformer_engine import TEDotProductAttentionPatch
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
+        # kv channels, te_min_version 1.10.0 -> 1.9.0
         MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
                                     TEDotProductAttentionPatch.__init__)
 
@@ -165,13 +141,10 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
-        from ..core.tensor_parallel import vocab_parallel_embedding_forward, vocab_parallel_embedding_init_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
-                                    vocab_parallel_embedding_forward)
-        MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.__init__',
-                                    vocab_parallel_embedding_init_wrapper,
+                                    torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
 
         # VocabParallelCrossEntropy
@@ -202,6 +175,9 @@ class CoreAdaptation(MegatronAdaptationABC):
             MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
                                         get_gpt_layer_with_flux_spec)
 
+    def patch_pipeline_parallel(self):
+        pass
+
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
         from ..training.initialize import _initialize_distributed
@@ -210,12 +186,14 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer)
+        # specify init_method
         MegatronAdaptation.register('megatron.training.initialize._initialize_distributed',
                                     _initialize_distributed)
+        # remove fused_kernels
         MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
                                     _compile_dependencies)
 
-        # traing.train
+        # add trace_handler
         MegatronAdaptation.register('megatron.training.training.train',
                                     train)
 
@@ -245,6 +223,8 @@ class LegacyAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
                                     parallel_mlp_init_wrapper,
                                     apply_wrapper=True)
+
+        # ParallelAttention
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.__init__',
                                     parallel_attention_init_wrapper,
                                     apply_wrapper=True)

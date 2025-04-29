@@ -1,4 +1,5 @@
 import os
+import torch
 import dataclasses
 import transformer_engine as te
 
@@ -11,6 +12,7 @@ from megatron.core.utils import get_te_version, is_te_min_version
 from megatron.core.extensions.transformer_engine import TEDotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.process_groups_config import ModelCommProcessGroups
 
 from megatron.core.parallel_state import (
     get_context_parallel_global_ranks,
@@ -32,6 +34,7 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
         k_channels: Optional[int] = None,
         v_channels: Optional[int] = None,
         cp_comm_type: str = "p2p",
+        model_comm_pgs: ModelCommProcessGroups = None,
     ):
         self.config = config
         self.te_forward_mask_type = False
@@ -58,6 +61,26 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
                 f"num_attention_heads ({self.config.num_attention_heads}))"
             )
 
+        if model_comm_pgs is None:
+            # For backward compatibility, remove in v0.14 and raise error
+            # raise ValueError("TEDotProductAttention was called without ModelCommProcessGroups")
+            model_comm_pgs = ModelCommProcessGroups(
+                tp=get_tensor_model_parallel_group(check_initialized=False),
+                cp=get_context_parallel_group(check_initialized=False),
+                hcp=get_hierarchical_context_parallel_groups(check_initialized=False),
+            )
+        else:
+            assert hasattr(
+                model_comm_pgs, 'tp'
+            ), "TEDotProductAttention model_comm_pgs must have tp pg"
+            assert hasattr(
+                model_comm_pgs, 'cp'
+            ), "TEDotProductAttention model_comm_pgs must have cp pg"
+            if cp_comm_type == "a2a+p2p":
+                assert hasattr(
+                    model_comm_pgs, 'hcp'
+                ), "TEDotProductAttention model_comm_pgs must have hierarchical cp pg"
+
         if is_te_min_version("0.10.0"):
             extra_kwargs["attention_type"] = attention_type
             # older version don't need attention_type
@@ -73,9 +96,9 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttention, "cp_stream") is None:
                 TEDotProductAttention.cp_stream = torch.cuda.Stream()
-            extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
-            extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
-                check_initialized=False
+            extra_kwargs["cp_group"] = model_comm_pgs.cp
+            extra_kwargs["cp_global_ranks"] = torch.distributed.get_process_group_ranks(
+                model_comm_pgs.cp
             )
             extra_kwargs["cp_stream"] = TEDotProductAttention.cp_stream
             if is_te_min_version("1.10.0"):
@@ -149,7 +172,7 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
-            tp_group=get_tensor_model_parallel_group(check_initialized=False),
+            tp_group=model_comm_pgs.tp,
             layer_number=layer_number,
             **extra_kwargs,
         )

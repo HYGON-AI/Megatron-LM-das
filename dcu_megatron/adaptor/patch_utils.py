@@ -148,11 +148,29 @@ class MegatronPatchesManager:
     patches_info = {}
 
     @staticmethod
-    def register_patch(orig_func_or_cls_name, new_func_or_cls=None, force_patch=False, create_dummy=False):
+    def register_patch(
+        orig_func_or_cls_name,
+        new_func_or_cls=None,
+        force_patch=False,
+        create_dummy=False,
+        apply_wrapper=False,
+        remove_origin_wrappers=False
+    ):
         if orig_func_or_cls_name not in MegatronPatchesManager.patches_info:
-            MegatronPatchesManager.patches_info[orig_func_or_cls_name] = Patch(orig_func_or_cls_name, new_func_or_cls, create_dummy)
+            MegatronPatchesManager.patches_info[orig_func_or_cls_name] = Patch(
+                orig_func_or_cls_name,
+                new_func_or_cls,
+                create_dummy,
+                apply_wrapper=apply_wrapper,
+                remove_origin_wrappers=remove_origin_wrappers
+            )
         else:
-            MegatronPatchesManager.patches_info.get(orig_func_or_cls_name).set_patch_func(new_func_or_cls, force_patch)
+            MegatronPatchesManager.patches_info.get(orig_func_or_cls_name).set_patch_func(
+                new_func_or_cls,
+                force_patch,
+                apply_wrapper=apply_wrapper,
+                remove_origin_wrappers=remove_origin_wrappers
+            )
 
     @staticmethod
     def apply_patches():
