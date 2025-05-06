@@ -9,6 +9,7 @@ from torch import Tensor
 
 from megatron.core import InferenceParams, tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
+from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.models.gpt import GPTModel as MegatronCoreGPTModel
 
@@ -64,11 +65,14 @@ class GPTModel(MegatronCoreGPTModel):
         attention_mask: Tensor,
         decoder_input: Tensor = None,
         labels: Tensor = None,
-        inference_params: InferenceParams = None,
+        inference_context: BaseInferenceContext = None,
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict = None,
         runtime_gather_output: Optional[bool] = None,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
         loss_mask: Optional[Tensor] = None,
+
     ):
         """Builds a computation schedule plan for the model.
 
@@ -105,10 +109,12 @@ class GPTModel(MegatronCoreGPTModel):
             attention_mask,
             decoder_input=decoder_input,
             labels=labels,
-            inference_params=inference_params,
+            inference_context=inference_context,
             packed_seq_params=packed_seq_params,
             extra_block_kwargs=extra_block_kwargs,
             runtime_gather_output=runtime_gather_output,
+            inference_params=inference_params,
+            loss_mask=loss_mask,
         )
 
     def forward(
@@ -118,14 +124,16 @@ class GPTModel(MegatronCoreGPTModel):
         attention_mask: Tensor,
         decoder_input: Tensor = None,
         labels: Tensor = None,
-        inference_params: InferenceParams = None,
+        inference_context: BaseInferenceContext = None,
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict = None,
         runtime_gather_output: Optional[bool] = None,
+        *,
+        inference_params: Optional[BaseInferenceContext] = None,
         loss_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward function of the GPT Model This function passes the input tensors
-        through the embedding layer, and then the decoder and finally into the post
+        through the embedding layer, and then the decoeder and finally into the post
         processing layer (optional).
 
         It either returns the Loss values if labels are given  or the final hidden units
@@ -136,6 +144,8 @@ class GPTModel(MegatronCoreGPTModel):
         """
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # Decoder embedding.
         if decoder_input is not None:
@@ -152,39 +162,64 @@ class GPTModel(MegatronCoreGPTModel):
         rotary_pos_cos = None
         rotary_pos_sin = None
         if self.position_embedding_type == 'rope' and not self.config.multi_latent_attention:
-            if not self.training and self.config.flash_decode and inference_params:
+            if not self.training and self.config.flash_decode and inference_context:
+                assert (
+                    inference_context.is_static_batching()
+                ), "GPTModel currently only supports static inference batching."
                 # Flash decoding uses precomputed cos and sin for RoPE
                 rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb_cache.setdefault(
-                    inference_params.max_sequence_length,
-                    self.rotary_pos_emb.get_cos_sin(inference_params.max_sequence_length),
+                    inference_context.max_sequence_length,
+                    self.rotary_pos_emb.get_cos_sin(inference_context.max_sequence_length),
                 )
             else:
                 rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
-                    inference_params, self.decoder, decoder_input, self.config, packed_seq_params
+                    inference_context, self.decoder, decoder_input, self.config, packed_seq_params
                 )
                 rotary_pos_emb = self.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq_params is not None
                     and packed_seq_params.qkv_format == 'thd',
                 )
+        elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
+            if self.training or not self.config.flash_decode:
+                rotary_pos_emb = self.rotary_pos_emb(position_ids, self.mrope_section)
+            else:
+                # Flash decoding uses precomputed cos and sin for RoPE
+                raise NotImplementedError(
+                    "Flash decoding uses precomputed cos and sin for RoPE, not implmented in "
+                    "MultimodalRotaryEmbedding yet."
+                )
+
         if (
             (self.config.enable_cuda_graph or self.config.flash_decode)
             and rotary_pos_cos is not None
-            and inference_params
+            and inference_context
+            and inference_context.is_static_batching()
+            and not self.training
         ):
             sequence_len_offset = torch.tensor(
-                [inference_params.sequence_len_offset] * inference_params.current_batch_size,
+                [inference_context.sequence_len_offset] * inference_context.current_batch_size,
                 dtype=torch.int32,
                 device=rotary_pos_cos.device,  # Co-locate this with the rotary tensors
             )
         else:
             sequence_len_offset = None
 
+        # Wrap decoder_input to allow the decoder (TransformerBlock) to delete the
+        # reference held by this caller function, enabling early garbage collection for
+        # inference. Skip wrapping if decoder_input is logged after decoder completion.
+        if (
+            inference_context is not None
+            and not self.training
+            and not has_config_logger_enabled(self.config)
+        ):
+            decoder_input = WrappedTensor(decoder_input)
+
         # Run decoder.
         hidden_states = self.decoder(
             hidden_states=decoder_input,
             attention_mask=attention_mask,
-            inference_params=inference_params,
+            inference_context=inference_context,
             rotary_pos_emb=rotary_pos_emb,
             rotary_pos_cos=rotary_pos_cos,
             rotary_pos_sin=rotary_pos_sin,
@@ -192,6 +227,12 @@ class GPTModel(MegatronCoreGPTModel):
             sequence_len_offset=sequence_len_offset,
             **(extra_block_kwargs or {}),
         )
+
+        # Process inference output.
+        if inference_context and not inference_context.is_static_batching():
+            hidden_states = inference_context.last_token_logits(
+                hidden_states.squeeze(1).unsqueeze(0)
+            ).unsqueeze(1)
 
         # logits and loss
         output_weight = None
@@ -230,6 +271,13 @@ class GPTModel(MegatronCoreGPTModel):
         if not self.post_process:
             return hidden_states
 
+        if (
+            not self.training
+            and inference_context is not None
+            and inference_context.is_static_batching()
+            and inference_context.materialize_only_last_token_logits
+        ):
+            hidden_states = hidden_states[-1:, :, :]
         logits, _ = self.output_layer(
             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
         )
