@@ -24,6 +24,13 @@ class MegatronAdaptation:
             adaptation.execute()
         MegatronAdaptation.apply()
 
+        # apply features
+        from .patch_utils import MegatronPatchesManager
+        from .features_manager import a2a_overlap_adaptation
+
+        a2a_overlap_adaptation(MegatronPatchesManager)
+        MegatronPatchesManager.apply_patches()
+
     @classmethod
     def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False, remove_origin_wrappers=False):
         """
@@ -91,14 +98,14 @@ class CoreAdaptation(MegatronAdaptationABC):
         pass
 
     def patch_core_models(self):
-        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, GPTModel
+        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_forward
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
                                     gpt_model_init_wrapper,
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel',
-                                    GPTModel)
+         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
+                                    gpt_model_forward)
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
@@ -142,18 +149,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear if is_te_min_version("2.3.0.dev0") else te.pytorch.BatchLinear,)
 
-
-    def patch_pipeline_parallel(self):
-        from ..core.pipeline_parallel.schedules import get_pp_rank_microbatches, forward_backward_pipelining_with_interleaving
-
-        # num_warmup_microbatches + 1
-        MegatronAdaptation.register('megatron.core.pipeline_parallel.schedules.get_pp_rank_microbatches',
-                                    get_pp_rank_microbatches)
-
-        # a2a_overlap
-        MegatronAdaptation.register('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
-                                    forward_backward_pipelining_with_interleaving)
-
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
 
@@ -189,9 +184,6 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         FluxRowParallelLinear)
             MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
                                         get_gpt_layer_with_flux_spec)
-
-    def patch_pipeline_parallel(self):
-        pass
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer

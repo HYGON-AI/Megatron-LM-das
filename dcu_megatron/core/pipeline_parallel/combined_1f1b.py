@@ -503,6 +503,7 @@ def get_default_cls_for_unwrap():
         pass
     return cls
 
+
 def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
     """unwrap_model DistributedDataParallel and Float16Module wrapped model"""
     return_list = True

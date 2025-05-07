@@ -239,7 +239,6 @@ class PostProcessNode(ScheduleNode):
         return loss
 
 
-
 class TransformerLayerNode(ScheduleNode):
 
     def __init__(self, chunk_state, common_state, layer, stream, event, free_inputs=False):
@@ -597,8 +596,6 @@ def schedule_layer_1f1b(
     if f_layer is not None:
         with f_context:
             f_input = f_layer.mlp.forward(f_input)
-
-
 
     def next_iter_pre_forward():
         if f_layer is not None:

@@ -17,16 +17,6 @@ def transformer_block_init_wrapper(fn):
 
 
 class TransformerBlock(MegatronCoreTransformerBlock):
-    def __init__(
-        self, *args, **kwargs
-    ):
-        super().__init__(*args, **kwargs)
-
-        # mtp require seperate layernorms for main model and mtp modules, thus move finalnorm out of block
-        config = args[0] if len(args) > 1 else kwargs['config']
-        if getattr(config, "mtp_num_layers", 0) > 0:
-            self.main_final_layernorm = self.final_layernorm
-            self.final_layernorm = None
 
     def get_layer_callables(self, layer_number: int):
         """

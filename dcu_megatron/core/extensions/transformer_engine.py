@@ -3,7 +3,7 @@ import torch
 import dataclasses
 import transformer_engine as te
 
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 from packaging.version import Version as PkgVersion
 
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -13,6 +13,9 @@ from megatron.core.extensions.transformer_engine import TEDotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.model_parallel_config import ModelParallelConfig
+from megatron.core.extensions.transformer_engine import TELinear as MegatronCoreTELinear
+from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear as MegatronCoreTELayerNormColumnParallelLinear
 
 from megatron.core.parallel_state import (
     get_context_parallel_global_ranks,
@@ -20,6 +23,112 @@ from megatron.core.parallel_state import (
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
 )
+
+
+def _get_extra_te_kwargs_wrapper(fn):
+    @wraps(fn)
+    def wrapper(config: TransformerConfig):
+        extra_transformer_engine_kwargs = fn(config)
+        extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.get("split_bw", False)
+        return extra_transformer_engine_kwargs
+
+    return wrapper
+
+
+class TELinear(MegatronCoreTELinear):
+    """
+    Wrapper for the Transformer-Engine's `Linear` layer.
+
+    Note that if Megatron's parallel_state has not been initialized
+    yet, the tp_group passed to TE will be None and must be set later
+    via set_tensor_parallel_group().
+
+    parallel_mode currently supports 3 different values:
+        - "column": Split the weight matrix along output dimension (used in TEColumnParallelLinear)
+        - "row": Split the weight matrix along input dimension (used in TERowParallelLinear)
+        - "duplicated": No tensor parallelism and weight is duplicated across TP ranks
+        - Note: For expert linear layers, we will disable communication logic here
+                as TP communication is handled in token_dispatcher.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        parallel_mode: Optional[str],
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        skip_weight_param_allocation: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        is_expert: bool = False,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ):
+        self.split_bw = config.get("split_bw", False)
+        assert not self.split_bw, "split_bw is currently not supported"
+
+        super().__init__(
+            input_size,
+            output_size,
+            parallel_mode=parallel_mode,
+            config=config,
+            init_method=init_method,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            skip_weight_param_allocation=skip_weight_param_allocation,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            is_expert=is_expert,
+            tp_group=tp_group,
+        )
+
+    def backward_dw(self):
+        if not self.split_bw:
+            return
+
+
+class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinear):
+    """
+    Wrapper for the Transformer-Engine's `LayerNormLinear` layer that combines
+    layernorm and linear layers
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        config: TransformerConfig,
+        init_method: Callable,
+        gather_output: bool,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        skip_weight_param_allocation: bool = False,
+        tp_comm_buffer_name: Optional[str] = None,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ):
+        self.split_bw = config.get("split_bw", False)
+        assert not self.split_bw, "split_bw is currently not supported"
+
+        super().__init__(
+            input_size,
+            output_size,
+            config=config,
+            init_method=init_method,
+            gather_output=gather_output,
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            skip_weight_param_allocation=skip_weight_param_allocation,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            tp_group=tp_group,
+        )
+
+    def backward_dw(self):
+        if not self.split_bw:
+            return
 
 
 class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
@@ -176,3 +285,52 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             layer_number=layer_number,
             **extra_kwargs,
         )
+
+
+if is_te_min_version("1.9.0.dev0"):
+    from megatron.core.extensions.transformer_engine import TEGroupedLinear as MegatronCoreTEGroupedLinear
+
+    class TEGroupedLinear(MegatronCoreTEGroupedLinear):
+        """
+        Wrapper for the Transformer-Engine's `GroupedLinear` layer.
+
+        Note that if Megatron's parallel_state has not been initialized
+        yet, the tp_group passed to TE will be None and must be set later
+        via set_tensor_parallel_group().
+        """
+
+        def __init__(
+            self,
+            num_gemms: int,
+            input_size: int,
+            output_size: int,
+            *,
+            parallel_mode: Optional[str],
+            config: ModelParallelConfig,
+            init_method: Callable,
+            bias: bool,
+            skip_bias_add: bool,
+            is_expert: bool = False,
+            tp_comm_buffer_name: Optional[str] = None,
+            tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        ):
+            self.split_bw = config.get("split_bw", False)
+            assert not self.split_bw, "split_bw is currently not supported"
+
+            super().__init__(
+                num_gemms,
+                input_size,
+                output_size,
+                parallel_mode=parallel_mode,
+                config=config,
+                init_method=init_method,
+                bias=bias,
+                skip_bias_add=skip_bias_add,
+                is_expert=is_expert,
+                tp_comm_buffer_name=tp_comm_buffer_name,
+                tp_group=tp_group,
+            )
+
+        def backward_dw(self):
+            if not self.split_bw:
+                return
