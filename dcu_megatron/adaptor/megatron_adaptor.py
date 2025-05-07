@@ -5,6 +5,8 @@ import types
 import argparse
 import torch
 
+from megatron.core.utils import is_te_min_version
+
 
 class MegatronAdaptation:
     """
@@ -89,14 +91,14 @@ class CoreAdaptation(MegatronAdaptationABC):
         pass
 
     def patch_core_models(self):
-        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_forward
+        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, GPTModel
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
                                     gpt_model_init_wrapper,
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
-                                    gpt_model_forward)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel',
+                                    GPTModel)
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
@@ -116,9 +118,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
                                     torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
                                     apply_wrapper=True)
-        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
-        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
-        #                             apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
+                                    torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
+                                    apply_wrapper=True)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
@@ -132,12 +134,25 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.extensions.transformer_engine import TEDotProductAttentionPatch
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
-        # kv channels, te_min_version 1.10.0 -> 1.9.0
-        MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
-                                    TEDotProductAttentionPatch.__init__)
+        if not is_te_min_version("1.10.0"):
+            # kv channels, te_min_version 1.10.0 -> 1.9.0
+            MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
+                                        TEDotProductAttentionPatch.__init__)
 
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
-            TEGroupedLinear.__bases__ = (te.pytorch.BatchLinear,)
+            TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear if is_te_min_version("2.3.0.dev0") else te.pytorch.BatchLinear,)
+
+
+    def patch_pipeline_parallel(self):
+        from ..core.pipeline_parallel.schedules import get_pp_rank_microbatches, forward_backward_pipelining_with_interleaving
+
+        # num_warmup_microbatches + 1
+        MegatronAdaptation.register('megatron.core.pipeline_parallel.schedules.get_pp_rank_microbatches',
+                                    get_pp_rank_microbatches)
+
+        # a2a_overlap
+        MegatronAdaptation.register('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
+                                    forward_backward_pipelining_with_interleaving)
 
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
@@ -162,7 +177,7 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # flux
         if int(os.getenv("USE_FLUX_OVERLAP", "0")):
-            from ..core.tensor_parallel import (
+            from ..core.tensor_parallel.layers import (
                 FluxColumnParallelLinear,
                 FluxRowParallelLinear
             )

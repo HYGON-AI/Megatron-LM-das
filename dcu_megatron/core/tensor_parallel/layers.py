@@ -740,6 +740,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: str = None,  # Not used
         disable_grad_reduce: bool = False,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super(FluxColumnParallelLinear, self).__init__(
             input_size=input_size,
@@ -757,6 +758,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             disable_grad_reduce=disable_grad_reduce,
+            tp_group=tp_group,
         )
 
         # flux params
@@ -961,6 +963,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         keep_master_weight_for_test: bool = False,
         is_expert: bool = False,
         tp_comm_buffer_name: str = None,  # Not used
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 
         super(FluxRowParallelLinear, self).__init__(
@@ -974,7 +977,8 @@ class FluxRowParallelLinear(RowParallelLinear):
             stride=stride,
             keep_master_weight_for_test=keep_master_weight_for_test,
             is_expert=is_expert,
-            tp_comm_buffer_name=tp_comm_buffer_name
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            tp_group=tp_group,
         )
 
         # flux params

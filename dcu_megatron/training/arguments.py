@@ -26,6 +26,8 @@ def add_megatron_arguments_patch(parser: argparse.ArgumentParser):
     parser = _add_extra_training_args(parser)
     parser = _add_extra_distributed_args(parser)
     parser = _add_extra_tokenizer_args(parser)
+    parser = _add_extra_moe_args(parser)
+    parser = _add_flux_args(parser)
 
     return parser
 
@@ -125,6 +127,18 @@ def _add_extra_tokenizer_args(parser):
                                 'NullTokenizer',
                                 'DeepSeekV2Tokenizer'],
                        help='What type of tokenizer to use.')
+    return parser
+
+
+def _add_extra_moe_args(parser):
+    group = parser.add_argument_group(title="extra moe args")
+
+    group.add_argument('--combined-1f1b', action='store_true',
+                       help='Batch-level overlapping in 1f1b stage.')
+    group.add_argument('--combined-1f1b-recipe', type=str,
+                       choices=['ep_a2a', 'golden'],
+                       default='golden',
+                       help='Options are "ep_a2a" and "golden".')
     return parser
 
 

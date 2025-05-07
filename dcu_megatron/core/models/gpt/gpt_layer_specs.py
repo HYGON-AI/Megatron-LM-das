@@ -12,6 +12,7 @@ from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttentionSubmodules,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
+from megatron.core.transformer.torch_norm import L2Norm
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
@@ -40,12 +41,6 @@ from dcu_megatron.core.tensor_parallel.layers import (
     FluxColumnParallelLinear,
     FluxRowParallelLinear
 )
-from dcu_megatron.core.transformer.multi_token_prediction import (
-    MultiTokenPredictionBlockSubmodules,
-    get_mtp_layer_offset,
-    get_mtp_layer_spec,
-    get_mtp_num_layers_to_build,
-)
 
 
 def get_gpt_layer_with_flux_spec(
@@ -55,6 +50,7 @@ def get_gpt_layer_with_flux_spec(
     multi_latent_attention: Optional[bool] = False,
     fp8: Optional[str] = None,  # pylint: disable=unused-arguments
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
+    qk_l2_norm: Optional[bool] = False,
 ) -> ModuleSpec:
     """Use this spec to use flux modules (required for fp8 training).
 
@@ -66,6 +62,7 @@ def get_gpt_layer_with_flux_spec(
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         moe_use_legacy_grouped_gemm (bool, optional): Force use the legacy GroupedMLP.
                                                       Defaults to False.
+        qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
 
     Returns:
         ModuleSpec: Module specification with flux modules
@@ -84,6 +81,7 @@ def get_gpt_layer_with_flux_spec(
     )
 
     if multi_latent_attention:
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
         return ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
@@ -127,8 +125,12 @@ def get_gpt_layer_with_flux_spec(
                         linear_qkv=FluxColumnParallelLinear,
                         core_attention=TEDotProductAttention,
                         linear_proj=FluxRowParallelLinear,
-                        q_layernorm=qk_norm if qk_layernorm else IdentityOp,
-                        k_layernorm=qk_norm if qk_layernorm else IdentityOp,
+                        q_layernorm=(
+                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                        ),
+                        k_layernorm=(
+                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                        ),
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,

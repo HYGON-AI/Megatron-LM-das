@@ -23,6 +23,7 @@ def transformer_config_post_init_wrapper(fn):
         ##################
         self.flux_transpose_weight = args.flux_transpose_weight
 
+
     return wrapper
 
 
@@ -32,6 +33,12 @@ class ExtraTransformerConfig:
     # flux
     ##################
     flux_transpose_weight: bool = False
+
+    combined_1f1b: bool = False
+    """If true, use combined 1F1B for communication hiding."""
+
+    combined_1f1b_recipe: str = 'ep_a2a'
+    """Recipe to use for combined 1F1B. Currently only 'ep_a2a' and 'golden' are supported."""
 
 
 @dataclass

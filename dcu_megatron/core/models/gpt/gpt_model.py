@@ -13,8 +13,6 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.models.gpt import GPTModel as MegatronCoreGPTModel
 
-from dcu_megatron.core.tensor_parallel import FluxColumnParallelLinear
-
 
 def gpt_model_init_wrapper(fn):
     @wraps(fn)
@@ -22,12 +20,13 @@ def gpt_model_init_wrapper(fn):
         fn(self, *args, **kwargs)
 
         # Output
-        if self.post_process or self.mtp_process:
-            if int(os.getenv("USE_FLUX_OVERLAP", "0")):
-                parallel_linear_impl = FluxColumnParallelLinear
-            else:
-                parallel_linear_impl = tensor_parallel.ColumnParallelLinear
-            self.output_layer = parallel_linear_impl(
+        if (
+            (self.post_process or self.mtp_process)
+            and int(os.getenv("USE_FLUX_OVERLAP", "0"))
+        ):
+            from dcu_megatron.core.tensor_parallel.layers import FluxColumnParallelLinear
+
+            self.output_layer = FluxColumnParallelLinear(
                 self.config.hidden_size,
                 self.vocab_size,
                 config=self.config,
@@ -41,8 +40,8 @@ def gpt_model_init_wrapper(fn):
                 grad_output_buffer=self.grad_output_buffer,
             )
 
-        if self.pre_process or self.post_process:
-            self.setup_embeddings_and_output_layer()
+            if self.pre_process or self.post_process:
+                self.setup_embeddings_and_output_layer()
 
     return wrapper
 
