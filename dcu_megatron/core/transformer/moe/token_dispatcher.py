@@ -1,3 +1,18 @@
+from contextlib import contextmanager
+from typing import Optional, Tuple
+
+import torch
+
+from megatron.core.tensor_parallel import (
+    all_to_all,
+    gather_from_sequence_parallel_region,
+    reduce_scatter_to_sequence_parallel_region,
+)
+from megatron.core.transformer.moe.moe_utils import (
+    permute,
+    sort_chunks_by_idxs,
+    unpermute,
+)
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher as MegatronCoreMoEAlltoAllTokenDispatcher
 
 
@@ -303,7 +318,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         """
         assert bias is None, "Bias is not supported in MoEAlltoAllTokenDispatcher"
 
-         hidden_states = self.combine_preprocess(hidden_states)
+        hidden_states = self.combine_preprocess(hidden_states)
         permutated_local_input_tokens = self.combine_all_to_all(hidden_states)
         output = self.combine_postprocess(permutated_local_input_tokens)
 

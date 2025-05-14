@@ -1,21 +1,26 @@
 import contextlib
 import weakref
-from typing import Any, Callable, Optional, Tuple, Union
+from collections import OrderedDict
+from typing import Optional
 
 import torch
 from torch import Tensor
 
-from megatron.core.pipeline_parallel.combined_1f1b import (
+from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
+from megatron.core.inference.contexts import BaseInferenceContext
+
+from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer import transformer_layer
+from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.utils import deprecate_inference_params
+
+from dcu_megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
+from dcu_megatron.core.pipeline_parallel.combined_1f1b import (
     AbstractSchedulePlan,
     ScheduleNode,
     get_com_stream,
-    get_comp_stream,
     make_viewless,
 )
-from megatron.core.transformer import transformer_layer
-from megatron.core.transformer.module import float16_to_fp32
-from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllPerBatchState
 
 
 def weak_method(method):
@@ -43,6 +48,7 @@ class PreProcessNode(ScheduleNode):
         input_ids = self.model_chunk_state.input_ids
         position_ids = self.model_chunk_state.position_ids
         inference_context = self.model_chunk_state.inference_context
+        inference_params = self.model_chunk_state.inference_params
         packed_seq_params = self.model_chunk_state.packed_seq_params
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -121,22 +127,6 @@ class PostProcessNode(ScheduleNode):
         self.gpt_model = gpt_model
         self.model_chunk_state = model_chunk_state
 
-
-    state.input_ids = input_ids
-    state.position_ids = position_ids
-    state.attention_mask = attention_mask
-    state.decoder_input = decoder_input
-    state.labels = labels
-    state.inference_context =inference_context
-    state.packed_seq_params = packed_seq_params
-    state.extra_block_kwargs = extra_block_kwargs
-    state.runtime_gather_output = runtime_gather_output
-    state.inference_params = inference_params
-    state.loss_mask = loss_mask
-    state.context = None
-    state.context_mask = None
-    state.attention_bias = None
-
     def forward_impl(self, hidden_states):
         gpt_model = self.gpt_model
         
@@ -145,11 +135,13 @@ class PostProcessNode(ScheduleNode):
         labels = self.model_chunk_state.labels
         loss_mask = self.model_chunk_state.loss_mask
         attention_mask = self.model_chunk_state.attention_mask
+        decoder_input = self.model_chunk_state.decoder_input
         inference_params= self.model_chunk_state.inference_params
         rotary_pos_emb = self.model_chunk_state.rotary_pos_emb
         rotary_pos_cos = self.model_chunk_state.rotary_pos_cos
         rotary_pos_sin = self.model_chunk_state.rotary_pos_sin
         packed_seq_params = self.model_chunk_state.packed_seq_params
+        extra_block_kwargs = self.model_chunk_state.extra_block_kwargs
         sequence_len_offset = self.model_chunk_state.sequence_len_offset
         runtime_gather_output = self.model_chunk_state.runtime_gather_output
         inference_context = self.model_chunk_state.inference_context
@@ -267,6 +259,9 @@ class TransformerLayerNode(ScheduleNode):
     def backward_impl(self, outputs, output_grad):
         detached_grad = tuple([e.grad for e in self.detached])
         grads = output_grad + detached_grad
+        # if len(detached_grad):
+        #     print(f"output_grad: {grads}")
+
         self.default_backward_func(outputs + self.before_detached, grads)
         self.before_detached = None
         self.detached = None
@@ -296,7 +291,6 @@ class MoeAttnNode(TransformerLayerNode):
                 tokens_per_expert,
                 permutated_local_input_tokens,
                 permuted_probs,
-                probs,
             ) = self.layer._submodule_attention_router_compound_forward(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -312,7 +306,6 @@ class MoeAttnNode(TransformerLayerNode):
         self.common_state.tokens_per_expert = tokens_per_expert
 
         # detached here
-        self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
         self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
 
@@ -334,7 +327,7 @@ class MoeDispatchNode(TransformerLayerNode):
             )
             # release tensor not used by backward
             # inputs.untyped_storage().resize_(0)
-        self.common_state.tokens_per_expert =  = tokens_per_expert
+        self.common_state.tokens_per_expert = tokens_per_expert
 
         return global_input_tokens, global_probs
 
@@ -345,7 +338,7 @@ class MoeMlPNode(TransformerLayerNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
-                self.common_state.tokens_per_expert, global_input_tokens, global_prob, pre_mlp_layernorm_output
+                self.common_state.tokens_per_expert, global_input_tokens, global_probs, pre_mlp_layernorm_output
             )
             assert mlp_bias is None
 
@@ -372,9 +365,7 @@ class MoeCombineNode(TransformerLayerNode):
             )
         cur_stream = torch.cuda.current_stream()
         self.common_state.residual.record_stream(cur_stream)
-        self.common_state.probs.record_stream(cur_stream)
         self.common_state.residual = None
-        self.common_state.probs = None
         return output
 
 
@@ -554,20 +545,17 @@ def schedule_layer_1f1b(
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
-
     if pre_forward is not None:
         assert f_input is None
         # combine from last iter
         f_input = pre_forward()
         del pre_forward
 
-
     if pre_backward is not None:
         # attn backward from last iter
         assert b_grad is None
         b_grad = pre_backward()
         del pre_backward
-
 
     if b_layer is not None:
         with b_context:
@@ -576,7 +564,6 @@ def schedule_layer_1f1b(
     if pre_backward_dw is not None:
         pre_backward_dw()
         del pre_backward_dw
-
 
     if f_layer is not None:
         with f_context:
@@ -591,7 +578,6 @@ def schedule_layer_1f1b(
             b_grad = b_layer.mlp.backward(b_grad)
             b_grad = b_layer.dispatch.backward(b_grad)
             b_layer.mlp.dw()
-
 
     if f_layer is not None:
         with f_context:
@@ -613,7 +599,6 @@ def schedule_layer_1f1b(
         if b_layer is not None:
             with b_context:
                 b_layer.attn.dw()
-
 
     if f_layer and b_layer:
         return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_dw

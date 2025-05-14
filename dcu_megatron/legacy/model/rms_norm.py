@@ -1,6 +1,10 @@
+import warnings
 import torch
 from typing import Optional
-import lightop
+try:
+    import lightop
+except ImportError:
+    warnings.warn('lightop is not installed.')
 
 from functools import partial
 from megatron.core.utils import is_torch_min_version

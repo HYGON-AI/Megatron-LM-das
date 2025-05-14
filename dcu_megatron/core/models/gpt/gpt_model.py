@@ -7,10 +7,10 @@ from functools import wraps
 import torch
 from torch import Tensor
 
-from megatron.core import InferenceParams, tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.utils import WrappedTensor, deprecate_inference_params
 from megatron.core.models.gpt import GPTModel as MegatronCoreGPTModel
 
 

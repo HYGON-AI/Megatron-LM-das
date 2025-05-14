@@ -2,17 +2,13 @@ import contextlib
 from typing import Callable, Iterator, List, Optional, Union
 
 import torch
-from torch.autograd.variable import Variable
 
 from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
-from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
-from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.utils import (
-    drain_embedding_wgrad_compute,
     get_attr_wrapped_model,
     get_model_config,
     get_model_type,
@@ -30,6 +26,18 @@ from megatron.core.pipeline_parallel.schedules import (
 )
 
 from .combined_1f1b import VppContextManager, forward_backward_step, set_streams, wrap_forward_func
+
+
+def set_current_microbatch(model, microbatch_id):
+    """Set the current microbatch."""
+    decoder_exists = True
+    decoder = None
+    try:
+        decoder = get_attr_wrapped_model(model, "decoder")
+    except RuntimeError:
+        decoder_exists = False
+    if decoder_exists and decoder is not None:
+        decoder.current_microbatch = microbatch_id
 
 
 def get_pp_rank_microbatches(
@@ -541,7 +549,7 @@ def forward_backward_pipelining_with_interleaving(
                             )
 
                 # forward step
-                if parallel_state.is_pipeline_first_stage():
+                if parallel_state.is_pipeline_first_stage(ignore_virtual=False):
                     if len(input_tensors[model_chunk_id]) == len(output_tensors[model_chunk_id]):
                         input_tensors[model_chunk_id].append(None)
 
@@ -573,7 +581,7 @@ def forward_backward_pipelining_with_interleaving(
                     enable_grad_sync()
                     synchronized_model_chunks.add(model_chunk_id)
 
-                if parallel_state.is_pipeline_last_stage():
+                if parallel_state.is_pipeline_last_stage(ignore_virtual=False):
                     if len(output_tensor_grads[model_chunk_id]) == 0:
                         output_tensor_grads[model_chunk_id].append(None)
                 b_input_tensor = input_tensors[model_chunk_id].pop(0)
@@ -679,7 +687,6 @@ def forward_backward_pipelining_with_interleaving(
                 post_backward=post_backward,
             )
         else:
-            output_tensor = None
             input_tensor_grad = None
             if f_virtual_microbatch_id is not None:
                 # forward pass
@@ -704,7 +711,7 @@ def forward_backward_pipelining_with_interleaving(
                 input_tensor_grad = backward_step_helper(b_virtual_microbatch_id)
                 if post_backward is not None:
                     input_tensor_grad = post_backward(input_tensor_grad)
-            return output_tensor, input_tensor_grad
+            return output_tensor if f_virtual_microbatch_id is not None else None, input_tensor_grad
 
     # Run warmup forward passes.
     parallel_state.set_virtual_pipeline_model_parallel_rank(0)
@@ -890,6 +897,7 @@ def forward_backward_pipelining_with_interleaving(
                     output_tensor_grads[num_model_chunks - 1].append(bwd_recv_buffer[-1])
 
     # Run 1F1B in steady state.
+    output_tensor = None
     for k in range(num_microbatches_remaining):
         # Forward pass.
         forward_k = k + num_warmup_microbatches

@@ -3,6 +3,7 @@ import torch
 import dataclasses
 import transformer_engine as te
 
+from functools import wraps
 from typing import Any, Optional, Callable
 from packaging.version import Version as PkgVersion
 
@@ -18,7 +19,6 @@ from megatron.core.extensions.transformer_engine import TELinear as MegatronCore
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear as MegatronCoreTELayerNormColumnParallelLinear
 
 from megatron.core.parallel_state import (
-    get_context_parallel_global_ranks,
     get_context_parallel_group,
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
@@ -29,7 +29,7 @@ def _get_extra_te_kwargs_wrapper(fn):
     @wraps(fn)
     def wrapper(config: TransformerConfig):
         extra_transformer_engine_kwargs = fn(config)
-        extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.get("split_bw", False)
+        extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.split_bw if hasattr(config, "split_bw") else False
         return extra_transformer_engine_kwargs
 
     return wrapper
@@ -66,7 +66,7 @@ class TELinear(MegatronCoreTELinear):
         is_expert: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        self.split_bw = config.get("split_bw", False)
+        self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
         assert not self.split_bw, "split_bw is currently not supported"
 
         super().__init__(
@@ -109,7 +109,7 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        self.split_bw = config.get("split_bw", False)
+        self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
         assert not self.split_bw, "split_bw is currently not supported"
 
         super().__init__(
@@ -314,7 +314,7 @@ if is_te_min_version("1.9.0.dev0"):
             tp_comm_buffer_name: Optional[str] = None,
             tp_group: Optional[torch.distributed.ProcessGroup] = None,
         ):
-            self.split_bw = config.get("split_bw", False)
+            self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
             assert not self.split_bw, "split_bw is currently not supported"
 
             super().__init__(

@@ -1,7 +1,4 @@
-from megatron.core.transformer.multi_latent_attention import MLASelfAttention as MegatronCoreMLASelfAttention
-
-
-class MLASelfAttention(MegatronCoreMLASelfAttention):
+class MLASelfAttention():
     """MLA Self-attention layer class
 
     Self-attention layer takes input with size [s, b, h]

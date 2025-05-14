@@ -1,9 +1,18 @@
-from megatron.core import parallel_state, tensor_parallel
+from functools import partial
+from typing import Any, Optional
+
+import torch
+from torch import Tensor
+
+from megatron.core import tensor_parallel
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import (
     deprecate_inference_params,
     make_viewless_tensor,
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer as MegatronCoreTransformerLayer
+
+from dcu_megatron.core.transformer.utils import SubmoduleCallables, TransformerLayerSubmoduleCallables
 
 
 class TransformerLayer(MegatronCoreTransformerLayer):
@@ -147,7 +156,6 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             tokens_per_expert,
             permutated_local_input_tokens,
             permuted_probs,
-            probs,
         ]
         return tuple(outputs)
 
