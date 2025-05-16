@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
+from megatron.core import parallel_state
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
 
@@ -19,6 +20,7 @@ from dcu_megatron.core.pipeline_parallel.combined_1f1b import (
     AbstractSchedulePlan,
     ScheduleNode,
     get_com_stream,
+    get_comp_stream,
     make_viewless,
 )
 
@@ -620,7 +622,6 @@ def schedule_chunk_1f1b(
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
-
     if f_schedule_plan:
         # pp output send/receive sync
         if pre_forward is not None:
@@ -709,7 +710,7 @@ def schedule_chunk_1f1b(
     if f_schedule_plan is not None and post_forward is not None:
         with f_context:
             f_schedule_plan.wait_current_stream()
-            post_forward(f_input)
+            post_forward(None if parallel_state.is_pipeline_last_stage(ignore_virtual=False) else f_input)
 
     # pp grad send / receive, overlapped with attn dw of cur micro-batch and forward attn of next micro-batch
     if b_schedule_plan is not None and post_backward is not None:
@@ -744,7 +745,7 @@ def build_model_chunk_schedule_plan(
     loss_mask: Optional[Tensor] = None
 ):
 
-    comp_stream = torch.cuda.current_stream()
+    comp_stream = get_comp_stream()
     com_stream = get_com_stream()
     model_chunk_schedule_plan = ModelChunkSchedulePlan()
     event = model_chunk_schedule_plan.event

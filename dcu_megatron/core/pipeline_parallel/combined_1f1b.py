@@ -472,7 +472,10 @@ def forward_backward_step(
                     else torch.tensor(1.0)
                 )
                 # Set the loss scale
-                MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+                if config.calculate_per_token_loss:
+                    MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
+                else:
+                    MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
 
             if not unwrap_output_tensor:
                 output_tensor, num_tokens = [output_tensor], num_tokens

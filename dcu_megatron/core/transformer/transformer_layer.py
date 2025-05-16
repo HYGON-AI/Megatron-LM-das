@@ -182,7 +182,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         return output
 
-    def _submodule_moe_forward(self, tokens_per_expert, global_input_tokens, global_prob, hidden_states):
+    def _submodule_moe_forward(self, tokens_per_expert, global_input_tokens, global_prob, pre_mlp_layernorm_output):
         """
         Performs a forward pass for the MLP submodule, including both expert-based
         and optional shared-expert computations.
@@ -194,7 +194,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert, permuted_probs)
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self.mlp.shared_experts(hidden_states)
+            shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
         return expert_output, shared_expert_output, mlp_bias
 
     def _submodule_combine_forward(self, hidden_states):

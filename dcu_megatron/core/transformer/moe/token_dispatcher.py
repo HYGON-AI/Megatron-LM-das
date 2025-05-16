@@ -25,13 +25,13 @@ class MoEAlltoAllPerBatchState:
         self.input_splits = None
         self.num_out_tokens = None
         self.capacity = None
-        self.preprocess_event = None
         self.hidden_shape = None
         self.probs = None
         self.routing_map = None
         self.reversed_local_input_permutation_mapping = None
         self.cuda_sync_point = None
         self.hidden_shape_before_permute = None
+        self.tokens_per_expert = None
 
 
 class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
@@ -44,7 +44,6 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         state.input_splits = getattr(self, "input_splits", None)
         state.num_out_tokens = getattr(self, "num_out_tokens", None)
         state.capacity = getattr(self, "capacity", None)
-        state.preprocess_event = getattr(self, "preprocess_event", None)
         state.hidden_shape = getattr(self, "hidden_shape", None)
         state.probs = getattr(self, "probs", None)
         state.routing_map = getattr(self, "routing_map", None)
@@ -53,6 +52,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         )
         state.hidden_shape_before_permute = getattr(self, "hidden_shape_before_permute", None)
         state.cuda_sync_point = getattr(self, "cuda_sync_point", None)
+        state.tokens_per_expert = getattr(self, "tokens_per_expert", None)
 
     def apply_per_batch_state(self, state: MoEAlltoAllPerBatchState):
         self.num_global_tokens_per_local_expert = state.num_global_tokens_per_local_expert
@@ -61,7 +61,6 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         self.input_splits = state.input_splits
         self.num_out_tokens = state.num_out_tokens
         self.capacity = state.capacity
-        self.preprocess_event = state.preprocess_event
         self.hidden_shape = state.hidden_shape
         self.probs = state.probs
         self.routing_map = state.routing_map
@@ -70,6 +69,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         )
         self.hidden_shape_before_permute = state.hidden_shape_before_permute
         self.cuda_sync_point = state.cuda_sync_point
+        self.tokens_per_expert = state.tokens_per_expert
 
     @contextmanager
     def per_batch_state_context(self, state: MoEAlltoAllPerBatchState):
@@ -144,6 +144,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
                 output_split_sizes = None
             else:
                 output_split_sizes = self.output_splits_tp.tolist()
+
             global_input_tokens = gather_from_sequence_parallel_region(
                 global_input_tokens, group=self.tp_group, output_split_sizes=output_split_sizes
             )
