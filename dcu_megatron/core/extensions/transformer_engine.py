@@ -29,7 +29,8 @@ def _get_extra_te_kwargs_wrapper(fn):
     @wraps(fn)
     def wrapper(config: TransformerConfig):
         extra_transformer_engine_kwargs = fn(config)
-        extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.split_bw if hasattr(config, "split_bw") else False
+        if hasattr(config, "split_bw"):
+            extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.split_bw
         return extra_transformer_engine_kwargs
 
     return wrapper

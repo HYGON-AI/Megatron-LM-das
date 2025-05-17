@@ -1,6 +1,5 @@
 from functools import wraps
 
-from megatron.core.transformer.transformer_block import TransformerBlock as MegatronCoreTransformerBlock
 
 def transformer_block_init_wrapper(fn):
     @wraps(fn)
@@ -14,12 +13,3 @@ def transformer_block_init_wrapper(fn):
             self.final_layernorm = None
 
     return wrapper
-
-
-class TransformerBlock(MegatronCoreTransformerBlock):
-
-    def get_layer_callables(self, layer_number: int):
-        """
-        Get the callables for the layer at the given layer number.
-        """
-        return self.layers[layer_number].get_submodule_callables()

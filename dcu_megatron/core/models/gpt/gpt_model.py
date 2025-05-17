@@ -11,7 +11,6 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
-from megatron.core.models.gpt import GPTModel as MegatronCoreGPTModel
 
 
 def gpt_model_init_wrapper(fn):
@@ -232,17 +231,10 @@ def gpt_model_forward(
     return loss
 
 
-class GPTModel(MegatronCoreGPTModel):
+class GPTModel:
     """
     patch megatron GPTModel
     """
-
-    def get_transformer_callables_by_layer(self, layer_number: int):
-        """
-        Get the callables for the layer at the given transformer layer number.
-        """
-        return self.decoder.get_layer_callables(layer_number)
-
     def build_schedule_plan(
         self,
         input_ids: Tensor,

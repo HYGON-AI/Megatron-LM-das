@@ -261,9 +261,6 @@ class TransformerLayerNode(ScheduleNode):
     def backward_impl(self, outputs, output_grad):
         detached_grad = tuple([e.grad for e in self.detached])
         grads = output_grad + detached_grad
-        # if len(detached_grad):
-        #     print(f"output_grad: {grads}")
-
         self.default_backward_func(outputs + self.before_detached, grads)
         self.before_detached = None
         self.detached = None
@@ -344,7 +341,7 @@ class MoeMlPNode(TransformerLayerNode):
             )
             assert mlp_bias is None
 
-        # pre_mlp_layernorm_output  used
+        # pre_mlp_layernorm_output used
         self.common_state.pre_mlp_layernorm_output = None
         return expert_output, shared_expert_output
 

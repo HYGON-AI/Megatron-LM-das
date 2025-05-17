@@ -101,11 +101,11 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_forward
 
         # GPT Model
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
-                                    gpt_model_init_wrapper,
-                                    apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
-                                    gpt_model_forward)
+        # MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
+        #                             gpt_model_init_wrapper,
+        #                             apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
+        #                             gpt_model_forward)
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper

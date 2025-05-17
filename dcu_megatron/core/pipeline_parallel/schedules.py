@@ -37,7 +37,8 @@ def set_current_microbatch(model, microbatch_id):
     except RuntimeError:
         decoder_exists = False
     if decoder_exists and decoder is not None:
-        decoder.current_microbatch = microbatch_id
+        for layer in decoder.layers:
+            layer.current_microbatch = microbatch_id
 
 
 def get_pp_rank_microbatches(
@@ -86,6 +87,16 @@ def get_pp_rank_microbatches(
         num_microbatches_remaining,
     )
 
+
+def print_rank_4(message):
+    """If distributed is initialized, print only on rank 0."""
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() == 4:
+            print(message, flush=True)
+    else:
+        print(message, flush=True)
+
+from megatron.training import print_rank_0, print_rank_last
 
 def forward_backward_pipelining_with_interleaving(
     *,
@@ -296,6 +307,9 @@ def forward_backward_pipelining_with_interleaving(
     # model_chunk_id        | 0 0 0 1 1 1 0 0 1 1
     # Both tables are indexed with virtual_microbatch_id.
     microbatch_id_table, model_chunk_id_table = zip(*schedule_table)
+
+    print_rank_4(f"rank last. microbatch_id_table: {microbatch_id_table}. model_chunk_id_table: {model_chunk_id_table}")
+    print_rank_0(f"rank first. microbatch_id_table: {microbatch_id_table}. model_chunk_id_table: {model_chunk_id_table}")
 
     def get_model_chunk_id(virtual_microbatch_id, forward):
         """Helper method to get the model chunk ID given the iteration number."""
@@ -687,6 +701,7 @@ def forward_backward_pipelining_with_interleaving(
                 post_backward=post_backward,
             )
         else:
+            output_tensor = None
             input_tensor_grad = None
             if f_virtual_microbatch_id is not None:
                 # forward pass
@@ -711,7 +726,7 @@ def forward_backward_pipelining_with_interleaving(
                 input_tensor_grad = backward_step_helper(b_virtual_microbatch_id)
                 if post_backward is not None:
                     input_tensor_grad = post_backward(input_tensor_grad)
-            return output_tensor if f_virtual_microbatch_id is not None else None, input_tensor_grad
+            return output_tensor, input_tensor_grad
 
     # Run warmup forward passes.
     parallel_state.set_virtual_pipeline_model_parallel_rank(0)
@@ -897,10 +912,12 @@ def forward_backward_pipelining_with_interleaving(
                     output_tensor_grads[num_model_chunks - 1].append(bwd_recv_buffer[-1])
 
     # Run 1F1B in steady state.
-    output_tensor = None
     for k in range(num_microbatches_remaining):
         # Forward pass.
         forward_k = k + num_warmup_microbatches
+
+        print_rank_0(f"rank first. 1F1B in steady state: {k}/{num_microbatches_remaining}")
+        print_rank_4(f"rank last. 1F1B in steady state: {k}/{num_microbatches_remaining}")
 
         # Decide to checkpoint all layers' activations of the current micro-batch.
         if max_outstanding_backprops is not None:
@@ -1053,6 +1070,9 @@ def forward_backward_pipelining_with_interleaving(
                 post_backward=pp_post_backward,
                 checkpoint_activations_microbatch=checkpoint_activations_microbatch,
             )
+
+            print_rank_0(f"rank first. 1F1B in steady state: {k}/{num_microbatches_remaining} end")
+            print_rank_4(f"rank last. 1F1B in steady state: {k}/{num_microbatches_remaining} end")
         else:  # No p2p overlap.
             backward_k = k
             output_tensor, input_tensor_grad = forward_backward_helper_wrapper(
@@ -1109,6 +1129,11 @@ def forward_backward_pipelining_with_interleaving(
             if recv_next:
                 output_tensor_grads[next_backward_model_chunk_id].append(output_tensor_grad)
 
+            if k == 0:
+                print_rank_0(f"input_tensor_grad: {input_tensor_grad}")
+
+    print_rank_0(f"rank first. 1F1B in steady state end")
+    print_rank_4(f"rank last. 1F1B in steady state end")
     deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
     # Run cooldown backward passes (flush out pipeline).

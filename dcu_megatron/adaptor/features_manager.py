@@ -7,7 +7,6 @@ def a2a_overlap_adaptation(patches_manager):
     """
     from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TERowParallelLinear
     from ..core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
-    from ..core.transformer.transformer_block import TransformerBlock
     from ..core.transformer.transformer_layer import TransformerLayer
     from ..core.models.gpt.gpt_model import GPTModel
     from ..core.pipeline_parallel.schedules import get_pp_rank_microbatches, forward_backward_pipelining_with_interleaving
@@ -32,19 +31,18 @@ def a2a_overlap_adaptation(patches_manager):
     patches_manager.register_patch('megatron.core.transformer.moe.token_dispatcher.MoEAlltoAllTokenDispatcher',
                                    MoEAlltoAllTokenDispatcher)
 
-    patches_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock',
-                                   TransformerBlock)
-
     patches_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer',
                                    TransformerLayer)
 
-    patches_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel',
-                                   GPTModel)
+    patches_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
+                                   GPTModel.build_schedule_plan,
+                                   create_dummy=True)
 
     # backward_dw
-    # patches_manager.register_patch('megatron.core.extensions.transformer_engine._get_extra_te_kwargs',
-    #                                _get_extra_te_kwargs_wrapper,
-    #                                apply_wrapper=True)
+    if is_te_min_version("2.4.0.dev0"):
+        patches_manager.register_patch('megatron.core.extensions.transformer_engine._get_extra_te_kwargs',
+                                    _get_extra_te_kwargs_wrapper,
+                                    apply_wrapper=True)
     patches_manager.register_patch('megatron.core.extensions.transformer_engine.TELinear',
                                    TELinear)
     patches_manager.register_patch('megatron.core.extensions.transformer_engine.TELayerNormColumnParallelLinear',
