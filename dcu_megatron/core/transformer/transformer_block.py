@@ -8,7 +8,11 @@ def transformer_block_init_wrapper(fn):
 
         # mtp require seperate layernorms for main model and mtp modules, thus move finalnorm out of block
         config = args[0] if len(args) > 1 else kwargs['config']
-        if hasattr(config, "mtp_num_layers") and config.mtp_num_layers is not None:
+        if (
+            hasattr(config, "mtp_num_layers")
+            and config.mtp_num_layers is not None
+            and config.mtp_num_layers > 0
+        ):
             self.main_final_layernorm = self.final_layernorm
             self.final_layernorm = None
 

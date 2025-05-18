@@ -66,7 +66,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             pre_mlp_layernorm_output,
             tokens_per_expert,
             permutated_local_input_tokens,
-            permuted_probs,
+            probs,
         ) = self._submodule_attention_router_compound_forward(
             hidden_states,
             attention_mask,
@@ -80,16 +80,14 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             inference_params=inference_params,
         )
 
-        (tokens_per_expert, global_input_tokens, global_probs) = self._submodule_dispatch_forward(
+        (tokens_per_expert, global_input_tokens) = self._submodule_dispatch_forward(
             tokens_per_expert,
             permutated_local_input_tokens,
-            permuted_probs
         )
 
         (expert_output, shared_expert_output, mlp_bias) = self._submodule_moe_forward(
             tokens_per_expert,
             global_input_tokens,
-            global_probs,
             pre_mlp_layernorm_output
         )
 
@@ -125,13 +123,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         residual = hidden_states
 
         # Optional Input Layer norm
-        if self.recompute_input_layernorm:
-            self.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
-                self.input_layernorm, hidden_states
-            )
-        else:
-            input_layernorm_output = self.input_layernorm(hidden_states)
+        input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
         attention_output_with_bias = self.self_attention(
@@ -145,13 +137,6 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
-
-        if self.recompute_input_layernorm:
-            # discard the output of the input layernorm and register the recompute
-            # as a gradient hook of attention_output_with_bias[0]
-            self.input_layernorm_checkpoint.discard_output_and_register_recompute(
-                attention_output_with_bias[0]
-            )
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
@@ -193,19 +178,13 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         )
 
         # Optional Layer norm post the cross-attention.
-        if self.recompute_pre_mlp_layernorm:
-            self.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
-                self.pre_mlp_layernorm, hidden_states
-            )
-        else:
-            pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
         tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(
             pre_mlp_layernorm_output, probs, routing_map
         )
-        tokens_per_expert, permutated_local_input_tokens, permuted_probs = self.mlp.token_dispatcher.dispatch_preprocess(
+        tokens_per_expert, permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(
             pre_mlp_layernorm_output, routing_map, tokens_per_expert
         )
 
@@ -214,18 +193,18 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             pre_mlp_layernorm_output,
             tokens_per_expert,
             permutated_local_input_tokens,
-            permuted_probs,
+            probs,
         ]
         return tuple(outputs)
 
-    def _submodule_dispatch_forward(self, tokens_per_expert, permutated_local_input_tokens, permuted_probs):
+    def _submodule_dispatch_forward(self, tokens_per_expert, permutated_local_input_tokens):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        tokens_per_expert, global_input_tokens, global_probs = self.mlp.token_dispatcher.dispatch_all_to_all(
-            tokens_per_expert, permutated_local_input_tokens, permuted_probs
+        tokens_per_expert, global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(
+            tokens_per_expert, permutated_local_input_tokens
         )
-        return [tokens_per_expert, global_input_tokens, global_probs]
+        return [tokens_per_expert, global_input_tokens]
 
     def _submodule_dense_forward(self, hidden_states):
         residual = hidden_states
@@ -241,16 +220,16 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         return output
 
-    def _submodule_moe_forward(self, tokens_per_expert, global_input_tokens, global_probs, pre_mlp_layernorm_output):
+    def _submodule_moe_forward(self, tokens_per_expert, global_input_tokens, pre_mlp_layernorm_output):
         """
         Performs a forward pass for the MLP submodule, including both expert-based
         and optional shared-expert computations.
         """
         shared_expert_output = None
-        (dispatched_input, tokens_per_expert, permuted_probs) = (
-            self.mlp.token_dispatcher.dispatch_postprocess(tokens_per_expert, global_input_tokens, global_probs)
+        (dispatched_input, tokens_per_expert) = (
+            self.mlp.token_dispatcher.dispatch_postprocess(tokens_per_expert, global_input_tokens)
         )
-        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert, permuted_probs)
+        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
             shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)

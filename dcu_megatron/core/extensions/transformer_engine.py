@@ -13,12 +13,12 @@ from megatron.core.utils import get_te_version, is_te_min_version
 from megatron.core.extensions.transformer_engine import TEDotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.process_groups_config import ModelCommProcessGroups
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.extensions.transformer_engine import TELinear as MegatronCoreTELinear
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear as MegatronCoreTELayerNormColumnParallelLinear
 
 from megatron.core.parallel_state import (
+    get_context_parallel_global_ranks,
     get_context_parallel_group,
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
@@ -65,7 +65,6 @@ class TELinear(MegatronCoreTELinear):
         skip_weight_param_allocation: bool,
         tp_comm_buffer_name: Optional[str] = None,
         is_expert: bool = False,
-        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
         assert not self.split_bw, "split_bw is currently not supported"
@@ -81,7 +80,6 @@ class TELinear(MegatronCoreTELinear):
             skip_weight_param_allocation=skip_weight_param_allocation,
             tp_comm_buffer_name=tp_comm_buffer_name,
             is_expert=is_expert,
-            tp_group=tp_group,
         )
 
     def backward_dw(self):
@@ -108,7 +106,6 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
         is_expert: bool,
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
-        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
         assert not self.split_bw, "split_bw is currently not supported"
@@ -124,7 +121,6 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
             is_expert=is_expert,
             skip_weight_param_allocation=skip_weight_param_allocation,
             tp_comm_buffer_name=tp_comm_buffer_name,
-            tp_group=tp_group,
         )
 
     def backward_dw(self):
@@ -144,7 +140,6 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
         k_channels: Optional[int] = None,
         v_channels: Optional[int] = None,
         cp_comm_type: str = "p2p",
-        model_comm_pgs: ModelCommProcessGroups = None,
     ):
         self.config = config
         self.te_forward_mask_type = False
@@ -171,26 +166,6 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
                 f"num_attention_heads ({self.config.num_attention_heads}))"
             )
 
-        if model_comm_pgs is None:
-            # For backward compatibility, remove in v0.14 and raise error
-            # raise ValueError("TEDotProductAttention was called without ModelCommProcessGroups")
-            model_comm_pgs = ModelCommProcessGroups(
-                tp=get_tensor_model_parallel_group(check_initialized=False),
-                cp=get_context_parallel_group(check_initialized=False),
-                hcp=get_hierarchical_context_parallel_groups(check_initialized=False),
-            )
-        else:
-            assert hasattr(
-                model_comm_pgs, 'tp'
-            ), "TEDotProductAttention model_comm_pgs must have tp pg"
-            assert hasattr(
-                model_comm_pgs, 'cp'
-            ), "TEDotProductAttention model_comm_pgs must have cp pg"
-            if cp_comm_type == "a2a+p2p":
-                assert hasattr(
-                    model_comm_pgs, 'hcp'
-                ), "TEDotProductAttention model_comm_pgs must have hierarchical cp pg"
-
         if is_te_min_version("0.10.0"):
             extra_kwargs["attention_type"] = attention_type
             # older version don't need attention_type
@@ -206,9 +181,9 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttention, "cp_stream") is None:
                 TEDotProductAttention.cp_stream = torch.cuda.Stream()
-            extra_kwargs["cp_group"] = model_comm_pgs.cp
-            extra_kwargs["cp_global_ranks"] = torch.distributed.get_process_group_ranks(
-                model_comm_pgs.cp
+            extra_kwargs["cp_group"] = get_context_parallel_group(check_initialized=False)
+            extra_kwargs["cp_global_ranks"] = get_context_parallel_global_ranks(
+                check_initialized=False
             )
             extra_kwargs["cp_stream"] = TEDotProductAttention.cp_stream
             if is_te_min_version("1.10.0"):
@@ -282,7 +257,7 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
-            tp_group=model_comm_pgs.tp,
+            tp_group=get_tensor_model_parallel_group(check_initialized=False),
             layer_number=layer_number,
             **extra_kwargs,
         )
@@ -313,7 +288,6 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool = False,
             tp_comm_buffer_name: Optional[str] = None,
-            tp_group: Optional[torch.distributed.ProcessGroup] = None,
         ):
             self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
             assert not self.split_bw, "split_bw is currently not supported"
@@ -329,7 +303,6 @@ if is_te_min_version("1.9.0.dev0"):
                 skip_bias_add=skip_bias_add,
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
-                tp_group=tp_group,
             )
 
         def backward_dw(self):

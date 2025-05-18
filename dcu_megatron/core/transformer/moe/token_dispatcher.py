@@ -108,20 +108,18 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         self.hidden_shape_before_permute = hidden_states.shape
         (
             permutated_local_input_tokens,
-            permuted_probs,
             self.reversed_local_input_permutation_mapping,
         ) = permute(
             hidden_states,
             routing_map,
-            probs=self.probs,
             num_out_tokens=self.num_out_tokens,
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
 
-        return tokens_per_expert, permutated_local_input_tokens, permuted_probs
+        return tokens_per_expert, permutated_local_input_tokens
 
-    def dispatch_all_to_all(self, tokens_per_expert, permutated_local_input_tokens, permuted_probs):
+    def dispatch_all_to_all(self, tokens_per_expert, permutated_local_input_tokens):
         # Perform expert parallel AlltoAll communication
         tokens_per_expert = self._maybe_dtoh_and_synchronize(
             "before_ep_alltoall", tokens_per_expert
@@ -129,13 +127,10 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         global_input_tokens = all_to_all(
             self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
         )
-        global_probs = all_to_all(
-            self.ep_group, permuted_probs, self.output_splits, self.input_splits
-        )
 
-        return tokens_per_expert, global_input_tokens, global_probs
+        return tokens_per_expert, global_input_tokens
 
-    def dispatch_postprocess(self, tokens_per_expert, global_input_tokens, global_probs):
+    def dispatch_postprocess(self, tokens_per_expert, global_input_tokens):
         if self.shared_experts is not None:
             self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
 
@@ -147,9 +142,6 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
 
             global_input_tokens = gather_from_sequence_parallel_region(
                 global_input_tokens, group=self.tp_group, output_split_sizes=output_split_sizes
-            )
-            global_probs = gather_from_sequence_parallel_region(
-                global_probs, group=self.tp_group, output_split_sizes=output_split_sizes
             )
 
         # Permutation 2: Sort tokens by local expert.
@@ -169,28 +161,16 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
                     .contiguous()
                     .flatten(start_dim=0, end_dim=2)
                 )
-                global_probs = (
-                    global_probs.view(
-                        self.tp_size * self.ep_size,
-                        self.num_local_experts,
-                        self.capacity,
-                        *global_probs.size()[1:],
-                    )
-                    .transpose(0, 1)
-                    .contiguous()
-                    .flatten(start_dim=0, end_dim=2)
-                )
             else:
-                global_input_tokens, global_probs = sort_chunks_by_idxs(
+                global_input_tokens = sort_chunks_by_idxs(
                     global_input_tokens,
                     self.num_global_tokens_per_local_expert.ravel(),
                     self.sort_input_by_local_experts,
-                    probs=global_probs,
                     fused=self.config.moe_permute_fusion,
                 )
 
         tokens_per_expert = self._maybe_dtoh_and_synchronize("before_finish", tokens_per_expert)
-        return global_input_tokens, tokens_per_expert, global_probs
+        return global_input_tokens, tokens_per_expert
 
     def token_permutation(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
@@ -218,15 +198,15 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         # Preprocess: Get the metadata for communication, permutation and computation operations.
         # Permutation 1: input to AlltoAll input
         tokens_per_expert = self.meta_prepare(hidden_states, probs, routing_map)
-        tokens_per_expert, permutated_local_input_tokens, permuted_probs = self.dispatch_preprocess(hidden_states, routing_map, tokens_per_expert)
+        tokens_per_expert, permutated_local_input_tokens = self.dispatch_preprocess(hidden_states, routing_map, tokens_per_expert)
 
         # Perform expert parallel AlltoAll communication
-        tokens_per_expert, global_input_tokens, global_probs = self.dispatch_all_to_all(tokens_per_expert, permutated_local_input_tokens, permuted_probs)
+        tokens_per_expert, global_input_tokens = self.dispatch_all_to_all(tokens_per_expert, permutated_local_input_tokens)
 
         # Permutation 2: Sort tokens by local expert.
-        global_input_tokens, tokens_per_expert, global_probs = self.dispatch_postprocess(tokens_per_expert, global_input_tokens, global_probs)
+        global_input_tokens, tokens_per_expert = self.dispatch_postprocess(tokens_per_expert, global_input_tokens)
 
-        return global_input_tokens, tokens_per_expert, global_probs
+        return global_input_tokens, tokens_per_expert
 
     def combine_preprocess(self, hidden_states):
         # Unpermutation 2: Unsort tokens by local expert.
@@ -283,6 +263,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.hidden_shape_before_permute,
+            probs=self.probs,
             routing_map=self.routing_map,
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,

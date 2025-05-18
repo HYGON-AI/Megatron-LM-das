@@ -3,7 +3,6 @@ import argparse
 
 from typing import Union
 from megatron.training.arguments import add_megatron_arguments
-from megatron.core.msc_utils import MultiStorageClientFeature
 
 
 def remove_original_params(parser, param_names: Union[list, str]):
@@ -59,12 +58,6 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     # Args from environment
     # args.rank = int(os.getenv('RANK', '0'))
     # args.world_size = int(os.getenv("WORLD_SIZE", '1'))
-
-    # Args to disable MSC
-    if not args.enable_msc:
-        MultiStorageClientFeature.disable()
-        assert MultiStorageClientFeature.is_enabled() is False
-        print('WARNING: The MSC feature is disabled.')
 
     return args
 

@@ -289,7 +289,7 @@ class MoeAttnNode(TransformerLayerNode):
                 pre_mlp_layernorm_output,
                 tokens_per_expert,
                 permutated_local_input_tokens,
-                permuted_probs,
+                probs,
             ) = self.layer._submodule_attention_router_compound_forward(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -305,10 +305,11 @@ class MoeAttnNode(TransformerLayerNode):
         self.common_state.tokens_per_expert = tokens_per_expert
 
         # detached here
+        self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
         self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
 
-        return permutated_local_input_tokens, permuted_probs
+        return permutated_local_input_tokens
 
     def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
@@ -317,27 +318,26 @@ class MoeAttnNode(TransformerLayerNode):
 
 class MoeDispatchNode(TransformerLayerNode):
 
-    def forward_impl(self, permutated_local_input_tokens, permuted_probs):
+    def forward_impl(self, permutated_local_input_tokens):
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            inputs = permutated_local_input_tokens
-            tokens_per_expert, global_input_tokens, global_probs = token_dispatcher.dispatch_all_to_all(
-                self.common_state.tokens_per_expert, permutated_local_input_tokens, permuted_probs
+            tokens_per_expert, global_input_tokens = token_dispatcher.dispatch_all_to_all(
+                self.common_state.tokens_per_expert, permutated_local_input_tokens
             )
             # release tensor not used by backward
             # inputs.untyped_storage().resize_(0)
         self.common_state.tokens_per_expert = tokens_per_expert
 
-        return global_input_tokens, global_probs
+        return global_input_tokens
 
 
 class MoeMlPNode(TransformerLayerNode):
-    def forward_impl(self, global_input_tokens, global_probs):
+    def forward_impl(self, global_input_tokens):
         pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
-                self.common_state.tokens_per_expert, global_input_tokens, global_probs, pre_mlp_layernorm_output
+                self.common_state.tokens_per_expert, global_input_tokens, pre_mlp_layernorm_output
             )
             assert mlp_bias is None
 
@@ -364,7 +364,9 @@ class MoeCombineNode(TransformerLayerNode):
             )
         cur_stream = torch.cuda.current_stream()
         self.common_state.residual.record_stream(cur_stream)
+        self.common_state.probs.record_stream(cur_stream)
         self.common_state.residual = None
+        self.common_state.probs = None
         return output
 
 
