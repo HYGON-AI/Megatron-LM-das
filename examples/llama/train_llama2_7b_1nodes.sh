@@ -1,5 +1,7 @@
 #!/bin/bash
 
+INITIALIZATION_ARGS=( --num-workers 2)
+
 for para in $*
 do
     if [[ $para == --data_path* ]];then
@@ -10,6 +12,16 @@ do
         checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
+    elif [[ $para == --reproduce* ]];then
+        INITIALIZATION_ARGS=( --reproduce --num-workers 0)
+        export MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC=1  # miopen 确定算法打开
+        export ROCBLAS_ATOMICS_MOD=0                     # rocblas 关闭原子操作
+        # 关闭miopen中的atomic操作算法, 只保留gemm算法
+        export MIOPEN_DEBUG_CONV_FFT=0
+        export MIOPEN_DEBUG_CONV_DIRECT=0
+        export MIOPEN_DEBUG_CONV_GEMM=1
+        export MIOPEN_DEBUG_CONV_WINOGRAD=0
+        export MIOPEN_DEBUG_CONV_IMPLICIT_GEMM=0
     fi
 done
 
@@ -33,8 +45,12 @@ export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
-# enable BatchLinear
-export GROUPED_GEMM_BatchLinear=1
+# torch控制多流转单流
+export ALLREDUCE_STREAM_WITH_COMPUTE=1
+export SENDRECV_STREAM_WITH_COMPUTE=1 
+
+#增加编译缓存
+export cache_size_limit=64
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -43,83 +59,68 @@ DISTRIBUTED_ARGS=(
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
 )
 
-MODEL_ARGS=(
-    --use-mcore-models
-    --disable-bias-linear
-    --seq-length 8192
-    --max-position-embeddings 32768
-    --num-layers 2
-    --hidden-size 8192
-    --ffn-hidden-size 32768
-    --num-attention-heads 64
-    --init-method-std 0.01
-    --attention-dropout 0.0
-    --hidden-dropout 0.0
-    --normalization RMSNorm
+GPT_MODEL_ARGS=(
+    --seq-length 4096
+    --num-layers 32
+    --hidden-size 4096
+    --ffn-hidden-size 11008 
+    --num-attention-heads 32
+    --max-position-embeddings 4096
+    --normalization LightopRMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
-    --no-masked-softmax-fusion
-    --no-position-embedding
-    --rotary-base 1000000
-    --ckpt-format torch
 )
 
-MOE_ARGS=(
-    --num-experts 16
-    --moe-router-topk 2
-    --moe-router-load-balancing-type aux_loss
-    --moe-aux-loss-coeff 1e-2
-    --moe-token-dispatcher-type alltoall
-    --moe-expert-capacity-factor 0.5
-    --moe-pad-expert-input-to-capacity
-    --moe-grouped-gemm
+TRAINING_ARGS=(
+    --transformer-impl local
+    --use-legacy-models 
+    --micro-batch-size 1
+    --global-batch-size 256
+    --train-iters 50
+    --weight-decay 0.1 
+    --adam-beta1 0.9 
+    --adam-beta2 0.95 
+    --init-method-std 0.006 
+    --clip-grad 1.0 
+    --bf16
+    --disable-bias-linear
+    --attention-dropout 0
+    --hidden-dropout 0
+    --swiglu
+    --lr 3.0e-5 
+    --lr-decay-style cosine 
+    --min-lr 3.0e-6
+    --lr-warmup-iters 1
+    --ckpt-format torch
+    --ddp-average-in-collective
+    --overlap-grad-reduce
+    --use-flash-attn
+)
+
+MODEL_PARALLEL_ARGS=(
+    --tensor-model-parallel-size 1
+    --pipeline-model-parallel-size 2
+    --context-parallel-size 1
+    --use-distributed-optimizer 
+    --sequence-parallel
 )
 
 DATA_ARGS=(
     --tokenizer-type Llama2Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    --data-path ${DATA_PATH}
-    --split 98,2,0
+    --data-path ${DATA_PATH} 
+    --split 949,50,1
 )
 
-TRAINING_ARGS=(
-    --micro-batch-size 1
-    --global-batch-size 256
-    --lr 1e-4
-    --train-iters 10
-    --lr-decay-iters 10000
-    --lr-decay-style cosine
-    --min-lr 1.0e-6
-    --weight-decay 0.1
-    --lr-warmup-iters 2000
-    --clip-grad 1.0
-    --bf16
-    --overlap-param-gather
-    --overlap-grad-reduce
-)
-
-MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 2
-    --pipeline-model-parallel-size 1
-    --expert-model-parallel-size 4
-    --expert-tensor-parallel-size 2
-    --context-parallel-size 1
-    --use-distributed-optimizer
-    --sequence-parallel
-)
-
-LOGGING_ARGS=(
-    --log-throughput \
-    --log-interval 1 \
-    --save-interval 100000 \
-    --eval-interval 10000 \
-    --eval-iters 5 \
-    #--save $CHECKPOINT_PATH \
-    #--load $CHECKPOINT_PATH \
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" \
-    --no-load-optim \
-    --no-load-rng \
-    --no-save-optim
+EVAL_AND_LOGGING_ARGS=(
+    --log-throughput
+    --eval-iters 5
+    --log-interval 1
+    --save-interval 1000 
+    --eval-interval 1000 
+    --save $CHECKPOINT_PATH
+    --load $CHECKPOINT_PATH
+    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
 TORCH_PROFIE_ARGS=(
@@ -127,7 +128,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_gpt_1nodes_tp2-pp1-ep4-etp2-cp1
+    --profile-dir torch_prof_llama_1nodes_tp1-pp2-cp1
     --use-pytorch-profiler
 )
 
@@ -139,21 +140,14 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-if [ -n "${WANDB_API_KEY}" ]; then
-    LOGGING_ARGS+=(
-        --wandb-project ${WANDB_PROJECT:-"GPT"}
-        --wandb-exp-name ${WANDB_NAME:-"GPT_567B"}
-    )
-fi
-
-APP="python3 -u ${MEGATRON_PATH}/pretrain_gpt.py \
-    ${DISTRIBUTED_ARGS[@]} \
-    ${MODEL_ARGS[@]} \
-    ${MOE_ARGS[@]} \
-    ${DATA_ARGS[@]} \
+APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
+    ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
-    ${LOGGING_ARGS[@]} \
+    ${DATA_ARGS[@]} \
+    ${EVAL_AND_LOGGING_ARGS[@]} \
+    ${DISTRIBUTED_ARGS[@]} \
+    ${INITIALIZATION_ARGS[@]} \
     "
 
 if [[ $profiling == "torch" ]]; then

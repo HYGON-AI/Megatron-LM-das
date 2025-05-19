@@ -94,7 +94,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
             print("> initializing torch distributed ...", flush=True)
         # Manually set the device ids.
         if device_count > 0:
-            torch.cuda.set_device(args.local_rank)
+            torch.cuda.set_device(args.local_rank % device_count)
             device_id = torch.device(f'cuda:{args.local_rank}')
         else:
             device_id = None

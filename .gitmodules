@@ -1,6 +1,6 @@
 [submodule "Megatron-LM"]
 	path = Megatron-LM
 	url = https://github.com/NVIDIA/Megatron-LM.git
-	branch = 4429e8ebe21fb0
+	branch = d580efc68a9f0d 
 [submodule]
 	Megatron-LM = main

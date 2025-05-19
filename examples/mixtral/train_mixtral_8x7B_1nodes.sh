@@ -2,17 +2,25 @@
 
 for para in $*
 do
-    if [[ $para == --profiling* ]];then
+    if [[ $para == --data_path* ]];then
+        data_path=${para#*=}
+    elif [[ $para == --tokenizer_path* ]];then
+        tokenizer_path=${para#*=}
+    elif [[ $para == --checkpoint_path* ]];then
+        checkpoint_path=${para#*=}
+    elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     fi
 done
 
-# Runs Mixtral 8x7B model
-source /opt/dtk/env.sh
+# data path
+DATA_PATH=${data_path}
+TOKENIZER_MODEL_PATH=${tokenizer_path}
+CHECKPOINT_PATH=${checkpoint_path}
 
 # default env
 DIST_URL=${1}
-DIST_PORT=25900
+DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
@@ -23,24 +31,10 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
-
-# nccl env
-export NCCL_ALGO=Ring
-export NCCL_MIN_NCHANNELS=32
-export NCCL_MAX_NCHANNELS=32
-export NCCL_NET_GDR_LEVEL=7
-export NCCL_NET_GDR_READ=1
-export RCCL_SDMA_COPY_ENABLE=0
-export NCCL_IB_HCA=mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1
-export NCCL_TOPO_FILE="./topo-input.xml"
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
 # enable BatchLinear
 export GROUPED_GEMM_BatchLinear=1
-
-# data path
-CHECKPOINT_PATH="path to CKPT" 
-TOKENIZER_MODEL="path to tokenizer.model"
-DATA_PATH="path to my-mixtral_text_document"
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -86,8 +80,8 @@ MOE_ARGS=(
 
 DATA_ARGS=(
     --tokenizer-type Llama2Tokenizer
-    --tokenizer-model ${TOKENIZER_MODEL}
-    --data-path $DATA_PATH
+    --tokenizer-model ${TOKENIZER_MODEL_PATH}
+    --data-path ${DATA_PATH}
     --split 99990,8,2
 )
 
@@ -96,32 +90,15 @@ TRAINING_ARGS=(
     --global-batch-size 256
     --lr 1e-4
     --train-iters 10
-    --lr-decay-iters 320000
+    --lr-decay-iters 10000
     --lr-decay-style cosine
-    --min-lr 1.0e-5
+    --min-lr 1.0e-6
     --weight-decay 0.1
-    --lr-warmup-iters 500
+    --lr-warmup-iters 2000
     --clip-grad 1.0
     --bf16
     --overlap-param-gather
     --overlap-grad-reduce
-)
-
-TORCH_PROFIE_ARGS=(
-    --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
-    --profile-step-start 3
-    --profile-step-end 4
-    --profile-dir torch_prof_mixtral8x7B_1nodes_tp2-pp1-ep8-ep_tp1-cp1
-    --use-pytorch-profiler
-)
-
-HIP_PROFIE_ARGS=(
-    --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
-    --profile-step-start 4
-    --profile-step-end 5
-    --use-hip-profiler
 )
 
 MODEL_PARALLEL_ARGS=(
@@ -129,6 +106,7 @@ MODEL_PARALLEL_ARGS=(
     --pipeline-model-parallel-size 1
     --expert-model-parallel-size 8
     --expert-tensor-parallel-size 1
+    --context-parallel-size 1
     --use-distributed-optimizer
     --sequence-parallel
 )
@@ -143,7 +121,25 @@ LOGGING_ARGS=(
     #--load $CHECKPOINT_PATH \
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" \
     --no-load-optim \
-    --no-load-rng
+    --no-load-rng \
+    --no-save-optim
+)
+
+TORCH_PROFIE_ARGS=(
+    --profile
+    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-step-start 3
+    --profile-step-end 4
+    --profile-dir torch_prof_mixtral8x7B_1nodes_tp2-pp1-ep8-etp1-cp1
+    --use-pytorch-profiler
+)
+
+HIP_PROFIE_ARGS=(
+    --profile
+    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-step-start 4
+    --profile-step-end 5
+    --use-hip-profiler
 )
 
 if [ -n "${WANDB_API_KEY}" ]; then
@@ -173,45 +169,28 @@ fi
 
 #for hygon cpu
 case ${LOCAL_RANK} in
-[0])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=0 --membind=0 ${APP}
-  ;;
-[1])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=1 --membind=1 ${APP}
-  ;;
-[2])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=2 --membind=2 ${APP}
-  ;;
-[3])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=3 --membind=3 ${APP}
-  ;;
-[4])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=4 --membind=4 ${APP}
-  ;;
-[5])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=5 --membind=5 ${APP}
-  ;;
-[6])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=6 --membind=6 ${APP}
-  ;;
-[7])
-  export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  #numactl --cpunodebind=7 --membind=7 ${APP}
-  ;;
+    0) 
+        export HIP_VISIBLE_DEVICES=0
+        numactl --cpunodebind=0 --membind=0 ${APP} ;;
+    1) 
+        export HIP_VISIBLE_DEVICES=1
+        numactl --cpunodebind=1 --membind=1 ${APP} ;;
+    2) 
+        export HIP_VISIBLE_DEVICES=2
+        numactl --cpunodebind=2 --membind=2 ${APP} ;;
+    3) 
+        export HIP_VISIBLE_DEVICES=3
+        numactl --cpunodebind=3 --membind=3 ${APP} ;;
+    4) 
+        export HIP_VISIBLE_DEVICES=4
+        numactl --cpunodebind=4 --membind=4 ${APP} ;;
+    5) 
+        export HIP_VISIBLE_DEVICES=5
+        numactl --cpunodebind=5 --membind=5 ${APP} ;;
+    6) 
+        export HIP_VISIBLE_DEVICES=6
+        numactl --cpunodebind=6 --membind=6 ${APP} ;;
+    7) 
+        export HIP_VISIBLE_DEVICES=7
+        numactl --cpunodebind=7 --membind=7 ${APP} ;;
 esac
-

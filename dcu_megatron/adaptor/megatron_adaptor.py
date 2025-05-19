@@ -25,11 +25,11 @@ class MegatronAdaptation:
         MegatronAdaptation.apply()
 
         # apply features
-        from .patch_utils import MegatronPatchesManager
-        from .features_manager import a2a_overlap_adaptation
+        # from .patch_utils import MegatronPatchesManager
+        # from .features_manager import a2a_overlap_adaptation
 
-        a2a_overlap_adaptation(MegatronPatchesManager)
-        MegatronPatchesManager.apply_patches()
+        # a2a_overlap_adaptation(MegatronPatchesManager)
+        # MegatronPatchesManager.apply_patches()
 
     @classmethod
     def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False, remove_origin_wrappers=False):

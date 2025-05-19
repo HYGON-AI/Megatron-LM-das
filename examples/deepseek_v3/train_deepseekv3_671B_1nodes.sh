@@ -1,50 +1,53 @@
 #!/bin/bash
+
 for para in $*
 do
-    if [[ $para == --profiling* ]];then
+    if [[ $para == --data_path* ]];then
+        data_path=${para#*=}
+    elif [[ $para == --tokenizer_path* ]];then
+        tokenizer_path=${para#*=}
+    elif [[ $para == --checkpoint_path* ]];then
+        checkpoint_path=${para#*=}
+    elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
-        # export GPU_FLUSH_ON_EXECUTION=1
-        # export HIP_DIRECT_DISPATCH=0
     fi
 done
+
+# default env
+DIST_URL=${1}
+DIST_PORT=${2}
+RANK=$OMPI_COMM_WORLD_RANK
+LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
+WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-
+export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
-export NCCL_ALGO=Ring
-export NCCL_MIN_NCHANNELS=32
-export NCCL_MAX_NCHANNELS=32
-export NCCL_NET_GDR_LEVEL=7
-export NCCL_NET_GDR_READ=1
-export RCCL_SDMA_COPY_ENABLE=0
-export NCCL_IB_HCA=mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1
-export NCCL_TOPO_FILE="/public/home/yuguo/check/rccl-tests-0204/topo-input.xml" #"your topo file"
-export GLOG_minloglevel=3
+# enable BatchLinear
 export GROUPED_GEMM_BatchLinear=1
-export LD_LIBRARY_PATH=/public/home/yuguo/data/rocblas-install-0224/lib:$LD_LIBRARY_PATH
-
-LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
-RANK=$OMPI_COMM_WORLD_RANK
-WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
+#export MP_PP0_LAYERS=2 # 是否使能视实际情况而定
 
 ### BASE CONFIG ###
 MODEL_SIZE=A37B
 BATCH_SIZE=1
 GLOBAL_BATCH_SIZE=256
-LR=1e-5
+LR=1e-4
 MIN_LR=1e-6
 SEQ_LEN=4096
+PAD_LEN=4096
 PR=bf16
 ### BASE CONFIG ###
 
 ### PARALLEL / BOOL OPTION ###
 TP=1
-PP=2
+PP=1
 CP=1
+ETP=1
 EP=4
 SP=true
 DO=true
@@ -56,36 +59,36 @@ SFT=false
 AC=none
 OPTIMIZER_OFFLOAD=false
 SAVE_INTERVAL=500
-DATASET_PATH=${MEGATRON_PATH}/deepseekv3_dataset/mmap_deepseekv3_datasets_text_document #"your data path"
-VALID_DATASET_PATH=${MEGATRON_PATH}/deepseekv3_dataset/mmap_deepseekv3_datasets_text_document #"your data path"
-PRETRAIN_CHECKPOINT_PATH=${MEGATRON_PATH}/deepseekv3_dataset #"your model path"
+DATASET_PATH=${data_path}
+VALID_DATASET_PATH=${data_path}
+PRETRAIN_CHECKPOINT_PATH=${checkpoint_path}
+TOKENIZER_MODEL_PATH=${tokenizer_path}
 
 # the following two values will not be used when SFT is true
-TRAIN_TOKENS=100000000
-WARMUP_TOKENS=10000
+TRAIN_TOKENS=$((10000 * ${GLOBAL_BATCH_SIZE} * ${SEQ_LEN}))
+WARMUP_TOKENS=$((2000 * ${GLOBAL_BATCH_SIZE} * ${SEQ_LEN}))
 ###############################
 
-OUTPUT_BASEPATH=./output
+OUTPUT_BASEPATH=${checkpoint_path}
 ### OTHERS ###
 
 if [ $FL = true ]; then
     :
     #exit -1
 elif [ $FL = false ]; then
-    export NVTE_FLASH_ATTN=0 NVTE_FUSED_ATTN=1
     attn_backend_option=" \
-        --attention-backend fused
+        --attention-backend auto
     "
 fi
 
 if [ $MODEL_SIZE = A37B ]; then
-    TRAIN_ITERS=2
+    TRAIN_ITERS=10
     HIDDEN_SIZE=7168
     NUM_ATTENTION_HEADS=128
     NUM_LAYERS=2
     INTERMEDIATE_SIZE=18432
     MOE_INTERMEDIATE_SIZE=2048
-    MAX_POSITION_EMBEDDINGS=${SEQ_LEN}
+    MAX_POSITION_EMBEDDINGS=163840
     EXTRA_VOCAB_SIZE=467
     Q_LORA_RANK=1536
     KV_LORA_RANK=512
@@ -94,32 +97,43 @@ if [ $MODEL_SIZE = A37B ]; then
     V_HEAD_DIM=128
     ROPE_THETA=10000
     SCALE_FACTOR=40
-    NUM_EXPERTS=8 #256
+    NUM_EXPERTS=8
     ROUTER_TOPK=8
     NUM_SHARED_EXPERTS=1
     RMS_NORM_EPS=1e-6
 
-    moe_options=" \
-        --moe-grouped-gemm \
-        --moe-expert-capacity-factor 1 \
-        --moe-pad-expert-input-to-capacity \
-        --moe-token-dispatcher-type alltoall \
-        --moe-router-topk ${ROUTER_TOPK} \
-        --num-experts ${NUM_EXPERTS} \
-        --expert-model-parallel-size ${EP} \
-        --expert-tensor-parallel-size 1 \
-        --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
-        --moe-router-load-balancing-type aux_loss \
-        --moe-aux-loss-coeff 0.001 \
-        --moe-layer-freq ([0]*0+[1]*2) \
-        --q-lora-rank ${Q_LORA_RANK} \
-        --kv-lora-rank ${KV_LORA_RANK} \
-        --qk-head-dim ${QK_NOPE_HEAD_DIM} \
-        --qk-pos-emb-head-dim  ${QK_ROPE_HEAD_DIM} \
-        --v-head-dim ${V_HEAD_DIM} \
-        --moe-shared-expert-intermediate-size $((${MOE_INTERMEDIATE_SIZE} * ${NUM_SHARED_EXPERTS} )) \
-        "
+moe_options=" \
+    --moe-grouped-gemm \
+    --moe-expert-capacity-factor 0.5 \
+    --moe-pad-expert-input-to-capacity \
+    --moe-token-dispatcher-type alltoall \
+    --moe-router-topk ${ROUTER_TOPK} \
+    --moe-router-group-topk 1 \
+    --moe-router-num-groups 1 \
+    --num-experts ${NUM_EXPERTS} \
+    --expert-model-parallel-size ${EP} \
+    --expert-tensor-parallel-size ${ETP} \
+    --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
+    --moe-router-load-balancing-type seq_aux_loss \
+    --moe-router-topk-scaling-factor 2.5 \
+    --moe-shared-expert-overlap \
+    --moe-router-enable-expert-bias \
+    --mscale 1.0 \
+    --mscale-all-dim 1.0 \
+    --moe-router-score-function sigmoid \
+    --moe-router-bias-update-rate 0.001 \
+    --moe-aux-loss-coeff 0.001 \
+    --moe-layer-freq ([0]*1+[1]*1) \
+    --moe-shared-expert-intermediate-size $((${MOE_INTERMEDIATE_SIZE} * ${NUM_SHARED_EXPERTS} )) \
+    --q-lora-rank ${Q_LORA_RANK} \
+    --kv-lora-rank ${KV_LORA_RANK} \
+    --qk-head-dim ${QK_NOPE_HEAD_DIM} \
+    --qk-pos-emb-head-dim  ${QK_ROPE_HEAD_DIM} \
+    --v-head-dim ${V_HEAD_DIM} \
+    --mtp-num-layers 1 \
+    "
 
+mtp_options=""
 fi
 
 # Here are some configs controled by env
@@ -147,6 +161,14 @@ comm_overlap_option="\
     --overlap-grad-reduce \
     --overlap-param-gather"
  
+
+# if [ $TP_COMM_OVERLAP -eq 1 ]; then
+#     comm_overlap_option="\
+#         --tp-comm-overlap \
+#         --overlap-grad-reduce \
+#         --overlap-param-gather"
+# fi
+
 if [ $AC = full ]; then
     _check=$(( ($NUM_LAYERS / $PP) % ${MP_AC_LAYERS} ))
     if [ $_check != 0 ]; then
@@ -154,9 +176,9 @@ if [ $AC = full ]; then
         exit -1
     fi
     activation_checkpoint_options=" \
-		    --recompute-method uniform \
-            --recompute-num-layers ${MP_AC_LAYERS} \
-		    --recompute-granularity full"
+        --recompute-method uniform \
+        --recompute-num-layers ${MP_AC_LAYERS} \
+        --recompute-granularity full"
 elif [ $AC = sel ]; then
     activation_checkpoint_options=" \
         --recompute-activations"
@@ -165,8 +187,8 @@ elif [ $AC = none ]; then
     "
 elif [ $AC = offload ]; then
     activation_checkpoint_options=" \
-		    --cpu-offloading \
-		    --cpu-offloading-num-layers ${MP_AC_LAYERS}"
+        --cpu-offloading \
+        --cpu-offloading-num-layers ${MP_AC_LAYERS}"
     if [ $TP_COMM_OVERLAP -eq 1 ]; then
         echo "Disable --overlap-grad-reduce and --overlap-param-gather when cpu offloading is on..."
         comm_overlap_option="\
@@ -179,8 +201,8 @@ fi
 
 if [ $PR = fp16 ]; then
     pr_options=" \
-		    --fp16 \
-            --apply-query-key-layer-scaling"
+        --fp16 \
+        --apply-query-key-layer-scaling"
     export NVTE_APPLY_QK_LAYER_SCALING=1
 elif [ $PR = bf16 ]; then
     pr_options=" \
@@ -200,7 +222,7 @@ fi
 
 if [ $DO = true ]; then
     do_option=" \
-		    --use-distributed-optimizer"
+        --use-distributed-optimizer"
 
 elif [ $DO = false ]; then
     do_option=" \
@@ -210,7 +232,7 @@ fi
 
 if [ $SP = true ] && [ $TP -gt 1 ]; then
     sp_option=" \
-		    --sequence-parallel"
+        --sequence-parallel"
 
 elif [ $SP = false ]; then
     sp_option=" \
@@ -236,7 +258,7 @@ fi
 
 if [ $PRETRAIN_CHECKPOINT_PATH != none ]; then
     load_option=" \
-            --tokenizer-model $PRETRAIN_CHECKPOINT_PATH"
+            --load $PRETRAIN_CHECKPOINT_PATH"
 fi
 
 if [ $OPTIMIZER_OFFLOAD != false ]; then
@@ -247,15 +269,21 @@ if [ $OPTIMIZER_OFFLOAD != false ]; then
 fi
 
 if [ $SFT = true ]; then
-    TRAIN_ITERS=${24}
-    LR_WARMUP_ITERS=${25}
+    TRAIN_ITERS=${25}
+    LR_WARMUP_ITERS=${26}
     LR_DECAY_ITERS=$(( ${TRAIN_ITERS} - ${LR_WARMUP_ITERS}))
-    PREFIX="finetune-mcore-deepseek-v3"
+    PREFIX="finetune-mcore-deepseek-v3-${MODEL_SIZE}-lr-${LR}-minlr-${MIN_LR}-bs-${BATCH_SIZE}-gbs-${GLOBAL_BATCH_SIZE}-seqlen-${SEQ_LEN}"
+    sft_options=" \
+         --eod-mask-loss \
+         --calculate-per-token-loss \
+         --train-mode finetune"
 else
-    # TRAIN_ITERS=$(( ${TRAIN_TOKENS} / ${GLOBAL_BATCH_SIZE} / ${SEQ_LEN} ))
+   # TRAIN_ITERS=$(( ${TRAIN_TOKENS} / ${GLOBAL_BATCH_SIZE} / ${SEQ_LEN} ))
     LR_WARMUP_ITERS=$(( ${WARMUP_TOKENS}  / ${GLOBAL_BATCH_SIZE} / ${SEQ_LEN} ))
     LR_DECAY_ITERS=$(( ${TRAIN_TOKENS} /  ${GLOBAL_BATCH_SIZE} / ${SEQ_LEN} ))
-    PREFIX="pretrain-mcore-deepseek-v3"
+    PREFIX="pretrain-mcore-deepseek-v3-${MODEL_SIZE}-lr-${LR}-minlr-${MIN_LR}-bs-${BATCH_SIZE}-gbs-${GLOBAL_BATCH_SIZE}-seqlen-${SEQ_LEN}"
+    sft_options=" \
+        --train-mode pretrain"
 fi
 
 if [ ${MP_DATASET_TYPE} = "raw" ]; then
@@ -278,16 +306,18 @@ else
 fi
 
 ##### Prepare logdirs #######
-NAME="${PREFIX}"
+NAME="${PREFIX}-pr-${PR}-tp-${TP}-pp-${PP}-cp-${CP}-ac-${AC}-do-${DO}-sp-${SP}-ti-${TRAIN_ITERS}-wi-${LR_WARMUP_ITERS}"
 mkdir -p "${OUTPUT_BASEPATH}/tensorboard/"
 mkdir -p "${OUTPUT_BASEPATH}/checkpoint/"
 mkdir -p "${OUTPUT_BASEPATH}/log/"
-TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/${NAME}"
+current_time=$(date "+%Y.%m.%d-%H.%M.%S")
+TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/${NAME}_${current_time}"
 mkdir -p ${TENSORBOARD_DIR}
 SAVED_PRETRAIN_CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint/${NAME}"
 
 mkdir -p ${SAVED_PRETRAIN_CHECKPOINT_PATH}
-find -L ${PRETRAIN_CHECKPOINT_PATH} -maxdepth 1 -type f -name "*.json" -print0 | xargs -0 cp -t ${SAVED_PRETRAIN_CHECKPOINT_PATH}
+#find -L ${PRETRAIN_CHECKPOINT_PATH} -maxdepth 1 -type f -name "*.json" -print0 | xargs -0 cp -t ${SAVED_PRETRAIN_CHECKPOINT_PATH}
+#find -L ${PRETRAIN_CHECKPOINT_PATH} -maxdepth 1 -type f -name "merges.txt" -print0 | xargs -0 cp -t ${SAVED_PRETRAIN_CHECKPOINT_PATH}
 
 megatron_options="  \
         --lr ${LR} \
@@ -314,7 +344,7 @@ megatron_options="  \
         --log-interval 1 \
         --log-throughput \
         --eval-interval 10000 \
-        --eval-iters 5 \
+        --eval-iters 3 \
         --save-interval ${SAVE_INTERVAL} \
         --tensorboard-queue-size 1 \
         --tensorboard-dir ${TENSORBOARD_DIR} \
@@ -328,13 +358,12 @@ megatron_options="  \
         --num-workers 8 \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
         --tokenizer-type DeepSeekV2Tokenizer \
+        --tokenizer-model ${TOKENIZER_MODEL_PATH} \
         --swiglu \
         --normalization RMSNorm \
         --norm-epsilon ${RMS_NORM_EPS} \
         --use-rotary-position-embeddings \
-        --no-bias-swiglu-fusion \
         --no-rope-fusion \
-        --position-embedding-type rope \
         --untie-embeddings-and-output-weights \
         --disable-bias-linear \
         --rotary-base ${ROPE_THETA} \
@@ -342,12 +371,11 @@ megatron_options="  \
         --no-save-optim \
         --kv-channels ${V_HEAD_DIM} \
         --qk-layernorm \
+        --multi-latent-attention \
         --ckpt-format torch \
         --transformer-impl transformer_engine \
+        --no-masked-softmax-fusion \
         --use-rope-scaling \
-        --multi-latent-attention \
-        --mtp-num-layers 1 \
-        --use-mcore-models \
         "
 
 TORCH_PROFIE_ARGS="  \
@@ -355,7 +383,7 @@ TORCH_PROFIE_ARGS="  \
     --profile-ranks 0 1 2 3 4 5 6 7 \
     --profile-step-start 3 \
     --profile-step-end 4 \
-    --profile-dir torch_prof_data_16nodes_dcu \
+    --profile-dir torch_prof_deepseekv3_1nodes_tp1-pp1-ep4-etp1-cp1 \
     --use-pytorch-profiler \
 "
 
@@ -367,26 +395,30 @@ HIP_PROFIE_ARGS="  \
     --use-hip-profiler \
 "
 
-APP="python3 -u ${MEGATRON_PATH}/pretrain_gpt.py
-     ${megatron_options} \
-     ${dataset_options} \
-     ${pr_options} \
-     ${load_option} \
-     ${activation_checkpoint_options} \
-     ${do_option} \
-     ${sp_option} \
-     ${moe_options} \
-     ${offload_option} \
-     ${sft_options} \
-     ${vp_option} \
-     ${packing_options} \
-     ${uneven_split_option} \
-     ${attn_backend_option} \
-     ${comm_overlap_option} \
+DISTRIBUTED_ARGS="  \
     --rank ${RANK} \
     --world-size ${WORLD_SIZE} \
     --local-rank ${LOCAL_RANK} \
-    --dist-url tcp://${1}:25900 \
+    --dist-url tcp://${DIST_URL}:${DIST_PORT} \
+"
+
+APP="python3 -u ${MEGATRON_PATH}/pretrain_gpt.py
+        ${megatron_options} \
+        ${dataset_options} \
+        ${pr_options} \
+        ${load_option} \
+        ${activation_checkpoint_options} \
+        ${do_option} \
+        ${sp_option} \
+        ${moe_options} \
+        ${offload_option} \
+        ${vp_option} \
+        ${packing_options} \
+        ${uneven_split_option} \
+        ${attn_backend_option} \
+        ${mtp_options} \
+        ${comm_overlap_option} \
+        ${DISTRIBUTED_ARGS} \
     "
 
 if [[ $profiling == "torch" ]]; then
@@ -397,37 +429,30 @@ elif [[ $profiling == "hip" ]]; then
     APP="hipprof -d hip_prof_data --hip-trace --trace-off ${APP}"
 fi
 
+#for hygon cpu
 case ${LOCAL_RANK} in
-[0])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[1])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[2])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[3])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[4])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[5])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[6])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
-[7])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  ${APP}
-  ;;
+    0) 
+        export HIP_VISIBLE_DEVICES=0
+        numactl --cpunodebind=0 --membind=0 ${APP} ;;
+    1) 
+        export HIP_VISIBLE_DEVICES=1
+        numactl --cpunodebind=1 --membind=1 ${APP} ;;
+    2) 
+        export HIP_VISIBLE_DEVICES=2
+        numactl --cpunodebind=2 --membind=2 ${APP} ;;
+    3) 
+        export HIP_VISIBLE_DEVICES=3
+        numactl --cpunodebind=3 --membind=3 ${APP} ;;
+    4) 
+        export HIP_VISIBLE_DEVICES=4
+        numactl --cpunodebind=4 --membind=4 ${APP} ;;
+    5) 
+        export HIP_VISIBLE_DEVICES=5
+        numactl --cpunodebind=5 --membind=5 ${APP} ;;
+    6) 
+        export HIP_VISIBLE_DEVICES=6
+        numactl --cpunodebind=6 --membind=6 ${APP} ;;
+    7) 
+        export HIP_VISIBLE_DEVICES=7
+        numactl --cpunodebind=7 --membind=7 ${APP} ;;
 esac
