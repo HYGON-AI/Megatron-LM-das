@@ -38,7 +38,7 @@ class MoEAlltoAllPerBatchState:
 
 class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
     def __init__(self, *args, **kwargs):
-        super.__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # use_qcomm
         args = get_args()

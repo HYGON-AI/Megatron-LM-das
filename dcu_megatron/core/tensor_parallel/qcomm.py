@@ -71,6 +71,8 @@ def destindex_copy_quantize_kv_init_asym(K, Out, Out_scale_zero):
     )
     return
 
+
+@triton.jit
 def _bwd_kernel_destindex_dequantize_kv(
     Quantized_Out, Out_scale_zero, Dequantized_Out,
     stride_qo_bs, stride_qo_h, stride_qo_d,

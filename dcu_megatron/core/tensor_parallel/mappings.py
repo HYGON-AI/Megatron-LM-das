@@ -5,7 +5,7 @@ from .qcomm import q_alltoall
 
 class _AllToAll(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, group, input, output_split_sizes, input_split_sizes):
+    def forward(ctx, group, input, output_split_sizes, input_split_sizes, use_qcomm=False):
         """Forward function."""
         ctx.group = group
         ctx.output_split_sizes = output_split_sizes
@@ -30,7 +30,7 @@ class _AllToAll(torch.autograd.Function):
                 output = torch.empty_like(input)
         else:
             # Unequal split (all2all-v)
-            if use_comm:
+            if use_qcomm:
                 output = input.new_empty(
                     size=[sum(output_split_sizes)] + list(input.size()[1:]),
                     dtype=torch.int8,

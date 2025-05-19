@@ -23,6 +23,7 @@ def add_megatron_arguments_patch(parser: argparse.ArgumentParser):
     # add extra arguments
     parser = _add_extra_network_size_args(parser)
     parser = _add_extra_training_args(parser)
+    parser = _add_extra_initialization_args(parser)
     parser = _add_extra_distributed_args(parser)
     parser = _add_extra_tokenizer_args(parser)
     parser = _add_extra_moe_args(parser)
@@ -92,6 +93,14 @@ def _add_extra_training_args(parser):
                        dest='use_hip_profiler')
     group.add_argument('--profile-dir', type=str, default="./",
                        help='profile dir to save.')
+
+    return parser
+
+
+def _add_extra_initialization_args(parser):
+    group = parser.add_argument_group(title='extra initialization args')
+    group.add_argument('--reproduce', action='store_true',
+                       help='reproduce train loss, need set --seed > 0.')
 
     return parser
 

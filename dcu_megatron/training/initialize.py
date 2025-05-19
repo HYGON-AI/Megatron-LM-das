@@ -1,10 +1,13 @@
 """Megatron initialization."""
+import random
 import time
+import numpy as np
 import torch
+
 from datetime import timedelta
 
 from megatron.training import get_args
-from megatron.core import mpu
+from megatron.core import mpu, tensor_parallel
 
 
 def _compile_dependencies():
