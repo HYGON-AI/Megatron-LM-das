@@ -1,10 +1,13 @@
 """Megatron initialization."""
+import random
 import time
+import numpy as np
 import torch
+
 from datetime import timedelta
 
 from megatron.training import get_args
-from megatron.core import mpu
+from megatron.core import mpu, tensor_parallel
 
 
 def _compile_dependencies():
@@ -105,7 +108,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
 
         # Call the init process
         init_process_group_kwargs = {
-            'backend' : args.distributed_backend,
+            'backend': args.distributed_backend,
             'world_size': args.world_size,
             'rank': args.rank,
             'init_method': args.dist_url,
@@ -149,3 +152,35 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
                     f"> initialized pipeline model parallel with size "
                     f"{mpu.get_pipeline_model_parallel_world_size()}"
                 )
+
+
+def _set_random_seed(
+    seed_: int,
+    data_parallel_random_init: bool = False,
+    te_rng_tracker: bool = False,
+    inference_rng_tracker: bool = False,
+    use_cudagraphable_rng: bool = False,
+):
+    """Set random seed for reproducability."""
+    args = get_args()
+    if seed_ is not None and seed_ > 0:
+        # Ensure that different pipeline MP stages get different seeds.
+        seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
+        # Ensure different data parallel ranks get different seeds
+        if data_parallel_random_init:
+            seed = seed + (10 * mpu.get_data_parallel_rank())
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.device_count() > 0:
+            tensor_parallel.model_parallel_cuda_manual_seed(
+                seed, te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
+            )
+        if args.reproduce:
+            assert (args.attention_dropout > 0) is False, f"To utilize the reproduction function, args.attention_dropout = {args.attention_dropout} must be set to 0."
+            assert (args.hidden_dropout > 0) is False, f"To utilize the reproduction function, args.hidden_dropout = {args.hidden_dropout} must be set to 0."
+            torch.backends.cudnn.deterministic = True # 设置cudnn后端为确定性算法
+            torch.backends.cudnn.benchmark = False # 固定卷积算法
+            torch.use_deterministic_algorithms(True) # 使用torch的deterministic算子 避免不确定性
+    else:
+        raise ValueError("Seed ({}) should be a positive integer.".format(seed_))

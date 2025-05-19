@@ -7,6 +7,7 @@ from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
+from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
 from megatron.core.utils import (
     get_attr_wrapped_model,
@@ -26,19 +27,6 @@ from megatron.core.pipeline_parallel.schedules import (
 )
 
 from .combined_1f1b import VppContextManager, forward_backward_step, set_streams, wrap_forward_func
-
-
-def set_current_microbatch(model, microbatch_id):
-    """Set the current microbatch."""
-    decoder_exists = True
-    decoder = None
-    try:
-        decoder = get_attr_wrapped_model(model, "decoder")
-    except RuntimeError:
-        decoder_exists = False
-    if decoder_exists and decoder is not None:
-        for layer in decoder.layers:
-            layer.current_microbatch = microbatch_id
 
 
 def get_pp_rank_microbatches(

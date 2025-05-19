@@ -9,8 +9,10 @@ from megatron.training.tokenizer.tokenizer import (
     _Llama2Tokenizer,
     CustomTikTokenizer,
     _NullTokenizer,
+    _NullMultimodalTokenizer,
     _vocab_size_with_padding
 )
+from megatron.training.tokenizer.multimodal_tokenizer import MultimodalTokenizer
 
 
 def build_tokenizer(args, **kwargs):
@@ -92,7 +94,11 @@ def build_tokenizer(args, **kwargs):
             args.tokenizer_prompt_format,
             args.special_tokens,
             args.image_tag_type,
+            args.force_system_message,
         )
+    elif args.tokenizer_type == 'NullMultimodalTokenizer':
+        assert args.vocab_size is not None
+        tokenizer = _NullMultimodalTokenizer(args.vocab_size)
     elif args.tokenizer_type == "DeepSeekV2Tokenizer":
         tokenizer = _DeepSeekV2Tokenizer(args.tokenizer_model, args.extra_vocab_size)
         args.padded_vocab_size = tokenizer.vocab_size

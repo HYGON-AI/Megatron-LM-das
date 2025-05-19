@@ -53,18 +53,9 @@ from megatron.training.training import (
 stimer = StragglerDetector()
 
 
-def train(
-    forward_step_func,
-    model,
-    optimizer,
-    opt_param_scheduler,
-    train_data_iterator,
-    valid_data_iterator,
-    process_non_loss_data_func,
-    config,
-    checkpointing_context,
-    non_loss_data_func,
-):
+def train(forward_step_func, model, optimizer, opt_param_scheduler,
+          train_data_iterator, valid_data_iterator,
+          process_non_loss_data_func, config, checkpointing_context, non_loss_data_func):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
     timers = get_timers()
@@ -74,10 +65,7 @@ def train(
         try:
             from workload_inspector.utils.webserver import run_server
             import threading
-
-            threading.Thread(
-                target=run_server, daemon=True, args=(torch.distributed.get_rank(),)
-            ).start()
+            threading.Thread(target=run_server, daemon=True, args=(torch.distributed.get_rank(), )).start()
         except ModuleNotFoundError:
             print_rank_0("workload inspector module not found.")
 
@@ -100,17 +88,11 @@ def train(
         rerun_state_machine.current_iteration = iteration
 
     # Track E2E metrics at the start of training.
-    one_logger_utils.on_train_start(
-        iteration=iteration,
-        consumed_train_samples=args.consumed_train_samples,
-        train_samples=args.train_samples,
-        seq_length=args.seq_length,
-        train_iters=args.train_iters,
-        save=args.save,
-        async_save=args.async_save,
-        log_throughput=args.log_throughput,
-        num_floating_point_operations_so_far=args.num_floating_point_operations_so_far,
-    )
+    one_logger_utils.on_train_start(iteration=iteration, consumed_train_samples=args.consumed_train_samples,
+                                    train_samples=args.train_samples, seq_length=args.seq_length,
+                                    train_iters=args.train_iters, save=args.save, async_save=args.async_save,
+                                    log_throughput=args.log_throughput,
+                                    num_floating_point_operations_so_far=args.num_floating_point_operations_so_far)
 
     num_floating_point_operations_so_far = args.num_floating_point_operations_so_far
 
@@ -118,10 +100,9 @@ def train(
     config.grad_scale_func = optimizer.scale_loss
     config.timers = timers
     if isinstance(model[0], (custom_FSDP, DDP)) and args.overlap_grad_reduce:
-        assert config.no_sync_func is None, (
-            'When overlap_grad_reduce is True, config.no_sync_func must be None; '
-            'a custom no_sync_func is not supported when overlapping grad-reduce'
-        )
+        assert config.no_sync_func is None, \
+            ('When overlap_grad_reduce is True, config.no_sync_func must be None; '
+             'a custom no_sync_func is not supported when overlapping grad-reduce')
         config.no_sync_func = [model_chunk.no_sync for model_chunk in model]
         if len(model) == 1:
             config.no_sync_func = config.no_sync_func[0]
@@ -145,9 +126,8 @@ def train(
     if args.manual_gc:
         # Disable the default garbage collector and perform the collection manually.
         # This is to align the timing of garbage collection across ranks.
-        assert (
-            args.manual_gc_interval >= 0
-        ), 'Manual garbage collection interval should be larger than or equal to 0'
+        assert args.manual_gc_interval >= 0, \
+            'Manual garbage collection interval should be larger than or equal to 0'
         gc.disable()
         gc.collect()
 
@@ -157,13 +137,10 @@ def train(
         world = torch.distributed.get_world_size()
         rank = torch.distributed.get_rank()
         mmcnt = args.straggler_minmax_count
-        stimer.configure(
-            world,
-            rank,
-            mmcnt=mmcnt,
-            enabled=not args.disable_straggler_on_startup,
-            port=args.straggler_ctrlr_port,
-        )
+        stimer.configure(world, rank,
+                mmcnt = mmcnt,
+                enabled = not args.disable_straggler_on_startup,
+                port = args.straggler_ctrlr_port)
     num_floating_point_operations_since_last_log_event = 0.0
 
     num_microbatches = get_num_microbatches()
@@ -171,10 +148,10 @@ def train(
     eval_iterations = 0
 
     def get_e2e_base_metrics():
-        """Get base metrics values for one-logger to calculate E2E tracking metrics."""
-        num_floating_point_operations_since_current_train_start = (
+        """Get base metrics values for one-logger to calculate E2E tracking metrics.
+        """
+        num_floating_point_operations_since_current_train_start = \
             num_floating_point_operations_so_far - args.num_floating_point_operations_so_far
-        )
         return {
             'iteration': iteration,
             'train_duration': timers('interval-time').active_time(),
@@ -184,7 +161,7 @@ def train(
             'num_floating_point_operations_so_far': num_floating_point_operations_so_far,
             'consumed_train_samples': args.consumed_train_samples,
             'world_size': args.world_size,
-            'seq_length': args.seq_length,
+            'seq_length': args.seq_length
         }
     # Cache into one-logger for callback.
     if one_logger:
@@ -192,11 +169,7 @@ def train(
             one_logger.store_set('get_e2e_base_metrics', get_e2e_base_metrics)
 
     prof = None
-    if (
-        args.profile
-        and torch.distributed.get_rank() in args.profile_ranks
-        and args.use_pytorch_profiler
-    ):
+    if args.profile and torch.distributed.get_rank() in args.profile_ranks and args.use_pytorch_profiler:
         def trace_handler(p):
             from pathlib import Path
             Path(f"{args.profile_dir}").mkdir(parents=True, exist_ok=True)
@@ -242,9 +215,8 @@ def train(
         pre_hook_enabled = False
     # Also, check weight hash across DP replicas to be very pedantic.
     if args.check_weight_hash_across_dp_replicas_interval is not None:
-        assert check_param_hashes_across_dp_replicas(
-            model, cross_check=True
-        ), "Parameter hashes not matching across DP replicas"
+        assert check_param_hashes_across_dp_replicas(model, cross_check=True), \
+            "Parameter hashes not matching across DP replicas"
         torch.distributed.barrier()
         print_rank_0(f">>> Weight hashes match after {iteration} iterations...")
 
@@ -270,20 +242,14 @@ def train(
         # to make sure training configuration is still valid.
         update_num_microbatches(args.consumed_train_samples, consistency_check=False, verbose=True)
         if get_num_microbatches() != num_microbatches and iteration != 0:
-            assert get_num_microbatches() > num_microbatches, (
-                f"Number of microbatches should be increasing due to batch size rampup; "
-                f"instead going from {num_microbatches} to {get_num_microbatches()}"
-            )
+            assert get_num_microbatches() > num_microbatches, \
+                (f"Number of microbatches should be increasing due to batch size rampup; "
+                 f"instead going from {num_microbatches} to {get_num_microbatches()}")
             if args.save is not None:
-                save_checkpoint_and_time(
-                    iteration,
-                    model,
-                    optimizer,
-                    opt_param_scheduler,
-                    num_floating_point_operations_so_far,
-                    checkpointing_context,
-                    train_data_iterator=train_data_iterator,
-                )
+                save_checkpoint_and_time(iteration, model, optimizer,
+                                         opt_param_scheduler,
+                                         num_floating_point_operations_so_far,
+                                         checkpointing_context, train_data_iterator=train_data_iterator)
         num_microbatches = get_num_microbatches()
         update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
 
@@ -292,9 +258,9 @@ def train(
             # Dummy train_step to fast forward train_data_iterator.
             dummy_train_step(train_data_iterator)
             iteration += 1
-            batch_size = (
-                mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
-            )
+            batch_size = mpu.get_data_parallel_world_size() * \
+                         args.micro_batch_size * \
+                         get_num_microbatches()
             args.consumed_train_samples += batch_size
             args.skipped_train_samples += batch_size
             continue
@@ -302,28 +268,19 @@ def train(
         # Run training step.
         args.curr_iteration = iteration
         ft_integration.on_training_step_start()
-        (
-            loss_dict,
-            skipped_iter,
-            should_checkpoint,
-            should_exit,
-            exit_code,
-            grad_norm,
-            num_zeros_in_grad,
-        ) = train_step(
-            forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config
-        )
+        loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad = \
+            train_step(forward_step_func,
+                       train_data_iterator,
+                       model,
+                       optimizer,
+                       opt_param_scheduler,
+                       config)
         ft_integration.on_training_step_end()
         if should_checkpoint:
-            save_checkpoint_and_time(
-                iteration,
-                model,
-                optimizer,
-                opt_param_scheduler,
-                num_floating_point_operations_so_far,
-                checkpointing_context,
-                train_data_iterator=train_data_iterator,
-            )
+            save_checkpoint_and_time(iteration, model, optimizer,
+                                     opt_param_scheduler,
+                                     num_floating_point_operations_so_far,
+                                     checkpointing_context, train_data_iterator=train_data_iterator)
         if should_exit:
             break
 
@@ -346,13 +303,12 @@ def train(
                     pre_hook_enabled = True
 
         iteration += 1
-        batch_size = (
-            mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
-        )
+        batch_size = mpu.get_data_parallel_world_size() * \
+                     args.micro_batch_size * \
+                     get_num_microbatches()
         args.consumed_train_samples += batch_size
-        num_skipped_samples_in_batch = (
-            get_current_global_batch_size() - get_current_running_global_batch_size()
-        )
+        num_skipped_samples_in_batch = (get_current_global_batch_size() -
+                                        get_current_running_global_batch_size())
         if args.decrease_batch_size_if_needed:
             assert num_skipped_samples_in_batch >= 0
         else:
@@ -378,22 +334,16 @@ def train(
                 decoupled_learning_rate = param_group['lr']
             else:
                 learning_rate = param_group['lr']
-        report_memory_flag = training_log(
-            loss_dict,
-            total_loss_dict,
-            learning_rate,
-            decoupled_learning_rate,
-            iteration,
-            loss_scale,
-            report_memory_flag,
-            skipped_iter,
-            grad_norm,
-            params_norm,
-            num_zeros_in_grad,
-        )
+        report_memory_flag = training_log(loss_dict, total_loss_dict,
+                                          learning_rate,
+                                          decoupled_learning_rate,
+                                          iteration, loss_scale,
+                                          report_memory_flag, skipped_iter,
+                                          grad_norm, params_norm, num_zeros_in_grad)
 
         # Evaluation.
-        if args.eval_interval and iteration % args.eval_interval == 0 and args.do_valid:
+        if args.eval_interval and iteration % args.eval_interval == 0 and \
+            args.do_valid:
             timers('interval-time').stop()
             if should_disable_forward_pre_hook(args):
                 disable_forward_pre_hook(model)
@@ -403,18 +353,11 @@ def train(
                 gc.collect()
             prefix = f'iteration {iteration}'
             timers('eval-time', log_level=0).start(barrier=True)
-            evaluate_and_print_results(
-                prefix,
-                forward_step_func,
-                valid_data_iterator,
-                model,
-                iteration,
-                process_non_loss_data_func,
-                config,
-                verbose=False,
-                write_to_tensorboard=True,
-                non_loss_data_func=non_loss_data_func,
-            )
+            evaluate_and_print_results(prefix, forward_step_func,
+                                       valid_data_iterator, model,
+                                       iteration, process_non_loss_data_func,
+                                       config, verbose=False, write_to_tensorboard=True,
+                                       non_loss_data_func=non_loss_data_func)
             eval_duration += timers('eval-time').elapsed()
             eval_iterations += args.eval_iters
             timers('eval-time').stop()
@@ -430,25 +373,13 @@ def train(
 
         # Miscellaneous post-training-step functions (e.g., FT heartbeats, GC).
         # Some of these only happen at specific iterations.
-        post_training_step_callbacks(
-            model,
-            optimizer,
-            opt_param_scheduler,
-            iteration,
-            prof,
-            num_floating_point_operations_since_last_log_event,
-        )
+        post_training_step_callbacks(model, optimizer, opt_param_scheduler, iteration, prof,
+                                     num_floating_point_operations_since_last_log_event)
 
         # Checkpoint and decide whether to exit.
-        should_exit = checkpoint_and_decide_exit(
-            model,
-            optimizer,
-            opt_param_scheduler,
-            iteration,
-            num_floating_point_operations_so_far,
-            checkpointing_context,
-            train_data_iterator,
-        )
+        should_exit = checkpoint_and_decide_exit(model, optimizer, opt_param_scheduler, iteration,
+                                                 num_floating_point_operations_so_far,
+                                                 checkpointing_context, train_data_iterator)
         if should_exit:
             break
 
@@ -477,7 +408,6 @@ def train(
         if wandb_writer:
             wandb_writer.finish()
         ft_integration.shutdown()
-        one_logger_utils.finish()
         sys.exit(exit_code)
 
     return iteration, num_floating_point_operations_so_far

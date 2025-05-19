@@ -397,6 +397,10 @@ class DenseAttnNode(TransformerLayerNode):
         )
         return hidden_states
 
+    def dw(self):
+        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+            self.layer._submodule_attention_dw()
+
 
 class FakeScheduleNode:
 
@@ -411,6 +415,10 @@ class DenseMlpNode(TransformerLayerNode):
     def forward_impl(self, hidden_states):
         return self.layer._submodule_dense_forward(hidden_states)
 
+    def dw(self):
+        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+            self.layer._submodule_mlp_dw()
+
 
 def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream):
     common_state = TransformerLayerState()
@@ -418,6 +426,7 @@ def build_non_moe_layer_plan(layer, event, chunk_state, comp_stream, com_stream)
     attn.name = "attn"
     dispatch = FakeScheduleNode()
     mlp = DenseMlpNode(chunk_state, common_state, layer, comp_stream, event)
+    mlp.name = "mlp"
     combine = FakeScheduleNode()
     return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
 
