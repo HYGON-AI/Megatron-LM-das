@@ -430,29 +430,4 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-case ${LOCAL_RANK} in
-    0) 
-        export HIP_VISIBLE_DEVICES=0
-        numactl --cpunodebind=0 --membind=0 ${APP} ;;
-    1) 
-        export HIP_VISIBLE_DEVICES=1
-        numactl --cpunodebind=1 --membind=1 ${APP} ;;
-    2) 
-        export HIP_VISIBLE_DEVICES=2
-        numactl --cpunodebind=2 --membind=2 ${APP} ;;
-    3) 
-        export HIP_VISIBLE_DEVICES=3
-        numactl --cpunodebind=3 --membind=3 ${APP} ;;
-    4) 
-        export HIP_VISIBLE_DEVICES=4
-        numactl --cpunodebind=4 --membind=4 ${APP} ;;
-    5) 
-        export HIP_VISIBLE_DEVICES=5
-        numactl --cpunodebind=5 --membind=5 ${APP} ;;
-    6) 
-        export HIP_VISIBLE_DEVICES=6
-        numactl --cpunodebind=6 --membind=6 ${APP} ;;
-    7) 
-        export HIP_VISIBLE_DEVICES=7
-        numactl --cpunodebind=7 --membind=7 ${APP} ;;
-esac
+${MEGATRON_PATH}/requirements/launch_with_binding.sh ${LOCAL_RANK} ${APP}
