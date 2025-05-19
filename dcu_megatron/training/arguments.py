@@ -120,6 +120,10 @@ def _add_extra_tokenizer_args(parser):
                                 'NullTokenizer',
                                 'DeepSeekV2Tokenizer'],
                        help='What type of tokenizer to use.')
+    group.add_argument('--use-qcomm',
+                       default=False,
+                       action="store_true",
+                       help='use quantized communication')
     return parser
 
 

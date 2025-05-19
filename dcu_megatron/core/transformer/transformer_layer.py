@@ -10,6 +10,7 @@ from megatron.core.utils import (
     deprecate_inference_params,
     make_viewless_tensor,
 )
+from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.transformer_layer import TransformerLayer as MegatronCoreTransformerLayer
 
 from dcu_megatron.core.transformer.utils import SubmoduleCallables, TransformerLayerSubmoduleCallables
@@ -32,6 +33,23 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         *,
         inference_params: Optional[Any] = None,
     ):
+
+        if not isinstance(self.mlp, MoELayer):
+            return super().forward(
+                    hidden_states=hidden_states,
+                    context=context,
+                    context_mask=context_mask,
+                    attention_mask=attention_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    attention_bias=attention_bias,
+                    inference_context=inference_context,
+                    packed_seq_params=packed_seq_params,
+                    sequence_len_offset=sequence_len_offset,
+                    inference_params=inference_params,
+                )
+
         (
             hidden_states,
             pre_mlp_layernorm_output,
@@ -259,10 +277,11 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         return output
 
-    def _submodule_attention_router_compound_dw(self):
+    def _submodule_attention_dw(self):
         self.self_attention.backward_dw()
-        # raise NotImplementedError("Not implemented")
+
+    def _submodule_attention_router_compound_dw(self):
+        self._submodule_attention_dw()
 
     def _submodule_mlp_dw(self):
         self.mlp.backward_dw()
-        # raise NotImplementedError("Not implemented")

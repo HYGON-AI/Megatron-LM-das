@@ -3,8 +3,8 @@ from typing import Optional, Tuple
 
 import torch
 
+from megatron.training import get_args
 from megatron.core.tensor_parallel import (
-    all_to_all,
     gather_from_sequence_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
 )
@@ -14,6 +14,8 @@ from megatron.core.transformer.moe.moe_utils import (
     unpermute,
 )
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher as MegatronCoreMoEAlltoAllTokenDispatcher
+
+from dcu_megatron.core.tensor_parallel import all_to_all
 
 
 # decouple perbatch state from MoEAlltoAllTokenDispatcher
@@ -35,6 +37,13 @@ class MoEAlltoAllPerBatchState:
 
 
 class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
+    def __init__(self, *args, **kwargs):
+        super.__init__(*args, **kwargs)
+
+        # use_qcomm
+        args = get_args()
+        self.use_qcomm = args.use_qcomm
+
     def collect_per_batch_state(self, state: MoEAlltoAllPerBatchState):
         state.num_global_tokens_per_local_expert = getattr(
             self, "num_global_tokens_per_local_expert", None
@@ -125,7 +134,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
             "before_ep_alltoall", tokens_per_expert
         )
         global_input_tokens = all_to_all(
-            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits, use_qcomm=self.use_qcomm
         )
 
         return tokens_per_expert, global_input_tokens
@@ -249,7 +258,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
         permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits
+            self.ep_group, hidden_states, self.input_splits, self.output_splits, use_qcomm=self.use_qcomm
         )
         return permutated_local_input_tokens
 
