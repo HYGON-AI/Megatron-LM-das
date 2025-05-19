@@ -16,35 +16,6 @@ from dcu_megatron.core.transformer.utils import SubmoduleCallables, TransformerL
 
 
 class TransformerLayer(MegatronCoreTransformerLayer):
-    def _callable_wrapper(
-        self, is_forward, func, stream, event, *args, skip_detach=False, **kwargs
-    ):
-        """
-        Wraps a function call so that it waits for a given CUDA event before
-        proceeding and then runs the function on a specified CUDA stream.
-        """
-        torch.cuda.nvtx.range_push(func.__name__)
-        event.wait(stream)
-        with torch.cuda.stream(stream):
-            outputs = func(*args, **kwargs)
-        event.record(stream)
-        if skip_detach:
-            torch.cuda.nvtx.range_pop()
-            return outputs
-        detached_output_tensors = []
-        if not is_forward:
-            torch.cuda.nvtx.range_pop()
-            return outputs, detached_output_tensors
-        for tensor in outputs:
-            if tensor is None:
-                detached_output_tensors.append(None)
-            elif tensor.dtype.is_floating_point:
-                detached_output_tensors.append(tensor.detach().requires_grad_(True))
-            else:
-                detached_output_tensors.append(tensor.detach())
-        torch.cuda.nvtx.range_pop()
-        return outputs, detached_output_tensors
-
     def forward(
         self,
         hidden_states: Tensor,
@@ -123,7 +94,13 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         residual = hidden_states
 
         # Optional Input Layer norm
-        input_layernorm_output = self.input_layernorm(hidden_states)
+        if self.recompute_input_layernorm:
+            self.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+            input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
+                self.input_layernorm, hidden_states
+            )
+        else:
+            input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
         attention_output_with_bias = self.self_attention(
@@ -137,6 +114,13 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+
+        if self.recompute_input_layernorm:
+            # discard the output of the input layernorm and register the recompute
+            # as a gradient hook of attention_output_with_bias[0]
+            self.input_layernorm_checkpoint.discard_output_and_register_recompute(
+                attention_output_with_bias[0]
+            )
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
@@ -178,7 +162,13 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         )
 
         # Optional Layer norm post the cross-attention.
-        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        if self.recompute_pre_mlp_layernorm:
+            self.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
+                self.pre_mlp_layernorm, hidden_states
+            )
+        else:
+            pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
         tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(
@@ -249,6 +239,16 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         if shared_expert_output is not None:
             output += shared_expert_output
         mlp_output_with_bias = (output, mlp_bias)
+
+        if self.recompute_pre_mlp_layernorm:
+            # discard the output of the pre-mlp layernorm and register the recompute
+            # as a gradient hook of mlp_output_with_bias[0]
+            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
+                mlp_output_with_bias[0]
+            )
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
                 mlp_output_with_bias, residual, self.hidden_dropout

@@ -169,6 +169,15 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     staticmethod,
                                     apply_wrapper=True)
 
+        # reduce_scatter_to_sequence_parallel_region
+        MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.reduce_scatter_to_sequence_parallel_region',
+                                    torch._dynamo.disable,
+                                    apply_wrapper=True)
+        # reduce_from_tensor_model_parallel_region
+        MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.reduce_from_tensor_model_parallel_region',
+                                    torch._dynamo.disable,
+                                    apply_wrapper=True)
+
         # flux
         if int(os.getenv("USE_FLUX_OVERLAP", "0")):
             from ..core.tensor_parallel.layers import (
@@ -189,6 +198,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.initialize import _initialize_distributed
         from ..training.initialize import _compile_dependencies
         from ..training.training import train
+        from ..training.initialize import _set_random_seed
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer)
@@ -198,6 +208,10 @@ class CoreAdaptation(MegatronAdaptationABC):
         # remove fused_kernels
         MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
                                     _compile_dependencies)
+
+        # 添加固定seed
+        MegatronAdaptation.register('megatron.training.initialize._set_random_seed',
+                                    _set_random_seed)
 
         # add trace_handler
         MegatronAdaptation.register('megatron.training.training.train',
