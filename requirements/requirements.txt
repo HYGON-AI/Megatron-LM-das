@@ -8,6 +8,7 @@ sentencepiece
 pybind11
 blobfile
 flux
+tiktoken
 
 # ==== test ====
 nltk
