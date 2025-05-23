@@ -74,13 +74,21 @@ def unpermute(
 
 ### 项目下载
 1. git方式下载
-    1.1 使用git clone下载项目后
-    1.2 cd Megatron-LM
-    1.3 git submodule update --init --recursive
+
+1.1 使用git clone下载项目后
+
+1.2 cd Megatron-LM
+
+1.3 git submodule update --init --recursive
+
 2. 离线下载
-    2.1 离线下载该仓库的离线代码包
-    2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
-    2.3 将Megatron-LM离线代码包解压到dcu_megatron目录下的Megatron-LM目录
+
+2.1 离线下载该仓库的离线代码包
+
+2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
+
+2.3 将Megatron-LM离线代码包解压到dcu_megatron目录下的Megatron-LM目录
+
 
 ### 项目使用
 在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
