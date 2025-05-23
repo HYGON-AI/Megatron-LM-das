@@ -49,11 +49,10 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10 # 4 # 20
+export GPU_MAX_HW_QUEUES=20 #10 # 4
+# export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
+# export NVTE_NO_PIPELINE_OVERLAP=1
 
-# tp-overlap控制参数
-export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
-export NVTE_NO_PIPELINE_OVERLAP=1
 
 # torch控制多流转单流
 export ALLREDUCE_STREAM_WITH_COMPUTE=1
@@ -71,11 +70,13 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 11008 
-    --num-attention-heads 32
-    --max-position-embeddings 4096
+    --num-layers 80 #80 #80 #40 # 20 # 
+    --hidden-size 8192
+    --ffn-hidden-size 28672 # 28672
+    --num-attention-heads 64
+    --max-position-embeddings 8192
+    --group-query-attention
+    --num-query-groups 8
     --normalization RMSNorm # Lightop
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
@@ -85,7 +86,7 @@ TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 256
+    --global-batch-size 512
     --train-iters 50
     --weight-decay 0.1 
     --adam-beta1 0.9 
@@ -110,15 +111,15 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 2
+    --tensor-model-parallel-size 4
+    --pipeline-model-parallel-size 8
     --context-parallel-size 1
     --use-distributed-optimizer 
     --sequence-parallel
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type Llama3Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH} 
     --split 949,50,1
@@ -140,7 +141,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp1-pp2-cp1
+    --profile-dir torch_prof_llama_1nodes_tp4-pp2-cp1-tpoverlap-nosyns_20
     --use-pytorch-profiler
 )
 

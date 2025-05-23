@@ -27,7 +27,7 @@ mpirun -np ${GPUS}  --hostfile hostfile \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_llama2_7b_1nodes.sh \
+                    ./train_llama2_13b_1nodes.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \

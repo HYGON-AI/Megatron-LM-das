@@ -49,11 +49,10 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10 # 4 # 20
-
-# tp-overlap控制参数
+export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
 export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
 export NVTE_NO_PIPELINE_OVERLAP=1
+
 
 # torch控制多流转单流
 export ALLREDUCE_STREAM_WITH_COMPUTE=1
@@ -71,10 +70,10 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 11008 
-    --num-attention-heads 32
+    --num-layers 40
+    --hidden-size 5120
+    --ffn-hidden-size 13824 
+    --num-attention-heads 40
     --max-position-embeddings 4096
     --normalization RMSNorm # Lightop
     --position-embedding-type rope
@@ -110,7 +109,7 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
+    --tensor-model-parallel-size 2
     --pipeline-model-parallel-size 2
     --context-parallel-size 1
     --use-distributed-optimizer 

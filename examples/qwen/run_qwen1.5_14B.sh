@@ -14,9 +14,9 @@ NCCL_ENV="/public/home/wangxj/Projects/dcu_megatron/requirements/nccl_wz/env.sh"
 HOST="localhost"                 # hostname
 PORT="11451"                 # port id
 # DATA_PATH="/data/datasets/oscar-1GB-head/oscar-1GB_head-llama2_text_document"            # path to oscar-1GB_head-llama2_text_document
-DATA_PATH="/public/home/wangxj/Downloads/datasets/oscar-1GB-head/oscar-1GB_head-llama2_text_document"
+DATA_PATH="/public/home/wangxj/Downloads/datasets/oscar-1GB-head/oscar-1GB_head-qwen_text_document"
 # TOKENIZER_MODEL_PATH="/data/model_weights/llama2_7b_hf/tokenizer.model" # path to tokenizer.model
-TOKENIZER_MODEL_PATH="/public/home/wangxj/Downloads/model_weights/llama2_7b_hf/tokenizer.model"
+TOKENIZER_MODEL_PATH="/public/home/wangxj/Downloads/model_weights/qwen1.5"
 CHECKPOINT_PATH="./ckpt"      # path to ckpt
 
 # Runs Llama2 7B model
@@ -27,7 +27,7 @@ mpirun -np ${GPUS}  --hostfile hostfile \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_llama2_7b_1nodes.sh \
+                    ./train_qwen1.5_14b_1nodes.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \

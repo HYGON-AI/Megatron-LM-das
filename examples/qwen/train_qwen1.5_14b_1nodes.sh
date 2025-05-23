@@ -49,11 +49,10 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10 # 4 # 20
-
-# tp-overlap控制参数
+export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
 export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
 export NVTE_NO_PIPELINE_OVERLAP=1
+
 
 # torch控制多流转单流
 export ALLREDUCE_STREAM_WITH_COMPUTE=1
@@ -71,10 +70,10 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 11008 
-    --num-attention-heads 32
+    --num-layers 40
+    --hidden-size 5120
+    --ffn-hidden-size 13696 
+    --num-attention-heads 40
     --max-position-embeddings 4096
     --normalization RMSNorm # Lightop
     --position-embedding-type rope
@@ -97,6 +96,7 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
+    --add-qkv-bias
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
@@ -110,16 +110,17 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 2
+    --tensor-model-parallel-size 2
+    --pipeline-model-parallel-size 4
     --context-parallel-size 1
     --use-distributed-optimizer 
     --sequence-parallel
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
-    --tokenizer-model ${TOKENIZER_MODEL_PATH}
+    --tokenizer-type QwenTokenizer
+    --merge-file ${TOKENIZER_MODEL_PATH}/merges.txt
+    --vocab-file ${TOKENIZER_MODEL_PATH}/vocab.json
     --data-path ${DATA_PATH} 
     --split 949,50,1
 )
@@ -171,4 +172,37 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${MEGATRON_PATH}/requirements/launch_with_binding.sh ${LOCAL_RANK} ${APP}
+case ${LOCAL_RANK} in
+[0])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=0 --membind=0 ${APP}
+  ;;
+[1])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=1 --membind=1 ${APP}
+  ;;
+[2])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=2 --membind=2 ${APP}
+  ;;
+[3])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=3 --membind=3 ${APP}
+  ;;
+[4])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=4 --membind=4 ${APP}
+  ;;
+[5])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=5 --membind=5 ${APP}
+  ;;
+[6])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=6 --membind=6 ${APP}
+  ;;
+[7])
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  numactl --cpunodebind=7 --membind=7 ${APP}
+  ;;
+esac
