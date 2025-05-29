@@ -195,7 +195,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                 active=args.profile_step_end-args.profile_step_start,
                 repeat=1),
             on_trace_ready=trace_handler,
-            record_shapes=True, 
+            record_shapes=True,
+            with_stack=True,
             )
         prof.start()
     elif args.profile and torch.distributed.get_rank() in args.profile_ranks and args.use_hip_profiler:

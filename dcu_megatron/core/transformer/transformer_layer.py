@@ -1,7 +1,5 @@
-from functools import partial
 from typing import Any, Optional
 
-import torch
 from torch import Tensor
 
 from megatron.core import tensor_parallel
@@ -12,8 +10,7 @@ from megatron.core.utils import (
 )
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.transformer_layer import TransformerLayer as MegatronCoreTransformerLayer
-
-from dcu_megatron.core.transformer.utils import SubmoduleCallables, TransformerLayerSubmoduleCallables
+from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
 
 
 class TransformerLayer(MegatronCoreTransformerLayer):
@@ -34,7 +31,10 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         inference_params: Optional[Any] = None,
     ):
 
-        if not isinstance(self.mlp, MoELayer):
+        if (
+            not isinstance(self.mlp, MoELayer)
+            or not isinstance(self.mlp.token_dispatcher, MoEAlltoAllTokenDispatcher)
+        ):
             return super().forward(
                     hidden_states=hidden_states,
                     context=context,
@@ -55,7 +55,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             pre_mlp_layernorm_output,
             tokens_per_expert,
             permutated_local_input_tokens,
-            probs,
+            _,
         ) = self._submodule_attention_router_compound_forward(
             hidden_states,
             attention_mask,

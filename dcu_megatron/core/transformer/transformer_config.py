@@ -40,8 +40,7 @@ class ExtraTransformerConfig:
     combined_1f1b_recipe: str = 'ep_a2a'
     """Recipe to use for combined 1F1B. Currently only 'ep_a2a' and 'golden' are supported."""
 
-    split_bw: bool = False
-    """If true, split dgrad and wgrad for better overlapping in combined 1F1B."""
+    # split_bw: bool = False
 
 
 @dataclass

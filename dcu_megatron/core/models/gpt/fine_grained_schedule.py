@@ -540,6 +540,8 @@ class ModelChunkSchedulePlan(AbstractSchedulePlan):
     def state(self):
         return self._model_chunk_state
 
+# F_DISPATCH_B_MLP_SYNC_EVENT = torch.cuda.Event()
+F_DISPATCH_B_MLP_SYNC_EVENT = None
 
 def schedule_layer_1f1b(
     f_layer,
@@ -579,13 +581,17 @@ def schedule_layer_1f1b(
         with f_context:
             f_input = f_layer.attn.forward(f_input)
 
+    f_dispatch_b_mlp_sync_event = None
+    if f_layer is not None and b_layer is not None:
+        f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT
+
     if f_layer is not None:
         with f_context:
-            f_input = f_layer.dispatch.forward(f_input)
+            f_input = f_layer.dispatch.forward(f_input, stream_record_event=f_dispatch_b_mlp_sync_event)
 
     if b_layer is not None:
         with b_context:
-            b_grad = b_layer.mlp.backward(b_grad)
+            b_grad = b_layer.mlp.backward(b_grad, stream_wait_event=f_dispatch_b_mlp_sync_event)
             b_grad = b_layer.dispatch.backward(b_grad)
             b_layer.mlp.dw()
 
@@ -688,31 +694,27 @@ def schedule_chunk_1f1b(
         )
         torch.cuda.nvtx.range_pop()
 
+    # tail forward
+    f_input = layer_pre_forward()
+    del layer_pre_forward
+
     # tail backward
     grad = layer_pre_backward()
     del layer_pre_backward
+
     with b_context:
         for i in range(overlaped_layers, b_num_layers):
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
             torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-            tmp, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+            _, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
             torch.cuda.nvtx.range_pop()
 
-        if b_schedule_plan is not None:
-            b_schedule_plan.pre_process.backward(grad)
-
-    # tail forward
-    f_input = layer_pre_forward()
-    del layer_pre_forward
     with f_context:
         for i in range(overlaped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
             torch.cuda.nvtx.range_push(f"layer_{i}f")
-            f_input, tmp, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
+            f_input, _, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
             torch.cuda.nvtx.range_pop()
-
-        if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
-            f_input = f_schedule_plan.post_process.forward(f_input)
 
     # output pp send receive, overlapped with attn backward
     if f_schedule_plan is not None and post_forward is not None:
@@ -729,6 +731,13 @@ def schedule_chunk_1f1b(
     # The last wgrad of attention
     layer_pre_backward_dw()
     del layer_pre_backward_dw
+
+    with f_context:
+        if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
+            f_input = f_schedule_plan.post_process.forward(f_input)
+    with b_context:
+        if b_schedule_plan is not None:
+            b_schedule_plan.pre_process.backward(grad)
 
     if f_schedule_plan:
         f_schedule_plan.wait_current_stream()
@@ -764,7 +773,7 @@ def build_model_chunk_schedule_plan(
     state.attention_mask = attention_mask
     state.decoder_input = decoder_input
     state.labels = labels
-    state.inference_context =inference_context
+    state.inference_context = inference_context
     state.packed_seq_params = packed_seq_params
     state.extra_block_kwargs = extra_block_kwargs
     state.runtime_gather_output = runtime_gather_output

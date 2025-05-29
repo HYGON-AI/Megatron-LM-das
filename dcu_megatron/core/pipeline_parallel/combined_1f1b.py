@@ -1,7 +1,7 @@
 import contextlib
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Any, List, Tuple, Union
+from typing import List, Union
 
 import torch
 from torch import Tensor
@@ -12,11 +12,8 @@ from megatron.core.distributed import DistributedDataParallel
 
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
+from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
-
-
-# Types
-Shape = Union[List[int], torch.Size]
 
 
 def make_viewless(e):
@@ -56,6 +53,11 @@ class ScheduleNode:
         self.outputs = None
 
     def default_backward_func(self, outputs, output_grad):
+        # Handle scalar output
+        if output_grad is None:
+            assert outputs.numel() == 1, "implicit grad requires scalar output."
+            output_grad = torch.ones_like(outputs, memory_format=torch.preserve_format)
+
         Variable._execution_engine.run_backward(
             tensors=outputs,
             grad_tensors=output_grad,
@@ -67,17 +69,20 @@ class ScheduleNode:
         )
         return output_grad
 
-    def forward(self, inputs=()):
+    def forward(self, inputs=(), stream_wait_event=None, stream_record_event=None):
         """schedule node forward"""
 
         if not isinstance(inputs, tuple):
             inputs = (inputs,)
-        return self._forward(*inputs)
+        return self._forward(*inputs, stream_wait_event=stream_wait_event, stream_record_event=stream_record_event)
 
-    def _forward(self, *inputs):
+    def _forward(self, *inputs, stream_wait_event=None, stream_record_event=None):
         with stream_acquire_context(self.stream, self.event):
             torch.cuda.nvtx.range_push(f"{self.name} forward")
             with torch.cuda.stream(self.stream):
+                if stream_wait_event is not None:
+                    stream_wait_event.wait(self.stream)
+
                 self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
                 for i, input in enumerate(self.inputs):
                     if input is not None:
@@ -92,6 +97,10 @@ class ScheduleNode:
                     data = tuple([make_viewless(e) if isinstance(e, Tensor) else e for e in data])
 
                 self.output = data
+
+            if stream_record_event is not None:
+                stream_record_event.record(self.stream)
+
             torch.cuda.nvtx.range_pop()
 
         if self.free_inputs:
@@ -105,16 +114,19 @@ class ScheduleNode:
         """get the forward output"""
         return self.output
 
-    def backward(self, output_grad):
+    def backward(self, output_grad, stream_wait_event=None, stream_record_event=None):
         """schedule node backward"""
         if not isinstance(output_grad, tuple):
             output_grad = (output_grad,)
-        return self._backward(*output_grad)
+        return self._backward(*output_grad, stream_wait_event=stream_wait_event, stream_record_event=stream_record_event)
 
-    def _backward(self, *output_grad):
+    def _backward(self, *output_grad, stream_wait_event=None, stream_record_event=None):
         with stream_acquire_context(self.stream, self.event):
             torch.cuda.nvtx.range_push(f"{self.name} backward")
             with torch.cuda.stream(self.stream):
+                if stream_wait_event is not None:
+                    stream_wait_event.wait(self.stream)
+
                 outputs = self.output
                 if not isinstance(outputs, tuple):
                     outputs = (outputs,)
@@ -125,6 +137,10 @@ class ScheduleNode:
                     output_grad = self.backward_func(outputs, output_grad)
                 else:
                     output_grad = self.default_backward_func(outputs, output_grad)
+
+            if stream_record_event is not None:
+                stream_record_event.record(self.stream)
+
             torch.cuda.nvtx.range_pop()
 
         # output_grad maybe from another stream
@@ -192,17 +208,6 @@ def schedule_chunk_1f1b(
     )
 
 
-def schedule_chunk_forward(schedule_plan):
-    """model level fine-grained forward schedule"""
-    f_input = schedule_chunk_1f1b(schedule_plan, None, None)
-    return f_input
-
-
-def schedule_chunk_backward(schedule_plan, grad):
-    """model level fine-grained backward schedule"""
-    tmp = schedule_chunk_1f1b(None, schedule_plan, grad)
-
-
 _COMP_STREAM = None
 _COM_STREAM = None
 
@@ -215,7 +220,7 @@ def set_streams(comp_stream=None, com_stream=None):
         return
 
     if comp_stream is None:
-        comp_stream = torch.cuda.Stream(device="cuda")
+        comp_stream = torch.cuda.current_stream()
     if com_stream is None:
         com_stream = torch.cuda.Stream(device="cuda")
 
@@ -342,7 +347,7 @@ def forward_backward_step(
         Tensor or list[Tensor]: The output object(s) from the forward step.
         Tensor: The number of tokens.
     """
-    from .schedules import set_current_microbatch
+    from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 
     if config.timers is not None:
         config.timers('forward-compute', log_level=2).start()
@@ -441,12 +446,13 @@ def forward_backward_step(
                         output_tensor, num_tokens, loss_reduced = outputs
                         if not config.calculate_per_token_loss:
                             output_tensor /= num_tokens
+                            output_tensor *= parallel_state.get_context_parallel_world_size()
                             output_tensor /= num_microbatches
                     else:
-                        # preserve legacy loss averaging behavior
-                        # (ie, over the number of microbatches)
+                        # preserve legacy loss averaging behavior (ie, over the number of microbatches)
                         assert len(outputs) == 2
                         output_tensor, loss_reduced = outputs
+                        output_tensor *= parallel_state.get_context_parallel_world_size()
                         output_tensor = output_tensor / num_microbatches
                     forward_data_store.append(loss_reduced)
 
@@ -464,12 +470,11 @@ def forward_backward_step(
             # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
             # explicitly.
             if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
-                # Calculate the loss scale based on the grad_scale_func if available,
-                # else default to 1.
+                # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
                 loss_scale = (
                     config.grad_scale_func(torch.ones(1, device=output_tensor.device))
                     if config.grad_scale_func is not None
-                    else torch.tensor(1.0)
+                    else torch.ones(1, device=output_tensor.device)
                 )
                 # Set the loss scale
                 if config.calculate_per_token_loss:
@@ -477,8 +482,23 @@ def forward_backward_step(
                 else:
                     MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
 
+            # Set the loss scale for Multi-Token Prediction (MTP) loss.
+            if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
+                # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+                loss_scale = (
+                    config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+                    if config.grad_scale_func is not None
+                    else torch.ones(1, device=output_tensor.device)
+                )
+                # Set the loss scale
+                if config.calculate_per_token_loss:
+                    MTPLossAutoScaler.set_loss_scale(loss_scale)
+                else:
+                    MTPLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+
             if not unwrap_output_tensor:
                 output_tensor, num_tokens = [output_tensor], num_tokens
+
     # backward post process
     input_tensor_grad = None
     if b_model is not None:

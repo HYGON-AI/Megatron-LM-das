@@ -1,5 +1,5 @@
 import contextlib
-from typing import Callable, Iterator, List, Optional, Union
+from typing import Iterator, List, Union
 
 import torch
 
@@ -7,10 +7,8 @@ from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel import p2p_communication
-from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
 from megatron.core.utils import (
-    get_attr_wrapped_model,
     get_model_config,
     get_model_type,
     get_model_xattn,
@@ -448,6 +446,8 @@ def forward_backward_pipelining_with_interleaving(
         """Helper method to run backward step with model split into chunks
         (run set_virtual_pipeline_model_parallel_rank() before calling
         backward_step())."""
+        nonlocal output_tensor_grads
+
         model_chunk_id = get_model_chunk_id(virtual_microbatch_id, forward=False)
         parallel_state.set_virtual_pipeline_model_parallel_rank(model_chunk_id)
 

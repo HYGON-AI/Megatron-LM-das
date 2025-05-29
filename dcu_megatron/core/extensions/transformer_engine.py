@@ -1,4 +1,5 @@
 import os
+import copy
 import torch
 import dataclasses
 import transformer_engine as te
@@ -7,6 +8,7 @@ from functools import wraps
 from typing import Any, Optional, Callable
 from packaging.version import Version as PkgVersion
 
+from megatron.training import get_args
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
 from megatron.core.utils import get_te_version, is_te_min_version
@@ -25,15 +27,17 @@ from megatron.core.parallel_state import (
 )
 
 
-def _get_extra_te_kwargs_wrapper(fn):
-    @wraps(fn)
+def _get_extra_te_kwargs_wrapper(_get_extra_te_kwargs_func):
+    @wraps(_get_extra_te_kwargs_func)
     def wrapper(config: TransformerConfig):
-        extra_transformer_engine_kwargs = fn(config)
+        extra_transformer_engine_kwargs = _get_extra_te_kwargs_func(config)
         if hasattr(config, "split_bw"):
             extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.split_bw
         return extra_transformer_engine_kwargs
 
-    return wrapper
+    if is_te_min_version("2.3.0.dev0"):
+        return wrapper
+    return _get_extra_te_kwargs_func
 
 
 class TELinear(MegatronCoreTELinear):
@@ -66,8 +70,14 @@ class TELinear(MegatronCoreTELinear):
         tp_comm_buffer_name: Optional[str] = None,
         is_expert: bool = False,
     ):
-        self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
-        assert not self.split_bw, "split_bw is currently not supported"
+        args = get_args()
+        self.split_bw = args.split_bw if hasattr(args, "split_bw") else False
+        if not is_te_min_version("2.3.0.dev0"):
+            assert not self.split_bw, "split_bw is currently not supported"
+
+        if self.split_bw:
+            config = copy.copy(config)
+            config.split_bw = True
 
         super().__init__(
             input_size,
@@ -85,6 +95,8 @@ class TELinear(MegatronCoreTELinear):
     def backward_dw(self):
         if not self.split_bw:
             return
+
+        return super(MegatronCoreTELinear, self).backward_dw()
 
 
 class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinear):
@@ -107,8 +119,14 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
     ):
-        self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
-        assert not self.split_bw, "split_bw is currently not supported"
+        args = get_args()
+        self.split_bw = args.split_bw if hasattr(args, "split_bw") else False
+        if not is_te_min_version("2.3.0.dev0"):
+            assert not self.split_bw, "split_bw is currently not supported"
+
+        if self.split_bw:
+            config = copy.copy(config)
+            config.split_bw = True
 
         super().__init__(
             input_size,
@@ -126,6 +144,8 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
     def backward_dw(self):
         if not self.split_bw:
             return
+
+        return super(MegatronCoreTELayerNormColumnParallelLinear, self).backward_dw()
 
 
 class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
@@ -289,8 +309,14 @@ if is_te_min_version("1.9.0.dev0"):
             is_expert: bool = False,
             tp_comm_buffer_name: Optional[str] = None,
         ):
-            self.split_bw = config.split_bw if hasattr(config, "split_bw") else False
-            assert not self.split_bw, "split_bw is currently not supported"
+            args = get_args()
+            self.split_bw = args.split_bw if hasattr(args, "split_bw") else False
+            if not is_te_min_version("2.3.0.dev0"):
+                assert not self.split_bw, "split_bw is currently not supported"
+
+            if self.split_bw:
+                config = copy.copy(config)
+                config.split_bw = True
 
             super().__init__(
                 num_gemms,
@@ -308,3 +334,5 @@ if is_te_min_version("1.9.0.dev0"):
         def backward_dw(self):
             if not self.split_bw:
                 return
+
+            return super(MegatronCoreTEGroupedLinear, self).backward_dw()

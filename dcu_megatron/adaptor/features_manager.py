@@ -39,10 +39,9 @@ def a2a_overlap_adaptation(patches_manager):
                                    create_dummy=True)
 
     # backward_dw
-    if is_te_min_version("2.4.0.dev0"):
-        patches_manager.register_patch('megatron.core.extensions.transformer_engine._get_extra_te_kwargs',
-                                    _get_extra_te_kwargs_wrapper,
-                                    apply_wrapper=True)
+    patches_manager.register_patch('megatron.core.extensions.transformer_engine._get_extra_te_kwargs',
+                                   _get_extra_te_kwargs_wrapper,
+                                   apply_wrapper=True)
     patches_manager.register_patch('megatron.core.extensions.transformer_engine.TELinear',
                                    TELinear)
     patches_manager.register_patch('megatron.core.extensions.transformer_engine.TELayerNormColumnParallelLinear',
