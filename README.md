@@ -77,6 +77,12 @@ def unpermute(
 ```
 + 项目支持通过split-bw进行dw拆分，用于实现更好的overlap。当前从测试结果看，开启split-bw，效果欠佳，待进一步优化。
 
+### 项目支持量化通信
++ 项目支持量化通信，对all-to-all通信数据进行低精度表示，减少通信量。如果需要使用该特性，需要启动脚本中加入如下参数：
+```
+--use-quantize-comm
+```
+
 ## 使用方式
 
 ### 项目下载
@@ -95,6 +101,7 @@ def unpermute(
 2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
 
 2.3 将Megatron-LM离线代码包解压到dcu_megatron目录下的Megatron-LM目录
+
 
 
 ### 项目使用

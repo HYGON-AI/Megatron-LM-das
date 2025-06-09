@@ -40,9 +40,9 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # use_qcomm
+        # use_quantize_comm
         args = get_args()
-        self.use_qcomm = args.use_qcomm
+        self.use_quantize_comm = args.use_quantize_comm
 
     def collect_per_batch_state(self, state: MoEAlltoAllPerBatchState):
         state.num_global_tokens_per_local_expert = getattr(
@@ -134,7 +134,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
             "before_ep_alltoall", tokens_per_expert
         )
         global_input_tokens = all_to_all(
-            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits, use_qcomm=self.use_qcomm
+            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits, use_quantize_comm=self.use_quantize_comm
         )
 
         return tokens_per_expert, global_input_tokens
@@ -258,7 +258,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
         permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits, use_qcomm=self.use_qcomm
+            self.ep_group, hidden_states, self.input_splits, self.output_splits, use_quantize_comm=self.use_quantize_comm
         )
         return permutated_local_input_tokens
 
