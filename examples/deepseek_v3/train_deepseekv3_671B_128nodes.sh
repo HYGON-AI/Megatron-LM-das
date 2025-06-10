@@ -104,7 +104,7 @@ if [ $MODEL_SIZE = A37B ]; then
 
 moe_options=" \
     --moe-grouped-gemm \
-    --moe-expert-capacity-factor 0.5 \
+    --moe-expert-capacity-factor 1 \
     --moe-pad-expert-input-to-capacity \
     --moe-token-dispatcher-type alltoall \
     --moe-router-topk ${ROUTER_TOPK} \

@@ -70,7 +70,7 @@ MOE_ARGS=(
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-2
     --moe-token-dispatcher-type alltoall
-    --moe-expert-capacity-factor 0.5
+    --moe-expert-capacity-factor 1
     --moe-pad-expert-input-to-capacity
     --moe-grouped-gemm
 )
