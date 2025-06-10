@@ -67,6 +67,7 @@ class ScheduleNode:
             allow_unreachable=True,
             accumulate_grad=True,
         )
+
         return output_grad
 
     def forward(self, inputs=(), stream_wait_event=None, stream_record_event=None):
@@ -105,8 +106,9 @@ class ScheduleNode:
 
         if self.free_inputs:
             for input in inputs:
-                input.record_stream(self.stream)
-                input.untyped_storage().resize_(0)
+                if input is not None:
+                    input.record_stream(self.stream)
+                    input.untyped_storage().resize_(0)
 
         return self.output
 

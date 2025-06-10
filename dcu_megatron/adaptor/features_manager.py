@@ -16,6 +16,7 @@ def a2a_overlap_adaptation(patches_manager):
         TELayerNormColumnParallelLinear,
     )
     from ..core.transformer.multi_latent_attention import MLASelfAttention
+    from ..core.transformer.attention import SelfAttention
     from ..core.transformer.mlp import MLP
     from ..core.transformer.moe.experts import TEGroupedMLP
     from ..core.transformer.moe.moe_layer import MoELayer
@@ -60,6 +61,9 @@ def a2a_overlap_adaptation(patches_manager):
 
     patches_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
                                    MLASelfAttention.backward_dw,
+                                   create_dummy=True)
+    patches_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_dw',
+                                   SelfAttention.backward_dw,
                                    create_dummy=True)
     patches_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
                                    MLP.backward_dw,

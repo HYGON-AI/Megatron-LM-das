@@ -307,7 +307,8 @@ class MoeAttnNode(TransformerLayerNode):
         # detached here
         self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
-        self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
+        if self.layer.mlp.use_shared_expert:
+            self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
 
         return permutated_local_input_tokens
 
@@ -333,7 +334,10 @@ class MoeDispatchNode(TransformerLayerNode):
 
 class MoeMlPNode(TransformerLayerNode):
     def forward_impl(self, global_input_tokens):
-        pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
+        if self.layer.mlp.use_shared_expert:
+            pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
+        else:
+            pre_mlp_layernorm_output = None
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
             expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
@@ -343,6 +347,8 @@ class MoeMlPNode(TransformerLayerNode):
 
         # pre_mlp_layernorm_output used
         self.common_state.pre_mlp_layernorm_output = None
+        if shared_expert_output is None:
+            return expert_output
         return expert_output, shared_expert_output
 
     def dw(self):
@@ -351,7 +357,7 @@ class MoeMlPNode(TransformerLayerNode):
 
 
 class MoeCombineNode(TransformerLayerNode):
-    def forward_impl(self, expert_output, shared_expert_output):
+    def forward_impl(self, expert_output, shared_expert_output=None):
         # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
         residual = self.common_state.residual
         token_dispatcher = self.layer.mlp.token_dispatcher
