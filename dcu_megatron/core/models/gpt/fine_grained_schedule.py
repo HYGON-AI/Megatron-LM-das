@@ -548,6 +548,7 @@ class ModelChunkSchedulePlan(AbstractSchedulePlan):
 
 # F_DISPATCH_B_MLP_SYNC_EVENT = torch.cuda.Event()
 F_DISPATCH_B_MLP_SYNC_EVENT = None
+B_MLP_B_DISPATCH_SYNC_EVENT = torch.cuda.Event()
 
 def schedule_layer_1f1b(
     f_layer,
@@ -575,10 +576,6 @@ def schedule_layer_1f1b(
         b_grad = pre_backward()
         del pre_backward
 
-    if b_layer is not None:
-        with b_context:
-            b_grad = b_layer.combine.backward(b_grad)
-
     if pre_backward_dw is not None:
         pre_backward_dw()
         del pre_backward_dw
@@ -586,6 +583,10 @@ def schedule_layer_1f1b(
     if f_layer is not None:
         with f_context:
             f_input = f_layer.attn.forward(f_input)
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.combine.backward(b_grad)
 
     f_dispatch_b_mlp_sync_event = None
     if f_layer is not None and b_layer is not None:
@@ -599,7 +600,6 @@ def schedule_layer_1f1b(
         with b_context:
             b_grad = b_layer.mlp.backward(b_grad, stream_wait_event=f_dispatch_b_mlp_sync_event)
             b_grad = b_layer.dispatch.backward(b_grad)
-            b_layer.mlp.dw()
 
     if f_layer is not None:
         with f_context:
@@ -620,6 +620,7 @@ def schedule_layer_1f1b(
     def next_iter_pre_backward_dw():
         if b_layer is not None:
             with b_context:
+                b_layer.mlp.dw()
                 b_layer.attn.dw()
 
     if f_layer and b_layer:
