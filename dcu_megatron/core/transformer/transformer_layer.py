@@ -149,6 +149,24 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         return hidden_states
 
+    def _submodule_router_forward(
+        self,
+        pre_mlp_layernorm_output
+    ):
+        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
+
+        tokens_per_expert, permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(
+            pre_mlp_layernorm_output, probs, routing_map
+        )
+
+        outputs = [
+            tokens_per_expert,
+            permutated_local_input_tokens,
+            probs
+        ]
+
+        return tuple(outputs)
+
     def _submodule_attention_router_compound_forward(
         self,
         hidden_states: Tensor,
@@ -188,13 +206,11 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         else:
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
-        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
-        tokens_per_expert = self.mlp.token_dispatcher.meta_prepare(
-            pre_mlp_layernorm_output, probs, routing_map
-        )
-        tokens_per_expert, permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(
-            pre_mlp_layernorm_output, routing_map, tokens_per_expert
-        )
+        (
+            tokens_per_expert,
+            permutated_local_input_tokens,
+            probs
+        ) = self._submodule_router_forward(pre_mlp_layernorm_output)
 
         outputs = [
             hidden_states,
@@ -202,6 +218,56 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             tokens_per_expert,
             permutated_local_input_tokens,
             probs,
+        ]
+        return tuple(outputs)
+
+    def _submodule_attention_shared_expert_compound_forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        rotary_pos_emb: Optional[Tensor] = None,
+        rotary_pos_cos: Optional[Tensor] = None,
+        rotary_pos_sin: Optional[Tensor] = None,
+        attention_bias: Optional[Tensor] = None,
+        inference_context: Optional[Any] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+        sequence_len_offset: Optional[Tensor] = None,
+        *,
+        inference_params: Optional[Any] = None,
+    ):
+        """
+        Performs a combined forward pass that includes self-attention and MLP routing logic.
+        """
+        hidden_states = self._submodule_attention_forward(
+            hidden_states,
+            attention_mask,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            attention_bias,
+            inference_context,
+            packed_seq_params,
+            sequence_len_offset,
+            inference_params=inference_params,
+        )
+
+        # Optional Layer norm post the cross-attention.
+        if self.recompute_pre_mlp_layernorm:
+            self.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
+                self.pre_mlp_layernorm, hidden_states
+            )
+        else:
+            pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+
+        shared_expert_output = None
+        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
+            shared_expert_output = self._submodule_shared_expert_forward(pre_mlp_layernorm_output)
+
+        outputs = [
+            hidden_states,
+            shared_expert_output,
+            pre_mlp_layernorm_output,
         ]
         return tuple(outputs)
 

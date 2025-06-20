@@ -272,7 +272,6 @@ class MoeAttnNode(TransformerLayerNode):
 
     def forward_impl(self, hidden_states):
         attention_mask = self.chunk_state.attention_mask
-        context = self.chunk_state.context
         rotary_pos_emb = self.chunk_state.rotary_pos_emb
         rotary_pos_cos = self.chunk_state.rotary_pos_cos
         rotary_pos_sin = self.chunk_state.rotary_pos_sin
@@ -287,10 +286,8 @@ class MoeAttnNode(TransformerLayerNode):
             (
                 hidden_states,
                 shared_expert_output,
-                tokens_per_expert,
-                permutated_local_input_tokens,
-                probs,
-            ) = self.layer._submodule_attention_router_shared_expert_compound_forward(
+                pre_mlp_layernorm_output,
+            ) = self.layer._submodule_attention_shared_expert_compound_forward(
                 hidden_states,
                 attention_mask=attention_mask,
                 rotary_pos_emb=rotary_pos_emb,
@@ -302,20 +299,34 @@ class MoeAttnNode(TransformerLayerNode):
                 sequence_len_offset=sequence_len_offset,
                 inference_params=inference_params,
             )
-        self.common_state.tokens_per_expert = tokens_per_expert
-
         # detached here
-        self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
         if self.layer.mlp.use_shared_expert:
             self.common_state.shared_expert_output = self.detach(shared_expert_output)
 
-        return permutated_local_input_tokens
+        return pre_mlp_layernorm_output
 
     def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
             self.layer._submodule_attention_router_compound_dw()
 
+
+class MoeRouterNode(TransformerLayerNode):
+    def forward_impl(self, pre_mlp_layernorm_output):
+        token_dispatcher = self.layer.mlp.token_dispatcher
+        with token_dispatcher.per_batch_state_context(self.common_state):
+            tokens_per_expert, permutated_local_input_tokens, probs = self.layer._submodule_router_forward(
+                pre_mlp_layernorm_output
+            )
+
+        self.common_state.tokens_per_expert = tokens_per_expert
+        self.common_state.probs = self.detach(probs)
+
+        return permutated_local_input_tokens
+
+    def dw(self):
+        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+            self.layer._submodule_mlp_dw()
 
 class MoeDispatchNode(TransformerLayerNode):
 
@@ -347,6 +358,21 @@ class MoeMlPNode(TransformerLayerNode):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
             self.layer._submodule_mlp_dw()
 
+
+class MoeRoutedExpertNode(TransformerLayerNode):
+    def forward_impl(self, global_input_tokens):
+        token_dispatcher = self.layer.mlp.token_dispatcher
+        with token_dispatcher.per_batch_state_context(self.common_state):
+            expert_output, mlp_bias = self.layer._submodule_routed_experts_forward(
+                self.common_state.tokens_per_expert, global_input_tokens
+            )
+            assert mlp_bias is None
+
+        return expert_output
+
+    def dw(self):
+        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+            self.layer._submodule_mlp_dw()
 
 class MoeCombineNode(TransformerLayerNode):
     def forward_impl(self, expert_output):
@@ -444,13 +470,19 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     common_state = TransformerLayerState()
     attn = MoeAttnNode(chunk_state, common_state, layer, comp_stream, event)
     attn.name = "attn"
+
+    router = MoeRouterNode(chunk_state, common_state, layer, comp_stream, event)
+    router.name = "router"
+
     dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event, True)
     dispatch.name = "dispatch"
-    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event, True)
-    mlp.name = "mlp"
+
+    mlp = MoeRoutedExpertNode(chunk_state, common_state, layer, comp_stream, event, True)
+    mlp.name = "routed-expert"
+
     combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event, True)
     combine.name = "combine"
-    return TransformerLayerSchedulePlan(attn, dispatch, mlp, combine)
+    return TransformerLayerSchedulePlan(attn, router, dispatch, mlp, combine)
 
 
 class TransformerLayerState(MoEAlltoAllPerBatchState):
@@ -463,8 +495,9 @@ class ModelChunkSate:
 
 class TransformerLayerSchedulePlan:
 
-    def __init__(self, attn, dispatch, mlp, combine):
+    def __init__(self, attn, router, dispatch, mlp, combine):
         self.attn = attn
+        self.router = router
         self.dispatch = dispatch
         self.mlp = mlp
         self.combine = combine
@@ -551,6 +584,8 @@ class ModelChunkSchedulePlan(AbstractSchedulePlan):
 F_DISPATCH_B_MLP_SYNC_EVENT = None
 B_MLP_B_DISPATCH_SYNC_EVENT = torch.cuda.Event()
 
+F_ATTN_B_COMBINE_SYNC_EVENT = torch.cuda.Event()
+
 def schedule_layer_1f1b(
     f_layer,
     b_layer,
@@ -581,13 +616,13 @@ def schedule_layer_1f1b(
         pre_backward_dw()
         del pre_backward_dw
 
-    if b_layer is not None:
-        with b_context:
-            b_grad = b_layer.combine.backward(b_grad)
-
     if f_layer is not None:
         with f_context:
-            f_input = f_layer.attn.forward(f_input)
+            f_input = f_layer.attn.forward(f_input, stream_record_event=F_ATTN_B_COMBINE_SYNC_EVENT)
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.combine.backward(b_grad, stream_wait_event=F_ATTN_B_COMBINE_SYNC_EVENT)
 
     f_dispatch_b_mlp_sync_event = None
     if f_layer is not None and b_layer is not None:
@@ -595,6 +630,7 @@ def schedule_layer_1f1b(
 
     if f_layer is not None:
         with f_context:
+            f_input = f_layer.router.forward(f_input)
             f_input = f_layer.dispatch.forward(f_input, stream_record_event=f_dispatch_b_mlp_sync_event)
 
     if b_layer is not None:
@@ -605,6 +641,10 @@ def schedule_layer_1f1b(
     if f_layer is not None:
         with f_context:
             f_input = f_layer.mlp.forward(f_input)
+
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.router.backward(b_grad)
 
     def next_iter_pre_forward():
         if f_layer is not None:
