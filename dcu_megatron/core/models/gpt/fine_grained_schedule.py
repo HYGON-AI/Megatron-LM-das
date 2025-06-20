@@ -286,11 +286,11 @@ class MoeAttnNode(TransformerLayerNode):
         with token_dispatcher.per_batch_state_context(self.common_state):
             (
                 hidden_states,
-                pre_mlp_layernorm_output,
+                shared_expert_output,
                 tokens_per_expert,
                 permutated_local_input_tokens,
                 probs,
-            ) = self.layer._submodule_attention_router_compound_forward(
+            ) = self.layer._submodule_attention_router_shared_expert_compound_forward(
                 hidden_states,
                 attention_mask=attention_mask,
                 rotary_pos_emb=rotary_pos_emb,
@@ -308,7 +308,7 @@ class MoeAttnNode(TransformerLayerNode):
         self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
         if self.layer.mlp.use_shared_expert:
-            self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
+            self.common_state.shared_expert_output = self.detach(shared_expert_output)
 
         return permutated_local_input_tokens
 
@@ -334,22 +334,14 @@ class MoeDispatchNode(TransformerLayerNode):
 
 class MoeMlPNode(TransformerLayerNode):
     def forward_impl(self, global_input_tokens):
-        if self.layer.mlp.use_shared_expert:
-            pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
-        else:
-            pre_mlp_layernorm_output = None
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
-                self.common_state.tokens_per_expert, global_input_tokens, pre_mlp_layernorm_output
+            expert_output, mlp_bias = self.layer._submodule_routed_experts_forward(
+                self.common_state.tokens_per_expert, global_input_tokens
             )
             assert mlp_bias is None
 
-        # pre_mlp_layernorm_output used
-        self.common_state.pre_mlp_layernorm_output = None
-        if shared_expert_output is None:
-            return expert_output
-        return expert_output, shared_expert_output
+        return expert_output
 
     def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
@@ -357,10 +349,15 @@ class MoeMlPNode(TransformerLayerNode):
 
 
 class MoeCombineNode(TransformerLayerNode):
-    def forward_impl(self, expert_output, shared_expert_output=None):
+    def forward_impl(self, expert_output):
         # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
         residual = self.common_state.residual
         token_dispatcher = self.layer.mlp.token_dispatcher
+
+        shared_expert_output = None
+        if self.layer.mlp.use_shared_expert:
+            shared_expert_output = self.common_state.shared_expert_output
+
         with token_dispatcher.per_batch_state_context(self.common_state):
             permutated_local_input_tokens = token_dispatcher.combine_all_to_all(
                 expert_output
@@ -371,8 +368,12 @@ class MoeCombineNode(TransformerLayerNode):
         cur_stream = torch.cuda.current_stream()
         self.common_state.residual.record_stream(cur_stream)
         self.common_state.probs.record_stream(cur_stream)
+        if self.layer.mlp.use_shared_expert:
+            self.common_state.shared_expert_output.record_stream(cur_stream)
+
         self.common_state.residual = None
         self.common_state.probs = None
+        self.common_state.shared_expert_output = None
         return output
 
 
@@ -580,13 +581,13 @@ def schedule_layer_1f1b(
         pre_backward_dw()
         del pre_backward_dw
 
-    if f_layer is not None:
-        with f_context:
-            f_input = f_layer.attn.forward(f_input)
-
     if b_layer is not None:
         with b_context:
             b_grad = b_layer.combine.backward(b_grad)
+
+    if f_layer is not None:
+        with f_context:
+            f_input = f_layer.attn.forward(f_input)
 
     f_dispatch_b_mlp_sync_event = None
     if f_layer is not None and b_layer is not None:

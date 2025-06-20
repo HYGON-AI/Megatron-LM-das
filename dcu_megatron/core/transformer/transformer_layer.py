@@ -205,6 +205,55 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         ]
         return tuple(outputs)
 
+    def _submodule_attention_router_shared_expert_compound_forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        rotary_pos_emb: Optional[Tensor] = None,
+        rotary_pos_cos: Optional[Tensor] = None,
+        rotary_pos_sin: Optional[Tensor] = None,
+        attention_bias: Optional[Tensor] = None,
+        inference_context: Optional[Any] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+        sequence_len_offset: Optional[Tensor] = None,
+        *,
+        inference_params: Optional[Any] = None,
+    ):
+        """
+        Performs a combined forward pass that includes self-attention, MLP routing and shared-experts logic.
+        """
+        (
+            hidden_states,
+            pre_mlp_layernorm_output,
+            tokens_per_expert,
+            permutated_local_input_tokens,
+            probs,
+        ) = self._submodule_attention_router_compound_forward(
+            hidden_states,
+            attention_mask,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            attention_bias,
+            inference_context,
+            packed_seq_params,
+            sequence_len_offset,
+            inference_params=inference_params,
+        )
+
+        shared_expert_output = None
+        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
+            shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
+
+        outputs = [
+            hidden_states,
+            shared_expert_output,
+            tokens_per_expert,
+            permutated_local_input_tokens,
+            probs,
+        ]
+        return tuple(outputs)
+
     def _submodule_shared_expert_forward(self, pre_mlp_layernorm_output):
         """
         Performs a forward pass for shared experts.
@@ -252,6 +301,17 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         return expert_output, shared_expert_output, mlp_bias
+
+    def _submodule_routed_experts_forward(self, tokens_per_expert, global_input_tokens):
+        """
+        Performs a forward pass for the MLP submodule, including only routed-expert computations.
+        """
+        (dispatched_input, tokens_per_expert) = (
+            self.mlp.token_dispatcher.dispatch_postprocess(tokens_per_expert, global_input_tokens)
+        )
+        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
+        expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
+        return expert_output, mlp_bias
 
     def _submodule_combine_forward(self, hidden_states):
         return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
