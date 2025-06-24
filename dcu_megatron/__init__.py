@@ -1,1 +1,1 @@
-from .adaptor import megatron_adaptor ..
+from .adaptor import megatron_adaptor
