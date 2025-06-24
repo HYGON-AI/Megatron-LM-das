@@ -28,6 +28,7 @@ def add_megatron_arguments_patch(parser: argparse.ArgumentParser):
     parser = _add_extra_tokenizer_args(parser)
     parser = _add_extra_moe_args(parser)
     parser = _add_flux_args(parser)
+    parser = _add_extra_memory_args(parser)
 
     return parser
 
@@ -155,3 +156,13 @@ def _add_flux_args(parser):
     group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                        help='Whether to transpose weight when using flux kernel')
     return parser
+
+
+def _add_extra_memory_args(parser):
+    group = parser.add_argument_group(title='extra memory args')
+    group.add_argument('--reuse-fp32-param', action='store_true',
+                       help='The distributed training optimizer frees up '
+                            'param copies of FP32 to save memory.')
+
+    return parser
+
