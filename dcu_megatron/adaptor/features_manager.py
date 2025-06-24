@@ -1,10 +1,12 @@
 from megatron.core.utils import is_te_min_version
+from megatron.training.global_vars import get_args
 
 
 def a2a_overlap_adaptation(patches_manager):
     """
         patches_manager: MegatronPatchesManager
     """
+    # args = get_args()
     from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TERowParallelLinear
     from ..core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
     from ..core.transformer.transformer_layer import TransformerLayer
@@ -20,6 +22,11 @@ def a2a_overlap_adaptation(patches_manager):
     from ..core.transformer.mlp import MLP
     from ..core.transformer.moe.experts import TEGroupedMLP
     from ..core.transformer.moe.moe_layer import MoELayer
+
+    from ..core.memory.reuse_param.adaptor import (step_with_ready_grads, prepare_grads,
+                                    reuse_fp32_param_init_wrapper, optimizer_config_init_wrapper)
+    from ..core.memory.reuse_param.adaptor import reuse_fp32_param_distrib_optimizer_init_wrapper
+    from ..core.memory.reuse_param.adaptor import reuse_fp32_param_param_and_grad_buffer_init_wrapper
 
     # num_warmup_microbatches + 1
     patches_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_pp_rank_microbatches',
@@ -58,6 +65,22 @@ def a2a_overlap_adaptation(patches_manager):
                                        TEGroupedLinear)
         TEColumnParallelGroupedLinear.__bases__ = (TEGroupedLinear,)
         TERowParallelGroupedLinear.__bases__ = (TEGroupedLinear,)
+
+    # reusefp32param
+    if False:
+        patches_manager.register_patch('megatron.core.optimizer.optimizer.MixedPrecisionOptimizer.prepare_grads',
+                                     prepare_grads)
+        patches_manager.register_patch('megatron.core.optimizer.optimizer.MixedPrecisionOptimizer.step_with_ready_grads',
+                                     step_with_ready_grads)
+        patches_manager.register_patch('megatron.core.optimizer.optimizer.Float16OptimizerWithFloat16Params.__init__',
+                                     reuse_fp32_param_init_wrapper)
+        patches_manager.register_patch('megatron.core.optimizer.optimizer_config.OptimizerConfig.__init__',
+                                     optimizer_config_init_wrapper)
+
+        patches_manager.register_patch('megatron.core.optimizer.distrib_optimizer.DistributedOptimizer.__init__',
+                                     reuse_fp32_param_distrib_optimizer_init_wrapper)
+        patches_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer.__init__',
+                                     reuse_fp32_param_param_and_grad_buffer_init_wrapper)
 
     patches_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
                                    MLASelfAttention.backward_dw,
