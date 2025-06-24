@@ -127,12 +127,12 @@ class CoreAdaptation(MegatronAdaptationABC):
         # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
         #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
         #                             apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
-                                    torch.compile(mode='max-autotune-no-cudagraphs'),
-                                    apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.unpermute',
-                                    torch.compile(mode='max-autotune-no-cudagraphs'),
-                                    apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
+        #                             torch.compile(mode='max-autotune-no-cudagraphs'),
+        #                             apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.unpermute',
+        #                             torch.compile(mode='max-autotune-no-cudagraphs'),
+        #                             apply_wrapper=True)
 
     def patch_core_extentions(self):
         import transformer_engine as te
