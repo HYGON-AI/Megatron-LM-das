@@ -92,6 +92,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_tensor_parallel()
         self.patch_training()
         self.patch_miscellaneous()
+        self.path_core_parallel_state()
 
     def patch_core_distributed(self):
         pass
@@ -222,6 +223,14 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         MegatronAdaptation.register('megatron.training.arguments.parse_args', parse_args)
 
+    def path_core_parallel_state(self):
+        from ..core.parallel_state import initialize_model_parallel_wrapper, create_group
+
+        MegatronAdaptation.register('megatron.core.parallel_state.create_group', 
+                                    create_group)
+        MegatronAdaptation.register('megatron.core.parallel_state.initialize_model_parallel',
+                                    initialize_model_parallel_wrapper,
+                                    apply_wrapper=True)
 
 class LegacyAdaptation(MegatronAdaptationABC):
     """
