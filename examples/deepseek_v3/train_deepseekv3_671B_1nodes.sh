@@ -103,6 +103,7 @@ if [ $MODEL_SIZE = A37B ]; then
     RMS_NORM_EPS=1e-6
 
 moe_options=" \
+    --moe-permute-fusion \
     --moe-grouped-gemm \
     --moe-expert-capacity-factor 1 \
     --moe-pad-expert-input-to-capacity \

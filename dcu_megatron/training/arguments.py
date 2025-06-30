@@ -4,6 +4,8 @@ import argparse
 from typing import Union
 from megatron.training.arguments import add_megatron_arguments
 
+from dcu_megatron.adaptor.features_manager import ADAPTOR_FEATURES
+
 
 def remove_original_params(parser, param_names: Union[list, str]):
     if isinstance(param_names, str):
@@ -17,17 +19,17 @@ def remove_original_params(parser, param_names: Union[list, str]):
                     del parser._option_string_actions[option_string]
 
 
-def add_megatron_arguments_patch(parser: argparse.ArgumentParser):
-    parser = add_megatron_arguments(parser)
-
+def process_adaptor_args(parser):
     # add extra arguments
     parser = _add_extra_network_size_args(parser)
     parser = _add_extra_training_args(parser)
     parser = _add_extra_initialization_args(parser)
     parser = _add_extra_distributed_args(parser)
     parser = _add_extra_tokenizer_args(parser)
-    parser = _add_extra_moe_args(parser)
     parser = _add_flux_args(parser)
+
+    for feature in ADAPTOR_FEATURES:
+        feature.register_args(parser)
 
     return parser
 
@@ -37,11 +39,14 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = argparse.ArgumentParser(description='Megatron-LM Arguments',
                                      allow_abbrev=False)
 
-    parser = add_megatron_arguments_patch(parser)
+    parser = add_megatron_arguments(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
         parser = extra_args_provider(parser)
+
+    # add adaptor args
+    parser = process_adaptor_args(parser)
 
     # Parse.
     if ignore_unknown_args:
@@ -133,20 +138,6 @@ def _add_extra_tokenizer_args(parser):
                        default=False,
                        action="store_true",
                        help='use quantized communication')
-    return parser
-
-
-def _add_extra_moe_args(parser):
-    group = parser.add_argument_group(title="extra moe args")
-
-    group.add_argument('--combined-1f1b', action='store_true',
-                       help='Batch-level overlapping in 1f1b stage.')
-    group.add_argument('--combined-1f1b-recipe', type=str,
-                       choices=['ep_a2a', 'golden'],
-                       default='golden',
-                       help='Options are "ep_a2a" and "golden".')
-    group.add_argument('--split-bw', action='store_true',
-                       help='Split dgrad and wgrad for batch-level overlapping')
     return parser
 
 

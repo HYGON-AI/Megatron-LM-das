@@ -67,7 +67,10 @@ def unpermute(
 ```
 
 ### 项目支持使用[flux kernel](http://10.6.10.68/dcutoolkit/deeplearing/flux)
-在tp场景下，用户可以选择使用flux通算融合算子，获得更好的训练和推理性能。项目通过替换transformer engine方法集成flux，使用时需要设置环境变量USE_FLUX_OVERLAP=1，并设置transformer-impl为transformer_engine。
+在tp场景下，用户可以选择使用flux通算融合算子，获得更好的训练和推理性能。项目通过替换transformer engine方法集成flux，使用该特性，需要启动脚本中加入如下参数:
+```
+--parallel-linear-impl flux
+```
 
 ### 项目支持[moe a2a通信计算overlap](https://mp.weixin.qq.com/s?__biz=MzU2NzkyMzUxMw==&mid=2247550702&idx=2&sn=9f6bb8ea72475aa833bfd73718f03530&chksm=fdb928e884341e81762eeaffbc3d00a3023e4543001b5448f259977b8bf0e4603448db75360e&mpshare=1&scene=1&srcid=0306blxvLHplbcAOqnznmXiQ&sharer_shareinfo=962faa39bc50b5544c96cf846186f076&sharer_shareinfo_first=962faa39bc50b5544c96cf846186f076&version=4.1.20.70286&platform=mac#rd)
 + 项目支持moe a2a 通算overlap。如果需要使用该特性，需要启动脚本中加入如下两个参数:
@@ -81,6 +84,13 @@ def unpermute(
 + 项目支持量化通信，对all-to-all通信数据进行低精度表示，减少通信量。如果需要使用该特性，需要启动脚本中加入如下参数：
 ```
 --use-quantize-comm
+```
+
+### 项目支持参数副本复用
++ 项目支持参数副本复用，主要在BF16的训练场景使用，前向计算开始前，将FP32的参数保存转换为BF16并保存Residual，优化器更新前基于BF16和Residual恢复FP32参数并进行更新。如果需要使用该特性，需要启动脚本中加入如下参数:
+```
+--use-optimizer-feature
+--reuse-fp32-param
 ```
 
 ## 使用方式

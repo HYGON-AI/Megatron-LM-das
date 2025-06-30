@@ -7,6 +7,49 @@ import torch
 
 from megatron.core.utils import is_te_min_version
 
+from .features_manager import ADAPTOR_FEATURES
+from .patch_utils import MegatronPatchesManager
+from dcu_megatron.training.arguments import process_adaptor_args
+
+
+_ARGS = None
+
+
+def add_args(args, key, value):
+    if key is not None:
+        key = key[2:].replace('-', '_')
+        if value is None:
+            value = True
+        elif len(value) == 1:
+            value = value[0]
+        setattr(args, key, value)
+
+
+def parser_unknown_args(args, unknown):
+    i = 0
+    key = value = None
+    while i < len(unknown):
+        if unknown[i].startswith("--"):
+            add_args(args, key, value)
+            key = unknown[i]
+            value = None
+        else:
+            if value is None:
+                value = [unknown[i]]
+            else:
+                value.append(unknown[i])
+        i += 1
+    add_args(args, key, value)
+
+
+def get_adaptor_args():
+    global _ARGS
+    if _ARGS is None:
+        parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
+        _ARGS, unknown = process_adaptor_args(parser).parse_known_args()
+        parser_unknown_args(_ARGS, unknown)
+    return _ARGS
+
 
 class MegatronAdaptation:
     """
@@ -25,11 +68,7 @@ class MegatronAdaptation:
         MegatronAdaptation.apply()
 
         # apply features
-        from .patch_utils import MegatronPatchesManager
-        from .features_manager import a2a_overlap_adaptation
-
-        a2a_overlap_adaptation(MegatronPatchesManager)
-        MegatronPatchesManager.apply_patches()
+        feature_adaptation()
 
     @classmethod
     def register(cls, orig_func_name, new_func=None, force_patch=False, create_dummy=False, apply_wrapper=False, remove_origin_wrappers=False):
@@ -69,6 +108,24 @@ class MegatronAdaptation:
         pass
 
 
+def feature_adaptation():
+    adaptor_args = get_adaptor_args()
+
+    # Advanced acceleration algorithm
+    adaptation_l2(MegatronPatchesManager, adaptor_args)
+
+    MegatronPatchesManager.apply_patches()
+
+
+def adaptation_l2(patches_manager, adaptor_args):
+    """
+    Advanced acceleration algorithm
+    """
+    for feature in ADAPTOR_FEATURES:
+        if getattr(adaptor_args, feature.feature_name, None) and feature.optimization_level == 2:
+            feature.register_patches(patches_manager, adaptor_args)
+
+
 class MegatronAdaptationABC:
     """
     Abstract class for adaptation.
@@ -92,6 +149,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_tensor_parallel()
         self.patch_training()
         self.patch_miscellaneous()
+        self.path_core_parallel_state()
 
     def patch_core_distributed(self):
         pass
@@ -127,12 +185,12 @@ class CoreAdaptation(MegatronAdaptationABC):
         # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
         #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
         #                             apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
-                                    torch.compile(mode='max-autotune-no-cudagraphs'),
-                                    apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.unpermute',
-                                    torch.compile(mode='max-autotune-no-cudagraphs'),
-                                    apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
+        #                             torch.compile(mode='max-autotune-no-cudagraphs'),
+        #                             apply_wrapper=True)
+        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.unpermute',
+        #                             torch.compile(mode='max-autotune-no-cudagraphs'),
+        #                             apply_wrapper=True)
 
     def patch_core_extentions(self):
         import transformer_engine as te
@@ -178,21 +236,6 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     torch._dynamo.disable,
                                     apply_wrapper=True)
 
-        # flux
-        if int(os.getenv("USE_FLUX_OVERLAP", "0")):
-            from ..core.tensor_parallel.layers import (
-                FluxColumnParallelLinear,
-                FluxRowParallelLinear
-            )
-            from ..core.models.gpt.gpt_layer_specs import get_gpt_layer_with_flux_spec
-
-            MegatronAdaptation.register("megatron.core.extensions.transformer_engine.TEColumnParallelLinear",
-                                        FluxColumnParallelLinear)
-            MegatronAdaptation.register("megatron.core.extensions.transformer_engine.TERowParallelLinear",
-                                        FluxRowParallelLinear)
-            MegatronAdaptation.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
-                                        get_gpt_layer_with_flux_spec)
-
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
         from ..training.initialize import _initialize_distributed
@@ -222,6 +265,14 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         MegatronAdaptation.register('megatron.training.arguments.parse_args', parse_args)
 
+    def path_core_parallel_state(self):
+        from ..core.parallel_state import initialize_model_parallel_wrapper, create_group
+
+        MegatronAdaptation.register('megatron.core.parallel_state.create_group', 
+                                    create_group)
+        MegatronAdaptation.register('megatron.core.parallel_state.initialize_model_parallel',
+                                    initialize_model_parallel_wrapper,
+                                    apply_wrapper=True)
 
 class LegacyAdaptation(MegatronAdaptationABC):
     """

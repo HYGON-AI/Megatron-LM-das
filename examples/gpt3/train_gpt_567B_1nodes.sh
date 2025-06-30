@@ -72,6 +72,7 @@ MOE_ARGS=(
     --moe-token-dispatcher-type alltoall
     --moe-expert-capacity-factor 1
     --moe-pad-expert-input-to-capacity
+    --moe-permute-fusion
     --moe-grouped-gemm
 )
 
