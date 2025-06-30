@@ -60,6 +60,6 @@ def initialize_model_parallel_wrapper(fn):
 
         global PARALLEL_GROUP_RANKS_MAP
         for group_key, group_value in group_dict.items():
-            print_rank_0(f"{group_key}: {dict(PARALLEL_GROUP_RANKS_MAP)[group_value]}")
+            print_rank_0(f"{group_key}: {PARALLEL_GROUP_RANKS_MAP[group_value]}")
 
     return wrapper

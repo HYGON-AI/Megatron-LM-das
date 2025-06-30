@@ -75,7 +75,11 @@ class ScheduleNode:
 
         if not isinstance(inputs, tuple):
             inputs = (inputs,)
-        return self._forward(*inputs, stream_wait_event=stream_wait_event, stream_record_event=stream_record_event)
+        return self._forward(
+                *inputs,
+                stream_wait_event=stream_wait_event,
+                stream_record_event=stream_record_event,
+            )
 
     def _forward(self, *inputs, stream_wait_event=None, stream_record_event=None):
         with stream_acquire_context(self.stream, self.event):
@@ -120,7 +124,11 @@ class ScheduleNode:
         """schedule node backward"""
         if not isinstance(output_grad, tuple):
             output_grad = (output_grad,)
-        return self._backward(*output_grad, stream_wait_event=stream_wait_event, stream_record_event=stream_record_event)
+        return self._backward(
+                *output_grad,
+                stream_wait_event=stream_wait_event,
+                stream_record_event=stream_record_event,
+            )
 
     def _backward(self, *output_grad, stream_wait_event=None, stream_record_event=None):
         with stream_acquire_context(self.stream, self.event):
