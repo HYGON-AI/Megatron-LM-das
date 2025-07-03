@@ -689,12 +689,15 @@ def schedule_layer_1f1b(
     if f_layer is not None:
         with f_context:
             f_input = f_layer.attn_pre.forward(f_input, stream_record_event=F_ATTN_PRE_B_COMBINE_SYNC_EVENT)
-            f_input = f_layer.core_attn.forward(f_input)
-            f_input = f_layer.attn_post.forward(f_input, stream_wait_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
 
     if b_layer is not None:
         with b_context:
             b_grad = b_layer.combine.backward(b_grad, stream_wait_event=F_ATTN_PRE_B_COMBINE_SYNC_EVENT, stream_record_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
+
+    if f_layer is not None:
+        with f_context:
+            f_input = f_layer.core_attn.forward(f_input)
+            f_input = f_layer.attn_post.forward(f_input, stream_wait_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
 
     f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT if is_overlap_step else None
     if f_layer is not None:

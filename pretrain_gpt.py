@@ -131,6 +131,9 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         )
         print_rank_0(model)
 
+    torch_comm_cu_nums = int(os.environ.get("TORCH_COMM_CU_NUMS", "0"))
+    print_rank_0(f"torch_comm_cu_nums: {torch_comm_cu_nums}")
+
     return model
 
 
@@ -317,10 +320,12 @@ if __name__ == "__main__":
     # Temporary for transition to core datasets
     train_valid_test_datasets_provider.is_distributed = True
 
-    pretrain(
-        train_valid_test_datasets_provider,
-        model_provider,
-        ModelType.encoder_or_decoder,
-        forward_step,
-        args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
-    )
+    default_stream = torch.cuda.Stream(priority=0)
+    with torch.cuda.stream(default_stream):
+        pretrain(
+            train_valid_test_datasets_provider,
+            model_provider,
+            ModelType.encoder_or_decoder,
+            forward_step,
+            args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
+        )
