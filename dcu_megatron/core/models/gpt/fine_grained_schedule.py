@@ -650,7 +650,8 @@ F_DISPATCH_B_MLP_SYNC_EVENT = None
 B_MLP_B_DISPATCH_SYNC_EVENT = torch.cuda.Event()
 
 F_ATTN_PRE_B_COMBINE_SYNC_EVENT = torch.cuda.Event()
-B_COMBINE_F_ATTN_POST_SYNC_EVENT = torch.cuda.Event()
+B_COMBINE_F_ATTN_POST_SYNC_EVENT = None
+# B_COMBINE_F_ATTN_POST_SYNC_EVENT = torch.cuda.Event()
 B_ATTN_POST_F_COMBINE_SYNC_EVENT = torch.cuda.Event()
 
 
@@ -694,19 +695,19 @@ def schedule_layer_1f1b(
         with b_context:
             b_grad = b_layer.combine.backward(b_grad, stream_wait_event=F_ATTN_PRE_B_COMBINE_SYNC_EVENT, stream_record_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
 
+    f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT if is_overlap_step else None
     if f_layer is not None:
         with f_context:
             f_input = f_layer.core_attn.forward(f_input)
             f_input = f_layer.attn_post.forward(f_input, stream_wait_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
-
-    f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT if is_overlap_step else None
-    if f_layer is not None:
-        with f_context:
             f_input = f_layer.dispatch.forward(f_input, stream_record_event=f_dispatch_b_mlp_sync_event)
 
     if b_layer is not None:
         with b_context:
             b_grad = b_layer.mlp.backward(b_grad, stream_wait_event=f_dispatch_b_mlp_sync_event)
+
+    if b_layer is not None:
+        with b_context:
             b_grad = b_layer.dispatch.backward(b_grad)
 
     if f_layer is not None:
@@ -715,6 +716,7 @@ def schedule_layer_1f1b(
 
     if b_layer is not None:
         with b_context:
+            b_layer.mlp.dw()
             b_grad = b_layer.attn_post.backward(b_grad, stream_record_event=B_ATTN_POST_F_COMBINE_SYNC_EVENT)
 
     def next_iter_pre_forward():
@@ -733,7 +735,6 @@ def schedule_layer_1f1b(
     def next_iter_pre_backward_dw():
         if b_layer is not None:
             with b_context:
-                b_layer.mlp.dw()
                 b_layer.attn_pre.dw()
                 b_layer.attn_post.dw()
 
