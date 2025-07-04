@@ -166,17 +166,15 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
-        from ..core.transformer.transformer_config import TransformerConfigPatch, MLATransformerConfigPatch
+        from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
                                     transformer_block_init_wrapper)
 
-        # Transformer config
-        MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
-                                    TransformerConfigPatch)
-        MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
-                                    MLATransformerConfigPatch)
+        # Transformer config, add new params
+        MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
+                                    transformer_config_post_init_wrapper)
 
         # Moe
         # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
