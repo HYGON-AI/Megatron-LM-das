@@ -31,7 +31,7 @@ class MoEAlltoAllPerBatchState:
         self.probs = None
         self.routing_map = None
         self.reversed_local_input_permutation_mapping = None
-        self.cuda_sync_point = None
+        self.cuda_sync_point = "no_sync"
         self.hidden_shape_before_permute = None
         self.tokens_per_expert = None
 
