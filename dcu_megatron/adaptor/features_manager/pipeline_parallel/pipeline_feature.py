@@ -153,6 +153,15 @@ class PipelineFeature(AbstractFeature):
                                         MLASelfAttention.backward_dw,
                                         create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_dw',
+                                        SelfAttention.compute_qkv,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_qkv_dw',
+                                        SelfAttention.compute_attn,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_proj_dw',
+                                        SelfAttention.compute_proj,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_dw',
                                         SelfAttention.backward_dw,
                                         create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_qkv_dw',
