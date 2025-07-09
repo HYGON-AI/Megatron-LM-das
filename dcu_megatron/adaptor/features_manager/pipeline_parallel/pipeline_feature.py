@@ -37,8 +37,11 @@ class PipelineFeature(AbstractFeature):
                 raise AssertionError(
                     "num_micro_batch should be greater than pipeline_model_parallel_size * 2 - 1")
 
-        if args.combined_1f1b and args.transformer_impl != "transformer_engine":
-            raise AssertionError("moe a2a overlap is only supported with transformer_engine implementation")
+        if args.combined_1f1b:
+            assert args.transformer_impl == "transformer_engine", \
+                "moe a2a overlap is only supported with transformer_engine implementation"
+            assert args.schedule_method == "dualpipev" or args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
+                'moe a2a overlap is only supported with vpp or dualpipev'
 
     def register_patches(self, patch_manager, args):
         if args.schedule_method == "interleaved_1f1b" and not args.combined_1f1b:

@@ -2,6 +2,7 @@ import os
 import argparse
 
 from typing import Union
+from functools import wraps
 from megatron.training.arguments import add_megatron_arguments
 
 from dcu_megatron.adaptor.features_manager import ADAPTOR_FEATURES
@@ -146,3 +147,19 @@ def _add_flux_args(parser):
     group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                        help='Whether to transpose weight when using flux kernel')
     return parser
+
+
+def validate_args_func_decorator(validate_args_func):
+    @wraps(validate_args_func)
+    def wrapper(args, defaults=None):
+        if defaults is None:
+            defaults = {}
+
+        args = validate_args_func(args, defaults)
+
+        for feature in ADAPTOR_FEATURES:
+            feature.validate_args(args)
+
+        return args
+
+    return wrapper

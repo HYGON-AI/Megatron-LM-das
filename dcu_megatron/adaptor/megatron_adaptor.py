@@ -264,9 +264,15 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     train)
 
     def patch_miscellaneous(self):
-        from ..training.arguments import parse_args
+        from ..training.arguments import parse_args, validate_args_func_decorator
 
         MegatronAdaptation.register('megatron.training.arguments.parse_args', parse_args)
+        MegatronAdaptation.register('megatron.training.arguments.validate_args',
+                                    validate_args_func_decorator,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.training.yaml_arguments.validate_yaml',
+                                    validate_args_func_decorator,
+                                    apply_wrapper=True)
 
     def path_core_parallel_state(self):
         from ..core.parallel_state import initialize_model_parallel_wrapper, create_group
