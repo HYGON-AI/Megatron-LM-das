@@ -233,7 +233,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
                     .flatten(start_dim=0, end_dim=2)
                 )
             else:
-                hidden_states, _ = sort_chunks_by_idxs(
+                hidden_states = sort_chunks_by_idxs(
                     hidden_states,
                     self.num_global_tokens_per_local_expert.T.ravel(),
                     self.restore_output_by_local_experts,
