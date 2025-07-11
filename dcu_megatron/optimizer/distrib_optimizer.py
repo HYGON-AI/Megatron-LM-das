@@ -22,7 +22,7 @@ def reuse_fp32_param_distrib_optimizer_init_wrapper(init_func):
         self.first_sub_flag = True
         if self.reuse_fp32_param:
             from dcu_megatron.op_builder import AlgorithmOpBuilder
-            reuse_data_ptr = AlgorithmOpBuilder().load().reuse_data_ptr
+            reuse_data_ptr = AlgorithmOpBuilder().get_module().reuse_data_ptr
             data_parallel_world_size = torch.distributed.get_world_size(self.data_parallel_group)
             data_parallel_rank = torch.distributed.get_rank(self.data_parallel_group_gloo)
             self.model_param_bucket_and_res_map = {}

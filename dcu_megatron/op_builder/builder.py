@@ -2,8 +2,10 @@ import re
 import os
 from abc import ABC, abstractmethod
 from typing import List, Union
-from torch.utils.cpp_extension import load
+from torch.utils.cpp_extension import load, _import_module_from_library
 from torch.library import Library
+from megatron.training.utils import print_rank_0
+
 import dcu_megatron
 
 AS_LIBRARY = Library("dcu_megatron", "DEF")
@@ -29,6 +31,10 @@ class DCUMegatronOpBuilder(ABC):
     def sources(self):
         ...
 
+    @abstractmethod
+    def compiled_files(self):
+        ...
+
     def include_paths(self):
         return None
 
@@ -49,7 +55,31 @@ class DCUMegatronOpBuilder(ABC):
                          extra_include_paths=None,
                          extra_cflags=self.cxx_args(),
                          extra_ldflags=None,
+                         build_directory=os.path.dirname(self.get_absolute_paths(self.sources())[0]),
                          verbose=verbose)
         __class__._loaded_ops[self.name] = op_module
+
+        return op_module
+
+    def import_module_from_library(self):
+        if self.name in __class__._loaded_ops:
+            return __class__._loaded_ops[self.name]
+
+        op_module = _import_module_from_library(
+            module_name=self.name,
+            path=os.path.dirname(self.get_absolute_paths(self.compiled_files())[0]),
+            is_python_module=True
+        )
+
+        __class__._loaded_ops[self.name] = op_module
+        return op_module
+
+    def get_module(self):
+        try:
+            print_rank_0("Start reading the compiled so.")
+            op_module = self.import_module_from_library()
+        except Exception as e:
+            print_rank_0("Failed to read the compiled so, recompile.")
+            op_module = self.load()
 
         return op_module
