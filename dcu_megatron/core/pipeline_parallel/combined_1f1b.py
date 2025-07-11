@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 from torch.autograd.variable import Variable
 
+from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel
 
@@ -14,6 +15,8 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
+
+from dcu_megatron.core.parallel_state import get_dualpipe_chunk
 
 
 def make_viewless(e):
@@ -434,7 +437,13 @@ def forward_backward_step(
     if f_model:
         with f_context:
             num_tokens = torch.tensor(0, dtype=torch.int)
-            if parallel_state.is_pipeline_last_stage(ignore_virtual=False):
+            args = get_args()
+            is_last_stage = False
+            if args.schedule_method == "dualpipev":
+                is_last_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
+            else:
+                is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False)
+            if is_last_stage:
                 if not collect_non_loss_data:
                     loss_node = ScheduleNode(
                         loss_func,
