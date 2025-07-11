@@ -80,6 +80,18 @@ def unpermute(
 ```
 + 项目支持通过split-bw进行dw拆分，用于实现更好的overlap。当前从测试结果看，开启split-bw，效果欠佳，待进一步优化。
 
+### 项目支持dualpipev
++ 项目支持dualpipev。如果需要使用该特性，需要启动脚本中加入如下参数:
+```
+--schedule-method dualpipev
+```
++ dualpipev支持moe a2a overlap，如果需要overlap，额外增加两个参数
+```
+--combined-1f1b
+--combined-1f1b-recipe ep_a2a
+```
+
+
 ### 项目支持量化通信
 + 项目支持量化通信，对all-to-all通信数据进行低精度表示，减少通信量。如果需要使用该特性，需要启动脚本中加入如下参数：
 ```
