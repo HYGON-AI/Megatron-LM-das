@@ -169,7 +169,7 @@ def reuse_fp32_param_distrib_optimizer_init_wrapper(init_func):
 
 def reuse_buffer_single(self):
     from dcu_megatron.op_builder import AlgorithmOpBuilder
-    reuse_data_ptr = AlgorithmOpBuilder().load().reuse_data_ptr
+    reuse_data_ptr = AlgorithmOpBuilder().get_module().reuse_data_ptr
     self.shard_fp32_param_fp16_view_group = []
     for buffer in self.buffers:
         buffer_numel = buffer.param_data.numel()
@@ -196,7 +196,7 @@ def reuse_buffer_single(self):
 
 def reuse_buffer_dis(self, data_parallel_world_size):
     from dcu_megatron.op_builder import AlgorithmOpBuilder
-    reuse_data_ptr = AlgorithmOpBuilder().load().reuse_data_ptr
+    reuse_data_ptr = AlgorithmOpBuilder().get_module().reuse_data_ptr
     data_parallel_rank = torch.distributed.get_rank(self.data_parallel_group)
     for buffer in self.buffers:
         self.bucket_num_group = []

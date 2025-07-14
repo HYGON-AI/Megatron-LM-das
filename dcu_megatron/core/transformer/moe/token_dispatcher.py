@@ -31,7 +31,7 @@ class MoEAlltoAllPerBatchState:
         self.probs = None
         self.routing_map = None
         self.reversed_local_input_permutation_mapping = None
-        self.cuda_sync_point = None
+        self.cuda_sync_point = "no_sync"
         self.hidden_shape_before_permute = None
         self.tokens_per_expert = None
 
@@ -229,7 +229,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
                     .flatten(start_dim=0, end_dim=2)
                 )
             else:
-                hidden_states, _ = sort_chunks_by_idxs(
+                hidden_states = sort_chunks_by_idxs(
                     hidden_states,
                     self.num_global_tokens_per_local_expert.T.ravel(),
                     self.restore_output_by_local_experts,

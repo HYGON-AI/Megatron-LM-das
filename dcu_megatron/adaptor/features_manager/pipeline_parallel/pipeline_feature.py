@@ -37,8 +37,11 @@ class PipelineFeature(AbstractFeature):
                 raise AssertionError(
                     "num_micro_batch should be greater than pipeline_model_parallel_size * 2 - 1")
 
-        if args.combined_1f1b and args.transformer_impl != "transformer_engine":
-            raise AssertionError("moe a2a overlap is only supported with transformer_engine implementation")
+        if args.combined_1f1b:
+            assert args.transformer_impl == "transformer_engine", \
+                "moe a2a overlap is only supported with transformer_engine implementation"
+            assert args.schedule_method == "dualpipev" or args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
+                'moe a2a overlap is only supported with vpp or dualpipev'
 
     def register_patches(self, patch_manager, args):
         if args.schedule_method == "interleaved_1f1b" and not args.combined_1f1b:
@@ -116,7 +119,7 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.core.transformer.multi_latent_attention import MLASelfAttention
             from dcu_megatron.core.transformer.attention import SelfAttention
             from dcu_megatron.core.transformer.mlp import MLP
-            from dcu_megatron.core.transformer.moe.experts import TEGroupedMLP
+            from dcu_megatron.core.transformer.moe.experts import GroupedMLP, TEGroupedMLP, SequentialMLP
             from dcu_megatron.core.transformer.moe.moe_layer import MoELayer
 
             patch_manager.register_patch('megatron.core.transformer.moe.token_dispatcher.MoEAlltoAllTokenDispatcher',
@@ -173,8 +176,14 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
                                         MLP.backward_dw,
                                         create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.backward_dw',
+                                        GroupedMLP.backward_dw,
+                                        create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.backward_dw',
                                         TEGroupedMLP.backward_dw,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.moe.experts.SequentialMLP.backward_dw',
+                                        SequentialMLP.backward_dw,
                                         create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_dw',
                                         MoELayer.backward_dw,

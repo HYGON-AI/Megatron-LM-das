@@ -306,7 +306,7 @@ class MoeAttnNode(TransformerLayerNode):
         # detached here
         self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
-        if self.layer.mlp.use_shared_expert:
+        if self.layer.mlp.use_shared_expert and not self.layer.mlp.shared_expert_overlap:
             self.common_state.shared_expert_output = self.detach(shared_expert_output)
 
         return permutated_local_input_tokens
@@ -439,7 +439,7 @@ class MoeCombineNode(TransformerLayerNode):
         token_dispatcher = self.layer.mlp.token_dispatcher
 
         shared_expert_output = None
-        if self.layer.mlp.use_shared_expert:
+        if self.layer.mlp.use_shared_expert and not self.layer.mlp.shared_expert_overlap:
             shared_expert_output = self.common_state.shared_expert_output
 
         with token_dispatcher.per_batch_state_context(self.common_state):
@@ -452,7 +452,7 @@ class MoeCombineNode(TransformerLayerNode):
         cur_stream = torch.cuda.current_stream()
         self.common_state.residual.record_stream(cur_stream)
         self.common_state.probs.record_stream(cur_stream)
-        if self.layer.mlp.use_shared_expert:
+        if self.layer.mlp.use_shared_expert and not self.layer.mlp.shared_expert_overlap:
             self.common_state.shared_expert_output.record_stream(cur_stream)
 
         self.common_state.residual = None

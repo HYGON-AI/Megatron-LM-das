@@ -1,7 +1,5 @@
 import os
 import abc
-import sys
-import types
 import argparse
 import torch
 
@@ -165,17 +163,15 @@ class CoreAdaptation(MegatronAdaptationABC):
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
-        from ..core.transformer.transformer_config import TransformerConfigPatch, MLATransformerConfigPatch
+        from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
                                     transformer_block_init_wrapper)
 
-        # Transformer config
-        MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
-                                    TransformerConfigPatch)
-        MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
-                                    MLATransformerConfigPatch)
+        # Transformer config, add new params
+        MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
+                                    transformer_config_post_init_wrapper)
 
         # Moe
         # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
@@ -206,6 +202,8 @@ class CoreAdaptation(MegatronAdaptationABC):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear if is_te_min_version("2.3.0.dev0") else te.pytorch.BatchLinear,)
 
     def patch_tensor_parallel(self):
+        from functools import partial
+        from dcu_megatron.core.tensor_parallel.mappings import all_to_all
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
 
         # VocabParallelEmbedding
@@ -235,6 +233,11 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     torch._dynamo.disable,
                                     apply_wrapper=True)
 
+        adaptor_args = get_adaptor_args()
+        if adaptor_args.use_quantize_comm:
+            MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.all_to_all',
+                                        partial(all_to_all, use_quantize_comm=True))
+
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer
         from ..training.initialize import _initialize_distributed
@@ -260,10 +263,16 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     train)
 
     def patch_miscellaneous(self):
-        from ..training.arguments import parse_args
+        from ..training.arguments import parse_args, validate_args_func_decorator
         from ..core.parallel_state import create_group, initialize_model_parallel_wrapper
 
         MegatronAdaptation.register('megatron.training.arguments.parse_args', parse_args)
+        MegatronAdaptation.register('megatron.training.arguments.validate_args',
+                                    validate_args_func_decorator,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.training.yaml_arguments.validate_yaml',
+                                    validate_args_func_decorator,
+                                    apply_wrapper=True)
 
         # output parallel groups
         MegatronAdaptation.register('megatron.core.parallel_state.create_group', 

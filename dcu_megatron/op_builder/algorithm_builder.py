@@ -9,3 +9,6 @@ class AlgorithmOpBuilder(DCUMegatronOpBuilder):
 
     def sources(self):
         return ['ops/csrc/algorithm/algorithm.cpp']
+
+    def compiled_files(self):
+        return ['ops/csrc/algorithm/compiled/algorithm.so']

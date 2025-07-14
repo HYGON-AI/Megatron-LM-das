@@ -63,3 +63,19 @@ def initialize_model_parallel_wrapper(fn):
             print_rank_0(f"{group_key}: {PARALLEL_GROUP_RANKS_MAP[group_value]}")
 
     return wrapper
+
+
+_DUALPIPE_CHUNK = None
+
+def set_dualpipe_chunk(chunk_id):
+    """set_dualpipe_chunk for fp16forward patch"""
+    global _DUALPIPE_CHUNK
+    _DUALPIPE_CHUNK = chunk_id
+
+
+def get_dualpipe_chunk():
+    global _DUALPIPE_CHUNK
+    if _DUALPIPE_CHUNK is not None:
+        return _DUALPIPE_CHUNK
+    else:
+        raise AssertionError("_DUALPIPE_CHUNK is None")

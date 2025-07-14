@@ -1,9 +1,7 @@
-from typing import Optional
 from functools import wraps
-from dataclasses import dataclass
+from dataclasses import make_dataclass, field
 
 from megatron.training import get_args
-from megatron.core.transformer.transformer_config import TransformerConfig, MLATransformerConfig
 
 
 def transformer_config_post_init_wrapper(fn):
@@ -11,43 +9,32 @@ def transformer_config_post_init_wrapper(fn):
     def wrapper(self):
         fn(self)
         args = get_args()
+        fields = []
+        # TE will get an unexpected keyword argument 'delay_wgrad_compute' if split_bw = True
+        exclude_keys = {
+            "split_bw"
+        }
+        for key, value in vars(args).items():
+            if key in exclude_keys:
+                continue
 
-        """Number of Multi-Token Prediction (MTP) Layers."""
-        self.mtp_num_layers = args.mtp_num_layers
+            field_name = str(key)
+            field_type = type(value)
+            if not hasattr(self, key):
+                field_def = (field_name, field_type, field(init=False))
+                fields.append(field_def)
+        self.__class__ = make_dataclass(self.__class__.__name__, fields=fields, bases=(self.__class__,))
 
-        """Weighting factor of Multi-Token Prediction (MTP) loss."""
-        self.mtp_loss_scaling_factor = args.mtp_loss_scaling_factor
+        for key, value in vars(args).items():
+            if key in exclude_keys:
+                continue
 
-        ##################
-        # flux
-        ##################
-        self.flux_transpose_weight = args.flux_transpose_weight
+            if not hasattr(self, key):
+                setattr(self, key, value)
 
+        if hasattr(self, "moe_pad_expert_input_to_capacity"):
+            self.moe_pad_expert_input_to_capacity = True
+        if hasattr(self, "moe_expert_capacity_factor"):
+            self.moe_expert_capacity_factor = 1.0
 
     return wrapper
-
-
-@dataclass
-class ExtraTransformerConfig:
-    ##################
-    # flux
-    ##################
-    flux_transpose_weight: bool = False
-
-    combined_1f1b: bool = False
-    """If true, use combined 1F1B for communication hiding."""
-
-    combined_1f1b_recipe: str = 'ep_a2a'
-    """Recipe to use for combined 1F1B. Currently only 'ep_a2a' and 'golden' are supported."""
-
-    # split_bw: bool = False
-
-
-@dataclass
-class TransformerConfigPatch(TransformerConfig, ExtraTransformerConfig):
-    pass
-
-
-@dataclass
-class MLATransformerConfigPatch(MLATransformerConfig, ExtraTransformerConfig):
-    pass
