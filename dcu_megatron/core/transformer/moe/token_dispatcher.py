@@ -91,7 +91,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
             self.collect_per_batch_state(state)
             self.apply_per_batch_state(origin_state)
 
-    def meta_prepare(
+    def dispatch_preprocess(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
     ):
         self.hidden_shape = hidden_states.shape
@@ -103,9 +103,6 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
 
         tokens_per_expert = self.preprocess(self.routing_map)
 
-        return tokens_per_expert
-
-    def dispatch_preprocess(self, hidden_states: torch.Tensor, routing_map: torch.Tensor, tokens_per_expert: torch.Tensor):
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
         if self.shared_experts is not None:
             self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
@@ -206,8 +203,7 @@ class MoEAlltoAllTokenDispatcher(MegatronCoreMoEAlltoAllTokenDispatcher):
         """
         # Preprocess: Get the metadata for communication, permutation and computation operations.
         # Permutation 1: input to AlltoAll input
-        tokens_per_expert = self.meta_prepare(hidden_states, probs, routing_map)
-        tokens_per_expert, permutated_local_input_tokens = self.dispatch_preprocess(hidden_states, routing_map, tokens_per_expert)
+        tokens_per_expert, permutated_local_input_tokens = self.dispatch_preprocess(hidden_states, probs, routing_map)
 
         # Perform expert parallel AlltoAll communication
         tokens_per_expert, global_input_tokens = self.dispatch_all_to_all(tokens_per_expert, permutated_local_input_tokens)

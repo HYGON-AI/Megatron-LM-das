@@ -155,8 +155,23 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
                                         MLASelfAttention.backward_dw,
                                         create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_qkv',
+                                        SelfAttention.compute_qkv,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_attn',
+                                        SelfAttention.compute_attn,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_proj',
+                                        SelfAttention.compute_proj,
+                                        create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_dw',
                                         SelfAttention.backward_dw,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_qkv_dw',
+                                        SelfAttention.backward_qkv_dw,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_proj_dw',
+                                        SelfAttention.backward_proj_dw,
                                         create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
                                         MLP.backward_dw,
@@ -172,4 +187,10 @@ class PipelineFeature(AbstractFeature):
                                         create_dummy=True)
             patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_dw',
                                         MoELayer.backward_dw,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_shared_expert_dw',
+                                        MoELayer.backward_shared_expert_dw,
+                                        create_dummy=True)
+            patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_routed_expert_dw',
+                                        MoELayer.backward_routed_expert_dw,
                                         create_dummy=True)
