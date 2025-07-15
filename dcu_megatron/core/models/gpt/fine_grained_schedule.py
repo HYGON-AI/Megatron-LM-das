@@ -391,7 +391,7 @@ class MoeAttnPostNode(TransformerLayerNode):
         # detached here
         self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
-        if self.layer.mlp.use_shared_expert:
+        if self.layer.mlp.use_shared_expert and not self.layer.mlp.shared_expert_overlap:
             self.common_state.shared_expert_output = self.detach(shared_expert_output)
 
         return permutated_local_input_tokens
@@ -843,7 +843,7 @@ def schedule_chunk_1f1b(
     if f_schedule_plan is not None and post_forward is not None:
         with f_context:
             f_schedule_plan.wait_current_stream()
-            post_forward(None if parallel_state.is_pipeline_last_stage(ignore_virtual=False) else f_input)
+            post_forward(f_input)
 
     # pp grad send / receive, overlapped with attn dw of cur micro-batch and forward attn of next micro-batch
     if b_schedule_plan is not None and post_backward is not None:

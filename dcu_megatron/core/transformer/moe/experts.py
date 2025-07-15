@@ -21,4 +21,4 @@ class SequentialMLP():
         except Exception as e:
             raise Exception(
                 f"Unknown error occurred during SequentialMLP backward_dw() execution: {str(e)}"
-            )    
+            )
