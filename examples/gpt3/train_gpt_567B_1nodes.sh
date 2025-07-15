@@ -13,11 +13,6 @@ do
     fi
 done
 
-GLOBAL_BATCH_SIZE=512
-if [[ $profiling == torch ]]; then
-    GLOBAL_BATCH_SIZE=128
-fi
-
 # data path
 DATA_PATH=${data_path}
 TOKENIZER_MODEL_PATH=${tokenizer_path}
@@ -36,13 +31,10 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
-export PYTHONPATH=/public/home/dongcl/Megatrons/Megatron-LM-core-v0.12.0:$PYTHONPATH
-export NVTE_OVERLAP_GRAD_REDUCE=1
-
-# export TORCH_COMM_CU_NUMS=16
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
 # enable BatchLinear
-# export GROUPED_GEMM_BatchLinear=1
+export GROUPED_GEMM_BatchLinear=1
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -56,9 +48,9 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 8192
     --max-position-embeddings 32768
-    --num-layers 4
-    --hidden-size 4096 #8192
-    --ffn-hidden-size 16384 #32768
+    --num-layers 2
+    --hidden-size 8192
+    --ffn-hidden-size 32768
     --num-attention-heads 64
     --init-method-std 0.01
     --attention-dropout 0.0
@@ -70,7 +62,6 @@ MODEL_ARGS=(
     --no-position-embedding
     --rotary-base 1000000
     --ckpt-format torch
-    --num-layers-per-virtual-pipeline-stage 1
 )
 
 MOE_ARGS=(
@@ -79,12 +70,11 @@ MOE_ARGS=(
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-2
     --moe-token-dispatcher-type alltoall
+    --moe-expert-capacity-factor 1
+    --moe-pad-expert-input-to-capacity
     --moe-permute-fusion
     --moe-grouped-gemm
 )
-
-    # --moe-expert-capacity-factor 1
-    # --moe-pad-expert-input-to-capacity
 
 DATA_ARGS=(
     --tokenizer-type Llama2Tokenizer
@@ -95,9 +85,9 @@ DATA_ARGS=(
 
 TRAINING_ARGS=(
     --micro-batch-size 1
-    --global-batch-size ${GLOBAL_BATCH_SIZE} #256
+    --global-batch-size 256
     --lr 1e-4
-    --train-iters 5 #10
+    --train-iters 10
     --lr-decay-iters 10000
     --lr-decay-style cosine
     --min-lr 1.0e-6
@@ -107,24 +97,13 @@ TRAINING_ARGS=(
     --bf16
     --overlap-param-gather
     --overlap-grad-reduce
-    --distributed-timeout-minutes 2
-    --combined-1f1b
-    --combined-1f1b-recipe ep_a2a
 )
-    # --combined-1f1b
-    # --combined-1f1b-recipe ep_a2a
-    # --split-bw
-
-TP=2
-PP=2
-EP=4
-ETP=1
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size $TP
-    --pipeline-model-parallel-size $PP
-    --expert-model-parallel-size $EP
-    --expert-tensor-parallel-size $ETP
+    --tensor-model-parallel-size 2
+    --pipeline-model-parallel-size 1
+    --expert-model-parallel-size 4
+    --expert-tensor-parallel-size 2
     --context-parallel-size 1
     --use-distributed-optimizer
     --sequence-parallel
@@ -135,7 +114,7 @@ LOGGING_ARGS=(
     --log-interval 1 \
     --save-interval 100000 \
     --eval-interval 10000 \
-    --eval-iters 1 \
+    --eval-iters 5 \
     #--save $CHECKPOINT_PATH \
     #--load $CHECKPOINT_PATH \
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" \
@@ -149,7 +128,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_gpt_1nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp1
+    --profile-dir torch_prof_gpt_1nodes_tp2-pp1-ep4-etp2-cp1
     --use-pytorch-profiler
 )
 
