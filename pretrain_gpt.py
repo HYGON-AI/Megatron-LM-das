@@ -320,12 +320,12 @@ if __name__ == "__main__":
     # Temporary for transition to core datasets
     train_valid_test_datasets_provider.is_distributed = True
 
-    default_stream = torch.cuda.Stream(priority=0)
-    with torch.cuda.stream(default_stream):
-        pretrain(
-            train_valid_test_datasets_provider,
-            model_provider,
-            ModelType.encoder_or_decoder,
-            forward_step,
-            args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
-        )
+    # default_stream = torch.cuda.Stream(priority=-1)
+    # with torch.cuda.stream(default_stream):
+    pretrain(
+        train_valid_test_datasets_provider,
+        model_provider,
+        ModelType.encoder_or_decoder,
+        forward_step,
+        args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
+    )

@@ -6,14 +6,14 @@ do
 done
 
 # Those variables need to modify
-GPUS=""                 # how many gpus to use
-DTK_ENV=""              # where env.sh of dtk
-NCCL_ENV=""             # where env.sh of nccl (requirements/nccl_wz/env.sh or requirements/nccl_zz/env.sh)
-HOST=""                 # hostname
-PORT=""                 # port id
-DATA_PATH=""            # path to redpajama_text_document
-TOKENIZER_MODEL_PATH="" # path to tokenizer.model
-CHECKPOINT_PATH=""      # path to ckpt
+GPUS="8"                 # how many gpus to use
+DTK_ENV="/opt/dtk-25.04-rc4/env.sh"              # where env.sh of dtk
+NCCL_ENV="/public/home/dongcl/01_code/06_dcu_megatron_v0.11/dcu_megatron/requirements/nccl_wz/env.sh"             # where env.sh of nccl (requirements/nccl_wz/env.sh or requirements/nccl_zz/env.sh)
+HOST="node084"                 # hostname
+PORT="25900"                 # port id
+DATA_PATH="/public/home/dongcl/01_code/datasets/gpt_data/redpajama_text_document"            # path to redpajama_text_document
+TOKENIZER_MODEL_PATH="/public/home/dongcl/01_code/datasets/gpt_data/tokenizer.model" # path to tokenizer.model
+CHECKPOINT_PATH="./ckpt"      # path to ckpt
 
 # Runs GPT 567B model
 mpirun -np ${GPUS}  --hostfile hostfile_gpt_567B \
