@@ -32,10 +32,11 @@ class PipelineFeature(AbstractFeature):
             if args.num_layers < args.pipeline_model_parallel_size * 2:
                 raise AssertionError(
                     'number of layers must be at least 2*pipeline_model_parallel_size in dualpipe')
+
             num_micro_batch = args.global_batch_size // args.micro_batch_size // args.data_parallel_size
-            if num_micro_batch < args.pipeline_model_parallel_size * 2 - 1:
+            if num_micro_batch < args.pipeline_model_parallel_size:
                 raise AssertionError(
-                    "num_micro_batch should be greater than pipeline_model_parallel_size * 2 - 1")
+                    "num_micro_batch should NOT be smaller than pipeline_model_parallel_size")
 
         if args.combined_1f1b:
             assert args.transformer_impl == "transformer_engine", \

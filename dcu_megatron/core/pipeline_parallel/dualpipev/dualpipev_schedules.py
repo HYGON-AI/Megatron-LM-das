@@ -822,13 +822,14 @@ def forward_backward_pipelining_with_cutinhalf(
     # Run warmup forward passes
     input_tensor, _ = recv_forward(tensor_shape, config, master_chunk_id)
     input_tensors[master_chunk_id].append(input_tensor)
-    for i in range(schedule['warmup'][rank]):
+    for _ in range(schedule['warmup'][rank]):
         wait_comm_handle(fwd_wait_recv_handles[master_chunk_id])
 
         # recv for next iteration
-        input_tensor, fwd_wait_handles = recv_forward(tensor_shape, config, master_chunk_id, async_op=True)
-        fwd_wait_recv_handles[master_chunk_id] = get_recv_handle(fwd_wait_handles, master_chunk_id, forward=True)
-        input_tensors[master_chunk_id].append(input_tensor)
+        if cur_fwd_chunk_microbatch[master_chunk_id] + 1 < num_chunk_max_microbatch[master_chunk_id]:
+            input_tensor, fwd_wait_handles = recv_forward(tensor_shape, config, master_chunk_id, async_op=True)
+            fwd_wait_recv_handles[master_chunk_id] = get_recv_handle(fwd_wait_handles, master_chunk_id, forward=True)
+            input_tensors[master_chunk_id].append(input_tensor)
 
         output_tensor, _ = forward_backward_helper_wrapper(
             fwd_model_chunk_id=master_chunk_id,
@@ -843,29 +844,34 @@ def forward_backward_pipelining_with_cutinhalf(
         fwd_wait_handles = send_forward(output_tensor_master_send, tensor_shape, config, master_chunk_id, async_op=True)
         fwd_wait_send_handles[master_chunk_id] = get_send_handle(fwd_wait_handles, master_chunk_id, forward=True)
 
-    # Run interleaved forward passes for two model chunk
-    for i in range(schedule['interleaved_forward'][rank]):
-        wait_comm_handle(fwd_wait_recv_handles[master_chunk_id])
+        if cur_fwd_chunk_microbatch[master_chunk_id] == num_chunk_max_microbatch[master_chunk_id]:
+            break
 
+    # Run interleaved forward passes for two model chunk
+    is_slave_only = False
+    for _ in range(schedule['interleaved_forward'][rank]):
         if not parallel_state.is_pipeline_last_stage():
             input_tensor_slave, fwd_wait_handles = recv_forward(tensor_shape, config, slave_chunk_id, async_op=True)
             fwd_wait_recv_handles[slave_chunk_id] = get_recv_handle(fwd_wait_handles, slave_chunk_id, forward=True)
             input_tensors[slave_chunk_id].append(input_tensor_slave)
 
-        output_tensor, _ = forward_backward_helper_wrapper(
-            fwd_model_chunk_id=master_chunk_id,
-            checkpoint_activations_microbatch=checkpoint_activations_microbatch,
-        )
+        is_slave_only = (cur_fwd_chunk_microbatch[master_chunk_id] == num_chunk_max_microbatch[master_chunk_id])
+        if cur_fwd_chunk_microbatch[master_chunk_id] < num_chunk_max_microbatch[master_chunk_id]:
+            wait_comm_handle(fwd_wait_recv_handles[master_chunk_id])
+            output_tensor, _ = forward_backward_helper_wrapper(
+                fwd_model_chunk_id=master_chunk_id,
+                checkpoint_activations_microbatch=checkpoint_activations_microbatch,
+            )
 
-        if not parallel_state.is_pipeline_last_stage():
-            wait_comm_handle(fwd_wait_send_handles[master_chunk_id])
-            if not forward_only:
-                deallocate_output_tensor(output_tensor_master_send, config.deallocate_pipeline_outputs)
+            if not parallel_state.is_pipeline_last_stage():
+                wait_comm_handle(fwd_wait_send_handles[master_chunk_id])
+                if not forward_only:
+                    deallocate_output_tensor(output_tensor_master_send, config.deallocate_pipeline_outputs)
 
-            output_tensor_master_send = output_tensor
-            fwd_wait_handles = send_forward(
-                output_tensor_master_send, tensor_shape, config, master_chunk_id, async_op=True)
-            fwd_wait_send_handles[master_chunk_id] = get_send_handle(fwd_wait_handles, master_chunk_id, forward=True)
+                output_tensor_master_send = output_tensor
+                fwd_wait_handles = send_forward(
+                    output_tensor_master_send, tensor_shape, config, master_chunk_id, async_op=True)
+                fwd_wait_send_handles[master_chunk_id] = get_send_handle(fwd_wait_handles, master_chunk_id, forward=True)
 
         # prepare input for slave chunk
         if parallel_state.is_pipeline_last_stage():
@@ -881,9 +887,10 @@ def forward_backward_pipelining_with_cutinhalf(
             wait_comm_handle(fwd_wait_recv_handles[slave_chunk_id])
 
         # recv input tensor for master clunk
-        input_tensor, fwd_wait_handles = recv_forward(tensor_shape, config, master_chunk_id, async_op=True)
-        fwd_wait_recv_handles[master_chunk_id] = get_recv_handle(fwd_wait_handles, master_chunk_id, forward=True)
-        input_tensors[master_chunk_id].append(input_tensor)
+        if cur_fwd_chunk_microbatch[master_chunk_id] < num_chunk_max_microbatch[master_chunk_id]:
+            input_tensor, fwd_wait_handles = recv_forward(tensor_shape, config, master_chunk_id, async_op=True)
+            fwd_wait_recv_handles[master_chunk_id] = get_recv_handle(fwd_wait_handles, master_chunk_id, forward=True)
+            input_tensors[master_chunk_id].append(input_tensor)
 
         # slave forward
         output_tensor, _ = forward_backward_helper_wrapper(
@@ -900,11 +907,12 @@ def forward_backward_pipelining_with_cutinhalf(
         fwd_wait_send_handles[slave_chunk_id] = get_send_handle(fwd_wait_handles, slave_chunk_id, forward=True)
 
     # check whether data transmission is completed.
-    wait_comm_handle(fwd_wait_send_handles[master_chunk_id])
-    if not forward_only:
-        deallocate_output_tensor(output_tensor_master_send, config.deallocate_pipeline_outputs)
+    if not is_slave_only:
+        wait_comm_handle(fwd_wait_send_handles[master_chunk_id])
+        if not forward_only:
+            deallocate_output_tensor(output_tensor_master_send, config.deallocate_pipeline_outputs)
 
-    if parallel_state.is_pipeline_last_stage():
+    if parallel_state.is_pipeline_last_stage() and cur_fwd_chunk_microbatch[master_chunk_id] < num_chunk_max_microbatch[master_chunk_id]:
         wait_comm_handle(fwd_wait_recv_handles[master_chunk_id])
         output_tensor, _ = forward_backward_helper_wrapper(
             fwd_model_chunk_id=master_chunk_id,
@@ -1074,15 +1082,17 @@ def forward_backward_pipelining_with_cutinhalf(
             # Check whether the forward data transmission is completed.
             if not prev_step_backward_only:
                 wait_comm_handle(fwd_wait_send_handles[bwd_model_chunk_id])
-
-            if not forward_only:
-                deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+                if not forward_only:
+                    deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
             if bwd_model_chunk_id == slave_chunk_id and cur_fwd_chunk_microbatch[slave_chunk_id] < num_chunk_max_microbatch[slave_chunk_id]:
                 input_tensor, fwd_wait_handles = recv_forward(tensor_shape, config, slave_chunk_id, async_op=True)
                 fwd_wait_recv_handles[slave_chunk_id] = get_recv_handle(fwd_wait_handles, slave_chunk_id, forward=True)
                 input_tensors[slave_chunk_id].append(input_tensor)
-            if not forward_only:
+
+            if not input_tensors[bwd_model_chunk_id]:
+                pass
+            elif not forward_only:
                 wait_comm_handle(bwd_wait_recv_handles[bwd_model_chunk_id])
 
                 _, input_tensor_grad = forward_backward_helper_wrapper(
