@@ -2,7 +2,8 @@ from typing import Any, Optional, Tuple, Union
 
 from torch import Tensor
 
-from megatron.core import tensor_parallel
+from megatron.training import get_args
+from megatron.core import tensor_parallel, parallel_state
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import (
