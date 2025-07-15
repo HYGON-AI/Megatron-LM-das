@@ -6,7 +6,7 @@ do
 done
 
 # Those variables need to modify
-GPUS="8"                 # how many gpus to use
+GPUS=""                 # how many gpus to use
 DTK_ENV=""              # where env.sh of dtk
 NCCL_ENV=""             # where env.sh of nccl (requirements/nccl_wz/env.sh or requirements/nccl_zz/env.sh)
 HOST=""                 # hostname
