@@ -32,9 +32,4 @@ def transformer_config_post_init_wrapper(fn):
             if not hasattr(self, key):
                 setattr(self, key, value)
 
-        if hasattr(self, "moe_pad_expert_input_to_capacity"):
-            self.moe_pad_expert_input_to_capacity = True
-        if hasattr(self, "moe_expert_capacity_factor"):
-            self.moe_expert_capacity_factor = 1.0
-
     return wrapper
