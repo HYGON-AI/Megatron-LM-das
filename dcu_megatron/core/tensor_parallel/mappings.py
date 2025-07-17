@@ -1,5 +1,7 @@
 import torch
 
+from megatron.training import get_args
+
 from .qcomm import q_alltoall
 
 
@@ -66,7 +68,10 @@ class _AllToAll(torch.autograd.Function):
             None,
         )
 
-
-def all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None, use_quantize_comm=False):
+def all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None, use_quantize_comm=None):
     """Wrapper for autograd function"""
+    if use_quantize_comm is None:
+        args = get_args()
+        use_quantize_comm = args.use_quantize_comm if hasattr(args, "use_quantize_comm") else False
+
     return _AllToAll.apply(group, input_, output_split_sizes_, input_split_sizes, use_quantize_comm)

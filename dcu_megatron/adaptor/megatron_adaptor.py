@@ -202,9 +202,9 @@ class CoreAdaptation(MegatronAdaptationABC):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear if is_te_min_version("2.3.0.dev0") else te.pytorch.BatchLinear,)
 
     def patch_tensor_parallel(self):
-        from functools import partial
-        from dcu_megatron.core.tensor_parallel.mappings import all_to_all
+        from ..core.tensor_parallel.mappings import all_to_all
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
+        from ..core.parallel_state import log_timing_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -223,7 +223,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
                                     staticmethod,
                                     apply_wrapper=True)
-
+        
         # reduce_scatter_to_sequence_parallel_region
         MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.reduce_scatter_to_sequence_parallel_region',
                                     torch._dynamo.disable,
@@ -232,11 +232,54 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.reduce_from_tensor_model_parallel_region',
                                     torch._dynamo.disable,
                                     apply_wrapper=True)
-
+        
+        # NCCL time log
         adaptor_args = get_adaptor_args()
+        if adaptor_args.comm_time_log_iter is not None:
+            MegatronAdaptation.register('megatron.core.distributed.param_and_grad_buffer.dist_all_gather_func',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('megatron.core.distributed.param_and_grad_buffer.dist_reduce_scatter_func',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.dist_all_gather_func',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.dist_reduce_scatter_func',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+
+            MegatronAdaptation.register('torch.distributed.broadcast',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.all_reduce',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.all_gather',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.all_gather_into_tensor',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.reduce_scatter',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.reduce_scatter_tensor',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.all_to_all_single',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.isend',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+            MegatronAdaptation.register('torch.distributed.irecv',
+                                        log_timing_wrapper,
+                                        apply_wrapper=True)
+
         if adaptor_args.use_quantize_comm:
             MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.all_to_all',
-                                        partial(all_to_all, use_quantize_comm=True))
+                                        all_to_all)
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer

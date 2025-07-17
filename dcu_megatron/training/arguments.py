@@ -99,7 +99,8 @@ def _add_extra_training_args(parser):
                        dest='use_hip_profiler')
     group.add_argument('--profile-dir', type=str, default="./",
                        help='profile dir to save.')
-
+    group.add_argument('--comm-time-log-iter', type=int, default=None,
+                       help='iter to log communication time')
     return parser
 
 

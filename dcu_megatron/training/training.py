@@ -61,6 +61,9 @@ from megatron.training.training import (
 )
 from megatron.core.pipeline_parallel import get_forward_backward_func
 
+from dcu_megatron.core.parallel_state import set_train_iter, get_train_iter
+from dcu_megatron.core.utils import log
+
 
 stimer = StragglerDetector()
 
@@ -304,6 +307,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         # Run training step.
         args.curr_iteration = iteration
         ft_integration.on_training_step_start()
+        set_train_iter(iteration + 1)
         loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
                        train_data_iterator,
@@ -311,6 +315,13 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                        optimizer,
                        opt_param_scheduler,
                        config)
+
+        if (
+            args.comm_time_log_iter is not None
+            and get_train_iter() == args.comm_time_log_iter
+        ):
+            log(barrier=True)
+
         ft_integration.on_training_step_end()
         if should_checkpoint:
             save_checkpoint_and_time(iteration, model, optimizer,
