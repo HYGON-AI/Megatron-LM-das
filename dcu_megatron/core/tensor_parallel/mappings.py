@@ -32,7 +32,7 @@ class _AllToAll(torch.autograd.Function):
             # Unequal split (all2all-v)
             if use_quantize_comm:
                 output = input.new_empty(
-                    size=[sum(output_split_sizes)] + list(input.size()[1:]),
+                    size=[sum(output_split_sizes)] + list(input.size()[1:-1]) + [input.size()[-1]+4],
                     dtype=torch.int8,
                     device=torch.cuda.current_device(),
                 )

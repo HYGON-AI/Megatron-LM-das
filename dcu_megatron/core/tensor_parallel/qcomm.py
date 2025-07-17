@@ -181,23 +181,23 @@ def _alltoall(group, input, output_split_sizes, input_split_sizes):
     return output
 
 def q_alltoall(output, input, output_split_sizes, input_split_sizes,group):
-    t,s = input.shape[0],input.shape[1]
+    t, s = input.shape[0], input.shape[1]
     input_buffer_int8 = torch.empty((t, 1, s), dtype=torch.int8, device="cuda")
     buffer_scales = torch.empty((t, 1, 2), dtype=torch.bfloat16, device="cuda")
     input_q = input.unsqueeze(1)
 
     destindex_copy_quantize_kv_init_asym(
-            input_q,
-            input_buffer_int8,
-            buffer_scales,
-            )
+        input_q,
+        input_buffer_int8,
+        buffer_scales,
+    )
 
     input_buffer_int8 = input_buffer_int8.squeeze()
     buffer_scales = buffer_scales.squeeze()
     buffer_scales_h, buffer_scales_l = fp16_to_int8s(buffer_scales[:,0])
     buffer_shift_h, buffer_shift_l = fp16_to_int8s(buffer_scales[:,1])
 
-    input_all = torch.cat([input_buffer_int8, buffer_scales_h, buffer_scales_l,buffer_shift_h, buffer_shift_l], dim=1)
+    input_all = torch.cat([input_buffer_int8, buffer_scales_h, buffer_scales_l, buffer_shift_h, buffer_shift_l], dim=1)
 
     torch.distributed.all_to_all_single(
         output,
