@@ -5,33 +5,38 @@ do
     fi
 done
 
-# Those variables need to modify
-GPUS="64"                 # how many gpus to use
-DTK_ENV="/public/home/wangxj/Downloads/blas/dtk-25.04.1-rc1/env.sh"              # where env.sh of dtk
-# NCCL_ENV="/workspace/dcu_megatron/requirements/nccl_wz/env.sh"             # where env.sh of nccl (requirements/nccl_wz/env.sh or requirements/nccl_zz/env.sh)
-NCCL_ENV="/public/home/wangxj/Projects/dcu_megatron/requirements/nccl_wz/env.sh"
-HOST="node036"                 # hostname
-PORT="11451"                 # port id
-# DATA_PATH="/data/datasets/oscar-1GB-head/oscar-1GB_head-llama2_text_document"            # path to oscar-1GB_head-llama2_text_document
-DATA_PATH="/public/home/wangxj/Downloads/datasets/oscar-1GB-head/oscar-1GB_head-llama3.2_text_document"
-# TOKENIZER_MODEL_PATH="/data/model_weights/llama2_7b_hf/tokenizer.model" # path to tokenizer.model
-TOKENIZER_MODEL_PATH="/public/home/wangxj/Downloads/model_weights/llama3.2/tokenizer.model"
-CHECKPOINT_PATH="./ckpt"      # path to ckpt
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
+MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
-# Runs Llama2 7B model
-mpirun -np ${GPUS}  --hostfile hostfile \
+# Those variables need to modify
+DTK_ENV=""                                                               # where env.sh of dtk
+DATA_PATH=""                                                             # path to oscar-1GB_head-llama2_text_document
+TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
+CHECKPOINT_PATH=""                                                       # path to ckpt
+NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
+LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
+
+# Those variables no need to modify
+HOSTFILE="hostfile_$(basename "$0" | sed -E 's/^run_(.+)\.sh$/\1/')"
+GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
+HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
+PORT="25900"
+
+# Runs Llama3 70B model
+mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
                     --bind-to none \
                     --mca plm_rsh_no_tree_spawn 1 \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_llama3_70b_8nodes.sh \
+                    ./train_llama3_70b_$((${GPUS} / 8))nodes.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \
                     --tokenizer_path=$TOKENIZER_MODEL_PATH \
                     --checkpoint_path=$CHECKPOINT_PATH \
-                    --profiling=$profiling" > ./log/log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log 2>&1
+                    --launch_with_binding=${LAUNCH_WITH_BINDING} \
+                    --profiling=$profiling" > log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log 2>&1
 
 wait

@@ -8,6 +8,8 @@ do
         tokenizer_path=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
+    elif [[ $para == --launch_with_binding* ]];then
+        launch_with_binding=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     fi
@@ -24,7 +26,7 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -169,4 +171,4 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${MEGATRON_PATH}/requirements/launch_with_binding.sh ${LOCAL_RANK} ${APP}
+${launch_with_binding} ${LOCAL_RANK} ${APP}

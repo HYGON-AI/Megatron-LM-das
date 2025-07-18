@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# 使用blaslt和rocblas
-export export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/hipblaslt-install0519/lib:$LD_LIBRARY_PATH 
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/rocblas-install-0513-release/lib:$LD_LIBRARY_PATH
-
 INITIALIZATION_ARGS=( --num-workers 2)
 
 for para in $*
@@ -14,6 +10,8 @@ do
         tokenizer_path=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
+    elif [[ $para == --launch_with_binding* ]];then
+        launch_with_binding=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     elif [[ $para == --reproduce* ]];then
@@ -40,7 +38,7 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
@@ -49,14 +47,9 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
+export GPU_MAX_HW_QUEUES=10
 export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
 export NVTE_NO_PIPELINE_OVERLAP=1
-
-
-# torch控制多流转单流
-export ALLREDUCE_STREAM_WITH_COMPUTE=1
-export SENDRECV_STREAM_WITH_COMPUTE=1 
 
 #增加编译缓存
 export cache_size_limit=64
@@ -70,12 +63,14 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 40
+    --num-layers 64
     --hidden-size 5120
-    --ffn-hidden-size 13696 
+    --ffn-hidden-size 27392 
     --num-attention-heads 40
-    --max-position-embeddings 4096
-    --normalization RMSNorm # Lightop
+    --max-position-embeddings 32768
+    --num-query-groups 8
+    --group-query-attention
+    --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
 )
@@ -104,13 +99,11 @@ TRAINING_ARGS=(
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
-    # --tp-comm-overlap
-    # --tp-comm-overlap-rs-dgrad
     --use-flash-attn
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 2
+    --tensor-model-parallel-size 4
     --pipeline-model-parallel-size 4
     --context-parallel-size 1
     --use-distributed-optimizer 
@@ -141,7 +134,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp1-pp2-cp1
+    --profile-dir torch_prof_llama_1nodes_tp4-pp4-cp1
     --use-pytorch-profiler
 )
 
@@ -172,37 +165,4 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-case ${LOCAL_RANK} in
-[0])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=0 --membind=0 ${APP}
-  ;;
-[1])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=1 --membind=1 ${APP}
-  ;;
-[2])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=2 --membind=2 ${APP}
-  ;;
-[3])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=3 --membind=3 ${APP}
-  ;;
-[4])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=4 --membind=4 ${APP}
-  ;;
-[5])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=5 --membind=5 ${APP}
-  ;;
-[6])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=6 --membind=6 ${APP}
-  ;;
-[7])
-  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  numactl --cpunodebind=7 --membind=7 ${APP}
-  ;;
-esac
+${launch_with_binding} ${LOCAL_RANK} ${APP}

@@ -5,18 +5,25 @@ do
     fi
 done
 
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
+MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
+
 # Those variables need to modify
-GPUS=""                 # how many gpus to use
-DTK_ENV=""              # where env.sh of dtk
-NCCL_ENV=""             # where env.sh of nccl (requirements/nccl_wz/env.sh or requirements/nccl_zz/env.sh)
-HOST=""                 # hostname
-PORT=""                 # port id
-DATA_PATH=""            # path to my-mixtral_text_document
-TOKENIZER_MODEL_PATH="" # path to tokenizer.model
-CHECKPOINT_PATH=""      # path to ckpt
+DTK_ENV=""                                                               # where env.sh of dtk
+DATA_PATH=""                                                             # path to my-mixtral_text_document
+TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
+CHECKPOINT_PATH=""                                                       # path to ckpt
+NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
+LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
+
+# Those variables no need to modify
+HOSTFILE="hostfile_$(basename "$0" | sed -E 's/^run_(.+)\.sh$/\1/')"
+GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
+HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
+PORT="25900"
 
 # Runs Mixtral 8x22B model
-mpirun -np ${GPUS}  --hostfile hostfile_mixtral_8x22B \
+mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
                     --bind-to none \
                     --mca plm_rsh_no_tree_spawn 1 \
@@ -29,6 +36,7 @@ mpirun -np ${GPUS}  --hostfile hostfile_mixtral_8x22B \
                     --data_path=$DATA_PATH \
                     --tokenizer_path=$TOKENIZER_MODEL_PATH \
                     --checkpoint_path=$CHECKPOINT_PATH \
+                    --launch_with_binding=${LAUNCH_WITH_BINDING} \
                     --profiling=$profiling" > log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log 2>&1
 
 wait

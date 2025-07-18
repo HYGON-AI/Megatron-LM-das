@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# 使用blaslt和rocblas
-export export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/hipblaslt-install0519/lib:$LD_LIBRARY_PATH 
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/rocblas-install-0513-release/lib:$LD_LIBRARY_PATH
-
 INITIALIZATION_ARGS=( --num-workers 2)
 
 for para in $*
@@ -14,6 +10,8 @@ do
         tokenizer_path=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
+    elif [[ $para == --launch_with_binding* ]];then
+        launch_with_binding=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     elif [[ $para == --reproduce* ]];then
@@ -40,7 +38,7 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
@@ -49,14 +47,7 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=20 #10 # 4
-# export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
-# export NVTE_NO_PIPELINE_OVERLAP=1
-
-
-# torch控制多流转单流
-export ALLREDUCE_STREAM_WITH_COMPUTE=1
-export SENDRECV_STREAM_WITH_COMPUTE=1 
+export GPU_MAX_HW_QUEUES=20
 
 #增加编译缓存
 export cache_size_limit=64
@@ -70,14 +61,14 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 80 #80 #80 #40 # 20 # 
+    --num-layers 80
     --hidden-size 8192
-    --ffn-hidden-size 28672 # 28672
+    --ffn-hidden-size 28672
     --num-attention-heads 64
     --max-position-embeddings 8192
     --group-query-attention
     --num-query-groups 8
-    --normalization RMSNorm # Lightop
+    --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
 )
@@ -105,8 +96,6 @@ TRAINING_ARGS=(
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
-    # --tp-comm-overlap
-    # --tp-comm-overlap-rs-dgrad
     --use-flash-attn
 )
 
@@ -141,7 +130,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp4-pp2-cp1-tpoverlap-nosyns_20
+    --profile-dir torch_prof_llama_1nodes_tp4-pp8-cp1
     --use-pytorch-profiler
 )
 
@@ -172,4 +161,4 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${MEGATRON_PATH}/requirements/launch_with_binding.sh ${LOCAL_RANK} ${APP}
+${launch_with_binding} ${LOCAL_RANK} ${APP}
