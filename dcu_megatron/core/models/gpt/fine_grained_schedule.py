@@ -842,8 +842,11 @@ def schedule_chunk_1f1b(
     # output pp send receive, overlapped with attn backward
     if f_schedule_plan is not None and post_forward is not None:
         with f_context:
-            f_schedule_plan.wait_current_stream()
-            post_forward(f_input)
+            # The last submodule(layer_pre_forward) is running in the communication stream,
+            # so the p2p comm could be overlapped with the attn backward
+            with torch.cuda.stream(get_com_stream()):
+                f_schedule_plan.wait_current_stream()
+                post_forward(f_input)
 
     # pp grad send / receive, overlapped with attn dw of cur micro-batch and forward attn of next micro-batch
     if b_schedule_plan is not None and post_backward is not None:
