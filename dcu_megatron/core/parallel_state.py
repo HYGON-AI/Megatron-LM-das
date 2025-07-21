@@ -122,9 +122,6 @@ def set_train_iter(train_iter):
 
 def get_train_iter():
     global __TRAIN_ITER
-    if __TRAIN_ITER is None:
-        warnings.warn('Apex is not installed.')
-
     return __TRAIN_ITER
 
 

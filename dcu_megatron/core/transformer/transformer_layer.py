@@ -175,11 +175,11 @@ def get_transformer_layer_offset(config: TransformerConfig):
                     offset = num_layers - (pipeline_rank + 1) * num_layers_per_pipeline_rank
 
                 # Reduce the offset of embedding layer from the total layer number
-                if (
-                    config.account_for_embedding_in_pipeline_split
-                    and not parallel_state.is_pipeline_first_stage()
-                ):
-                    offset -= 1
+                if config.account_for_embedding_in_pipeline_split:
+                    if not parallel_state.is_pipeline_first_stage():
+                        offset -= 1
+                    elif not getattr(args, 'dualpipev_first_chunk', True):
+                        offset -= 1
     else:
         offset = 0
     return offset
@@ -755,3 +755,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
     def _submodule_routed_experts_dw(self):
         self.mlp.backward_routed_expert_dw()
+
+    def backward_dw(self):
+        self._submodule_attention_dw()
+        self._submodule_mlp_dw()

@@ -246,12 +246,105 @@ def train_step(forward_step_func, data_iterator,
 
 
 def get_num_layers_to_build(config: TransformerConfig) -> int:
+    """
+    Determine the number of transformer layers to build for the current pipeline stage.
+    Args:
+        config (TransformerConfig): Configuration object containing transformer model parameters.
 
-    num_layers_per_pipeline_rank = (
-        config.num_layers // parallel_state.get_pipeline_model_parallel_world_size()
-    )
+    Returns:
+        int: The number of layers to be built for the current pipeline stage.
+    """
+    args = get_args()
+    if (
+        config.num_layers_in_first_pipeline_stage is not None
+        or config.num_layers_in_last_pipeline_stage is not None
+    ):
 
-    num_layers_to_build = num_layers_per_pipeline_rank // 2
+        assert not (
+            config.account_for_embedding_in_pipeline_split
+            or config.account_for_loss_in_pipeline_split
+        ), " \
+        Does not support standalone embedding stage and standalone loss stage with uneven pp"
+        # Number of layers to distribute over rest of pipeline stages
+        layers_to_distribute = config.num_layers
+        # Number of pipeline stages left for distributing transformer layers
+        pipeline_stages_left = parallel_state.get_pipeline_model_parallel_world_size()
+        if getattr(args, "schedule_method", None) == "dualpipev":
+            pipeline_stages_left *= 2
+
+        # If the uneven first (last) pipeline stage is enabled, remove the specified number
+        # of layers to calculate the number of layers on each middle pipeline stage.
+        if config.num_layers_in_first_pipeline_stage is not None:
+            layers_to_distribute -= config.num_layers_in_first_pipeline_stage
+            pipeline_stages_left -= 1
+
+        if config.num_layers_in_last_pipeline_stage is not None:
+            layers_to_distribute -= config.num_layers_in_last_pipeline_stage
+            pipeline_stages_left -= 1
+
+        assert (
+            layers_to_distribute % pipeline_stages_left == 0
+        ), "With uneven pipelineing the left over layers must be divisible by left over stages"
+        num_layers_per_pipeline_rank = layers_to_distribute // pipeline_stages_left
+
+        # If the uneven first (last) pipeline stage is enabled, return the specified number
+        # of layers for all virtual pipeline parallel stages within the first (last) pipeline
+        # parallel stage.
+        if (
+            parallel_state.is_pipeline_first_stage(ignore_virtual=True)
+            and config.num_layers_in_first_pipeline_stage is not None
+        ):
+            num_layers_per_pipeline_rank = config.num_layers_in_first_pipeline_stage
+
+        if (
+            parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+            and config.num_layers_in_last_pipeline_stage is not None
+        ):
+            num_layers_per_pipeline_rank = config.num_layers_in_last_pipeline_stage
+    else:
+        # Include the embedding layer and loss layer into pipeline parallelism partition
+        num_layers = config.num_layers
+        if config.account_for_embedding_in_pipeline_split:
+            num_layers += 1
+
+        if config.account_for_loss_in_pipeline_split:
+            num_layers += 1
+
+        assert (
+            num_layers % config.pipeline_model_parallel_size == 0
+        ), "num_layers should be divisible by pipeline_model_parallel_size"
+        num_layers_per_pipeline_rank = num_layers // config.pipeline_model_parallel_size
+        if getattr(args, "schedule_method", None) == "dualpipev":
+            assert (
+                num_layers_per_pipeline_rank % 2 == 0
+            ), "num_layers should be divisible by pipeline_model_parallel_size * 2"
+            num_layers_per_pipeline_rank = num_layers_per_pipeline_rank // 2
+
+    # Non-interleaved pipeline parallelism:
+    # Each stage gets a contiguous set of layers.
+    num_layers_to_build = num_layers_per_pipeline_rank
+
+    # The embedding (or loss) layer cannot function as a standalone transformer layer
+    # Reduce the number of layers to construct by 1 on the first (or last) stage if the
+    # embedding (or loss) layer is included in the pipeline parallelism partition and placement.
+    if getattr(args, "schedule_method", None) == "dualpipev":
+        if parallel_state.is_pipeline_first_stage():
+            if  args.dualpipev_first_chunk and config.account_for_embedding_in_pipeline_split:
+                num_layers_to_build -= 1
+                assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
+            elif  not args.dualpipev_first_chunk and config.account_for_loss_in_pipeline_split:
+                num_layers_to_build -= 1
+                assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
+
+        return num_layers_to_build
+
+    if parallel_state.is_pipeline_first_stage() and config.account_for_embedding_in_pipeline_split:
+        num_layers_to_build -= 1
+        assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
+
+    if parallel_state.is_pipeline_last_stage() and config.account_for_loss_in_pipeline_split:
+        num_layers_to_build -= 1
+        assert num_layers_to_build >= 0, "Not enough layers in the last virtual pipeline stage"
 
     return num_layers_to_build
 
