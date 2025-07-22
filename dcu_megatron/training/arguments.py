@@ -93,6 +93,8 @@ def _add_extra_distributed_args(parser):
 
 
 def _add_extra_training_args(parser):
+    remove_original_params(parser, ["recompute_modules"])
+
     group = parser.add_argument_group(title='extra training args')
     group.add_argument('--use-hip-profiler', action='store_true',
                        help='Use HIP PROFILER',
@@ -101,6 +103,19 @@ def _add_extra_training_args(parser):
                        help='profile dir to save.')
     group.add_argument('--comm-time-log-iter', type=int, default=None,
                        help='iter to log communication time')
+    group.add_argument('--recompute-modules', nargs='*', type=str, default=None,
+                        help='The submodules to recompute. '
+                        'choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "experts". '
+                        'default: ["core_attn"].'
+                        '"core_attn": recompute the core attention part of the transformer layer. '
+                        '"moe_act": recompute the MoE MLP activation function. '
+                        '"layernorm": recompute the input_layernorm and pre_mlp_layernorm. '
+                        '"mla_up_proj": recompute the MLA up projection and RoPE applying parts.'
+                        '"mlp": recompute the dense MLP layer.'
+                        '"moe": recompute the MoE layer.'
+                        '"experts: recompute the Experts layer"'
+                        '"moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing, '
+                        '"core_attn", "mlp", and "moe" uses normal checkpointing.')
     return parser
 
 

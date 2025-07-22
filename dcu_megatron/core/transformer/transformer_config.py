@@ -4,10 +4,20 @@ from dataclasses import make_dataclass, field
 from megatron.training import get_args
 
 
-def transformer_config_post_init_wrapper(fn):
-    @wraps(fn)
+def transformer_config_post_init_wrapper(post_init_func):
+    @wraps(post_init_func)
     def wrapper(self):
-        fn(self)
+        # remover experts from recompute_modules. Otherwise _post_init_ will raise error
+        if self.recompute_modules is None:
+            self.recompute_modules = set()
+        self.recompute_modules = set(self.recompute_modules)
+        recompute_experts = "experts" in self.recompute_modules
+        self.recompute_modules.discard("experts")
+        post_init_func(self)
+        if recompute_experts:
+            self.recompute_modules.add("experts")
+        self.recompute_modules = list(self.recompute_modules)
+
         args = get_args()
         fields = []
         # TE will get an unexpected keyword argument 'delay_wgrad_compute' if split_bw = True
@@ -31,5 +41,13 @@ def transformer_config_post_init_wrapper(fn):
 
             if not hasattr(self, key):
                 setattr(self, key, value)
+
+        if self.recompute_granularity == 'selective':
+            if len(self.recompute_modules) > 0:
+                modules_set = set(self.recompute_modules)
+                assert not ('moe' in modules_set and 'experts' in modules_set), (
+                    "'moe' and 'experts' cannot be used together in recompute_modules. "
+                    "Please choose only one of them."
+                )
 
     return wrapper

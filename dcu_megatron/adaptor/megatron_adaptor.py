@@ -164,6 +164,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
+        from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
@@ -172,6 +173,11 @@ class CoreAdaptation(MegatronAdaptationABC):
         # Transformer config, add new params
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
                                     transformer_config_post_init_wrapper)
+        # support experts_recompute
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
+                                    moe_layer_init_wrapper)
+        MegatronAdaptation.register('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
+                                    moe_layer_forward_wrapper)
 
         # Moe
         # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
