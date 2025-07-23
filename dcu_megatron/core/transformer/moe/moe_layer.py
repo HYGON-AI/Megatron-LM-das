@@ -30,6 +30,16 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
     @wraps(moe_layer_foward_func)
     def wrapper(self, hidden_states: torch.Tensor
     ):
+        if (
+            self.training
+            and self.config.tensor_model_parallel_size > 1
+            and not self.config.sequence_parallel
+        ):
+            raise ValueError(
+                "During training, performance may degrade if MoE and tensor parallelism"
+                "are enabled without also enabling sequence parallelism."
+            )
+
         def custom_forward_experts(dispatched_input, tokens_per_expert):
             expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
             return expert_output, mlp_bias
