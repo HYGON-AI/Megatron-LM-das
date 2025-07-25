@@ -6,7 +6,6 @@ import torch
 from megatron.core import tensor_parallel
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.moe.moe_layer import MoESubmodules
-from megatron.core.transformer.moe.moe_layer import MoELayer as MegatronCoreMoELayer
 
 
 def moe_layer_init_wrapper(moe_layer_init_func):
@@ -21,6 +20,10 @@ def moe_layer_init_wrapper(moe_layer_init_func):
 
         self.experts_recompute = (
             config.recompute_granularity == 'selective' and "experts" in config.recompute_modules
+        )
+
+        self.router_recompute = (
+            config.recompute_granularity == 'selective' and "router" in config.recompute_modules
         )
 
     return wrapper
@@ -43,13 +46,19 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
         def custom_forward_experts(dispatched_input, tokens_per_expert):
             expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
             return expert_output, mlp_bias
-
-        if self.experts_recompute:
+        
+        def custom_forward_router(hidden_states):
             probs, routing_map = self.router(hidden_states)
+            return probs, routing_map
+
+        if self.experts_recompute or self.router_recompute:
+            probs, routing_map = tensor_parallel.checkpoint(custom_forward_router, False, hidden_states) \
+                                 if self.router_recompute else self.router(hidden_states)
             (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
                 hidden_states, probs, routing_map
             )
-            expert_output, mlp_bias = tensor_parallel.checkpoint(custom_forward_experts, False, dispatched_input, tokens_per_expert)
+            expert_output, mlp_bias = tensor_parallel.checkpoint(custom_forward_experts, False, dispatched_input, tokens_per_expert) \
+                                      if self.experts_recompute else self.experts(dispatched_input, tokens_per_expert)
             output, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
             if self.use_shared_expert and not self.shared_expert_overlap:
                 # if shared_expert_overlap is True, the expert calculation happens in

@@ -12,10 +12,14 @@ def transformer_config_post_init_wrapper(post_init_func):
             self.recompute_modules = set()
         self.recompute_modules = set(self.recompute_modules)
         recompute_experts = "experts" in self.recompute_modules
+        recompute_router  = "router"  in self.recompute_modules
         self.recompute_modules.discard("experts")
+        self.recompute_modules.discard("router")
         post_init_func(self)
         if recompute_experts:
             self.recompute_modules.add("experts")
+        if recompute_router:
+            self.recompute_modules.add("router")
         self.recompute_modules = list(self.recompute_modules)
 
         args = get_args()
@@ -45,9 +49,9 @@ def transformer_config_post_init_wrapper(post_init_func):
         if self.recompute_granularity == 'selective':
             if len(self.recompute_modules) > 0:
                 modules_set = set(self.recompute_modules)
-                assert not ('moe' in modules_set and 'experts' in modules_set), (
-                    "'moe' and 'experts' cannot be used together in recompute_modules. "
-                    "Please choose only one of them."
+                assert not ('moe' in modules_set and ('experts' in modules_set or 'router' in modules_set)), (
+                    "'moe' cannot be used together with 'experts' or 'router' in recompute_modules. "
+                    "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
                 )
 
     return wrapper

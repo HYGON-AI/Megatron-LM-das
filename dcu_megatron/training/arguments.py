@@ -105,7 +105,7 @@ def _add_extra_training_args(parser):
                        help='iter to log communication time')
     group.add_argument('--recompute-modules', nargs='*', type=str, default=None,
                         help='The submodules to recompute. '
-                        'choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "experts". '
+                        'choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "experts", "router". '
                         'default: ["core_attn"].'
                         '"core_attn": recompute the core attention part of the transformer layer. '
                         '"moe_act": recompute the MoE MLP activation function. '
@@ -114,6 +114,7 @@ def _add_extra_training_args(parser):
                         '"mlp": recompute the dense MLP layer.'
                         '"moe": recompute the MoE layer.'
                         '"experts: recompute the Experts layer"'
+                        '"router: recompute the Router layer"'
                         '"moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing, '
                         '"core_attn", "mlp", and "moe" uses normal checkpointing.')
     return parser
