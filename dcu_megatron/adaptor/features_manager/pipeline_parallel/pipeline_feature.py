@@ -34,9 +34,19 @@ class PipelineFeature(AbstractFeature):
             if args.num_layers_per_virtual_pipeline_stage is not None:
                 raise AssertionError(
                     "The dualpipev and virtual_pipeline are incompatible.")
-            # if args.num_layers < args.pipeline_model_parallel_size * 2:
-            #     raise AssertionError(
-            #         'number of layers must be at least 2*pipeline_model_parallel_size in dualpipe')
+
+            layers_to_distribute = args.num_layers
+            pipeline_stages_left = args.pipeline_model_parallel_size * 2
+            if args.decoder_first_pipeline_num_layers is not None and args.decoder_last_pipeline_num_layers is not None:
+                if args.decoder_first_pipeline_num_layers is not None:
+                    layers_to_distribute -= args.decoder_first_pipeline_num_layers
+                    pipeline_stages_left -= 1
+                if args.decoder_last_pipeline_num_layers is not None:
+                    layers_to_distribute -= args.decoder_last_pipeline_num_layers
+                    pipeline_stages_left -= 1
+                if layers_to_distribute < pipeline_stages_left:
+                    raise AssertionError(
+                        'number of layers must be at least 2*pipeline_model_parallel_size in dualpipe')
 
             num_micro_batch = args.global_batch_size // args.micro_batch_size // args.data_parallel_size
             if num_micro_batch < args.pipeline_model_parallel_size:

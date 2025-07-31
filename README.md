@@ -75,15 +75,17 @@ def unpermute(
 ### 项目支持[moe a2a通信计算overlap](https://mp.weixin.qq.com/s?__biz=MzU2NzkyMzUxMw==&mid=2247550702&idx=2&sn=9f6bb8ea72475aa833bfd73718f03530&chksm=fdb928e884341e81762eeaffbc3d00a3023e4543001b5448f259977b8bf0e4603448db75360e&mpshare=1&scene=1&srcid=0306blxvLHplbcAOqnznmXiQ&sharer_shareinfo=962faa39bc50b5544c96cf846186f076&sharer_shareinfo_first=962faa39bc50b5544c96cf846186f076&version=4.1.20.70286&platform=mac#rd)
 + 项目支持moe a2a 通算overlap。如果需要使用该特性，需要启动脚本中加入如下两个参数:
 ```
+--schedule-method interleaved_1f1b
 --combined-1f1b
 --combined-1f1b-recipe ep_a2a
 ```
-+ 项目支持通过split-bw进行dw拆分，用于实现更好的overlap。当前从测试结果看，开启split-bw，效果欠佳，待进一步优化。
++ 项目支持通过delay-wgrad-compute进行dw拆分，用于实现更好的overlap。当前从测试结果看，开启delay-wgrad-compute，收益甚微，待进一步优化。
 
 ### 项目支持dualpipev
 + 项目支持dualpipev。如果需要使用该特性，需要启动脚本中加入如下参数:
 ```
 --schedule-method dualpipev
+--delay-wgrad-compute
 ```
 + dualpipev支持moe a2a overlap，如果需要overlap，额外增加两个参数
 ```
