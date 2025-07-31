@@ -17,3 +17,9 @@ def transformer_block_init_wrapper(fn):
             self.final_layernorm = None
 
     return wrapper
+
+
+class TransformerBlock():
+    def backward_dw(self):
+        for layer in self.layers:
+            layer.backward_dw()

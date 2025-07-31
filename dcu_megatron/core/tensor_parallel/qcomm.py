@@ -144,6 +144,7 @@ def destindex_dequantize_kv(Quantized_Out, Out_scale_zero, Dequantized_Out):
         num_stages=1,
     )
 
+
 @torch.no_grad()
 def fp16_to_int8s(fp16_tensor):
     fp16_bytes = fp16_tensor.contiguous().view(torch.int8)
@@ -152,11 +153,11 @@ def fp16_to_int8s(fp16_tensor):
     return int8_high.unsqueeze(1), int8_low.unsqueeze(1)
 
 
-
 @torch.no_grad()
 def int8s_to_fp16(int8_high, int8_low):
     fp16_bytes = torch.stack([int8_high, int8_low], dim=-1).view(torch.int16)
     return fp16_bytes.view(torch.bfloat16)
+
 
 def _alltoall(group, input, output_split_sizes, input_split_sizes):
     input = input.contiguous()
@@ -179,6 +180,7 @@ def _alltoall(group, input, output_split_sizes, input_split_sizes):
         group=group,
     )
     return output
+
 
 def q_alltoall(output, input, output_split_sizes, input_split_sizes,group):
     t, s = input.shape[0], input.shape[1]
@@ -206,7 +208,6 @@ def q_alltoall(output, input, output_split_sizes, input_split_sizes,group):
         input_split_sizes=input_split_sizes,
         group=group,
     )
-
 
     scale = int8s_to_fp16(output[:,-4], output[:,-3])
     shift = int8s_to_fp16(output[:,-2], output[:,-1])

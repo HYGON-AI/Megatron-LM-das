@@ -31,8 +31,8 @@ def _get_extra_te_kwargs_wrapper(_get_extra_te_kwargs_func):
     @wraps(_get_extra_te_kwargs_func)
     def wrapper(config: TransformerConfig):
         extra_transformer_engine_kwargs = _get_extra_te_kwargs_func(config)
-        if hasattr(config, "split_bw"):
-            extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.split_bw
+        if hasattr(config, "delay_wgrad_compute"):
+            extra_transformer_engine_kwargs["delay_wgrad_compute"] = config.delay_wgrad_compute
         return extra_transformer_engine_kwargs
 
     if is_te_min_version("2.3.0.dev0"):
@@ -71,13 +71,13 @@ class TELinear(MegatronCoreTELinear):
         is_expert: bool = False,
     ):
         args = get_args()
-        self.split_bw = args.split_bw if hasattr(args, "split_bw") else False
+        self.delay_wgrad_compute = args.delay_wgrad_compute if hasattr(args, "delay_wgrad_compute") else False
         if not is_te_min_version("2.3.0.dev0"):
-            assert not self.split_bw, "split_bw is currently not supported"
+            assert not self.delay_wgrad_compute, "delay_wgrad_compute is currently not supported"
 
-        if self.split_bw:
+        if self.delay_wgrad_compute:
             config = copy.copy(config)
-            config.split_bw = True
+            config.delay_wgrad_compute = True
 
         super().__init__(
             input_size,
@@ -93,7 +93,7 @@ class TELinear(MegatronCoreTELinear):
         )
 
     def backward_dw(self):
-        if not self.split_bw:
+        if not self.delay_wgrad_compute:
             return
 
         return super(MegatronCoreTELinear, self).backward_dw()
@@ -120,13 +120,13 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
         tp_comm_buffer_name: Optional[str] = None,
     ):
         args = get_args()
-        self.split_bw = args.split_bw if hasattr(args, "split_bw") else False
+        self.delay_wgrad_compute = args.delay_wgrad_compute if hasattr(args, "delay_wgrad_compute") else False
         if not is_te_min_version("2.3.0.dev0"):
-            assert not self.split_bw, "split_bw is currently not supported"
+            assert not self.delay_wgrad_compute, "delay_wgrad_compute is currently not supported"
 
-        if self.split_bw:
+        if self.delay_wgrad_compute:
             config = copy.copy(config)
-            config.split_bw = True
+            config.delay_wgrad_compute = True
 
         super().__init__(
             input_size,
@@ -142,7 +142,7 @@ class TELayerNormColumnParallelLinear(MegatronCoreTELayerNormColumnParallelLinea
         )
 
     def backward_dw(self):
-        if not self.split_bw:
+        if not self.delay_wgrad_compute:
             return
 
         return super(MegatronCoreTELayerNormColumnParallelLinear, self).backward_dw()
@@ -310,13 +310,13 @@ if is_te_min_version("1.9.0.dev0"):
             tp_comm_buffer_name: Optional[str] = None,
         ):
             args = get_args()
-            self.split_bw = args.split_bw if hasattr(args, "split_bw") else False
+            self.delay_wgrad_compute = args.delay_wgrad_compute if hasattr(args, "delay_wgrad_compute") else False
             if not is_te_min_version("2.3.0.dev0"):
-                assert not self.split_bw, "split_bw is currently not supported"
+                assert not self.delay_wgrad_compute, "delay_wgrad_compute is currently not supported"
 
-            if self.split_bw:
+            if self.delay_wgrad_compute:
                 config = copy.copy(config)
-                config.split_bw = True
+                config.delay_wgrad_compute = True
 
             super().__init__(
                 num_gemms,
@@ -332,7 +332,7 @@ if is_te_min_version("1.9.0.dev0"):
             )
 
         def backward_dw(self):
-            if not self.split_bw:
+            if not self.delay_wgrad_compute:
                 return
 
             return super(MegatronCoreTEGroupedLinear, self).backward_dw()

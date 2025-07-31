@@ -24,9 +24,9 @@ def transformer_config_post_init_wrapper(post_init_func):
 
         args = get_args()
         fields = []
-        # TE will get an unexpected keyword argument 'delay_wgrad_compute' if split_bw = True
+        # TE will get an unexpected keyword argument 'delay_wgrad_compute' if delay_wgrad_compute = True
         exclude_keys = {
-            "split_bw"
+            "delay_wgrad_compute"
         }
         for key, value in vars(args).items():
             if key in exclude_keys:

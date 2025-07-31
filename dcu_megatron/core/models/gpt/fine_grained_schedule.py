@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from megatron.core import parallel_state
+from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
 
@@ -230,7 +230,7 @@ class PostProcessNode(ScheduleNode):
 
         loss = gpt_model.compute_language_model_loss(labels, logits)
 
-        return loss
+        return float16_to_fp32(loss)
 
 
 class TransformerLayerNode(ScheduleNode):
@@ -589,6 +589,7 @@ class ModelChunkSchedulePlan(AbstractSchedulePlan):
         pre_backward=None,
         post_forward=None,
         post_backward=None,
+        block_level_wgrad_compute=False,
     ):
 
         return schedule_chunk_1f1b(
@@ -601,6 +602,7 @@ class ModelChunkSchedulePlan(AbstractSchedulePlan):
             pre_backward=pre_backward,
             post_forward=post_forward,
             post_backward=post_backward,
+            block_level_wgrad_compute=block_level_wgrad_compute,
         )
 
     @property
@@ -644,6 +646,15 @@ class ModelChunkSchedulePlan(AbstractSchedulePlan):
     @property
     def state(self):
         return self._model_chunk_state
+    
+    def release_state(self):
+        """Release reference, this helps avoid memory leak."""
+        self._pre_process.model_chunk_state = None
+        self._pre_process = None
+
+        if self._post_process is not None:
+            self._post_process.model_chunk_state = None
+            self._post_process = None
 
 # F_DISPATCH_B_MLP_SYNC_EVENT = torch.cuda.Event()
 F_DISPATCH_B_MLP_SYNC_EVENT = None
@@ -660,51 +671,53 @@ def schedule_layer_1f1b(
     b_layer,
     f_input=None,
     b_grad=None,
-    pre_forward=None,
-    pre_backward=None,
-    pre_backward_dw=None,
     f_context=None,
     b_context=None,
+    is_last_layer_in_bwd=False,
+    block_level_wgrad_compute=False,
 ):
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
-    is_overlap_step = f_layer is not None and b_layer is not None
+    is_sync_1f1b = f_layer is not None and b_layer is not None
 
-    if pre_forward is not None:
-        assert f_input is None
-        # combine from last iter
-        f_input = pre_forward()
-        del pre_forward
 
-    if pre_backward is not None:
-        # attn backward from last iter
-        assert b_grad is None
-        b_grad = pre_backward()
-        del pre_backward
-
-    if pre_backward_dw is not None:
-        pre_backward_dw()
-        del pre_backward_dw
-
+    f_attn_pre_b_combine_sync_event = F_ATTN_PRE_B_COMBINE_SYNC_EVENT if is_sync_1f1b else None
     if f_layer is not None:
         with f_context:
-            f_input = f_layer.attn_pre.forward(f_input, stream_record_event=F_ATTN_PRE_B_COMBINE_SYNC_EVENT)
+            f_input = f_layer.attn_pre.forward(
+                f_input,
+                stream_record_event=f_attn_pre_b_combine_sync_event,
+            )
 
+    b_combine_f_attn_post_sync_event = B_COMBINE_F_ATTN_POST_SYNC_EVENT if is_sync_1f1b else None
     if b_layer is not None:
         with b_context:
-            b_grad = b_layer.combine.backward(b_grad, stream_wait_event=F_ATTN_PRE_B_COMBINE_SYNC_EVENT, stream_record_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
+            b_grad = b_layer.combine.backward(
+                b_grad,
+                stream_wait_event=f_attn_pre_b_combine_sync_event,
+                stream_record_event=b_combine_f_attn_post_sync_event,
+            )
 
-    f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT if is_overlap_step else None
+    f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT if is_sync_1f1b else None
     if f_layer is not None:
         with f_context:
             f_input = f_layer.core_attn.forward(f_input)
-            f_input = f_layer.attn_post.forward(f_input, stream_wait_event=B_COMBINE_F_ATTN_POST_SYNC_EVENT)
-            f_input = f_layer.dispatch.forward(f_input, stream_record_event=f_dispatch_b_mlp_sync_event)
+            f_input = f_layer.attn_post.forward(
+                f_input,
+                stream_wait_event=b_combine_f_attn_post_sync_event,
+            )
+            f_input = f_layer.dispatch.forward(
+                f_input,
+                stream_record_event=f_dispatch_b_mlp_sync_event,
+            )
 
     if b_layer is not None:
         with b_context:
-            b_grad = b_layer.mlp.backward(b_grad, stream_wait_event=f_dispatch_b_mlp_sync_event)
+            b_grad = b_layer.mlp.backward(
+                b_grad,
+                stream_wait_event=f_dispatch_b_mlp_sync_event,
+            )
 
     if b_layer is not None:
         with b_context:
@@ -714,34 +727,34 @@ def schedule_layer_1f1b(
         with f_context:
             f_input = f_layer.mlp.forward(f_input)
 
+    b_attn_post_f_combine_sync_event = B_ATTN_POST_F_COMBINE_SYNC_EVENT if is_sync_1f1b else None
     if b_layer is not None:
         with b_context:
-            b_layer.mlp.dw()
-            b_grad = b_layer.attn_post.backward(b_grad, stream_record_event=B_ATTN_POST_F_COMBINE_SYNC_EVENT)
+            if not block_level_wgrad_compute:
+                b_layer.mlp.dw()
+            b_grad = b_layer.attn_post.backward(
+                b_grad,
+                stream_record_event=b_attn_post_f_combine_sync_event,
+            )
 
-    def next_iter_pre_forward():
-        if f_layer is not None:
-            with f_context:
-                output = f_layer.combine.forward(f_input, stream_wait_event=B_ATTN_POST_F_COMBINE_SYNC_EVENT)
-                return output
+    if f_layer is not None:
+        with f_context:
+            f_input = f_layer.combine.forward(
+                f_input,
+                stream_wait_event=b_attn_post_f_combine_sync_event,
+            )
 
-    def next_iter_pre_backward():
-        if b_layer is not None:
-            with b_context:
-                grad = b_layer.core_attn.backward(b_grad)
-                grad = b_layer.attn_pre.backward(grad)
-                return grad
+    if b_layer is not None:
+        with b_context:
+            b_grad = b_layer.core_attn.backward(b_grad)
+            b_grad = b_layer.attn_pre.backward(b_grad)
 
-    def next_iter_pre_backward_dw():
-        if b_layer is not None:
-            with b_context:
-                b_layer.attn_pre.dw()
-                b_layer.attn_post.dw()
+    if b_layer is not None and not block_level_wgrad_compute and not is_last_layer_in_bwd:
+        with b_context:
+            b_layer.attn_pre.dw()
+            b_layer.attn_post.dw()
 
-    if f_layer and b_layer:
-        return next_iter_pre_forward, next_iter_pre_backward, next_iter_pre_backward_dw
-    else:
-        return next_iter_pre_forward(), next_iter_pre_backward(), next_iter_pre_backward_dw()
+    return f_input, b_grad
 
 
 def schedule_chunk_1f1b(
@@ -754,48 +767,38 @@ def schedule_chunk_1f1b(
     pre_backward=None,
     post_forward=None,
     post_backward=None,
+    block_level_wgrad_compute=False,
 ):
     f_context = f_context if f_context is not None else contextlib.nullcontext()
     b_context = b_context if b_context is not None else contextlib.nullcontext()
 
+    f_input = None
     if f_schedule_plan:
         # pp output send/receive sync
         if pre_forward is not None:
             with f_context:
                 pre_forward()
+                del pre_forward
         f_schedule_plan.record_current_stream()
+        f_input = f_schedule_plan.pre_process.forward()
 
     if b_schedule_plan:
         b_schedule_plan.record_current_stream()
 
-    f_input = None
+        assert grad is not None
+        if b_schedule_plan.post_process is not None:
+            with b_context:
+                grad = b_schedule_plan.post_process.backward(grad)
 
-    def layer_pre_forward():
-        tmp = f_input
-        if f_schedule_plan is not None:
-            tmp = f_schedule_plan.pre_process.forward()
-        return tmp
-
-    def layer_pre_backward():
-        tmp = grad
-        if b_schedule_plan is not None:
-            assert grad is not None
-            if b_schedule_plan.post_process is not None:
+        if pre_backward is not None:
+            # pp grad send receive sync here, safe for now, maybe not safe in the future
+            with torch.cuda.stream(get_com_stream()):
+                b_schedule_plan.wait_current_stream()
                 with b_context:
-                    tmp = b_schedule_plan.post_process.backward(grad)
+                    pre_backward()
+                    del pre_backward
+                b_schedule_plan.record_current_stream()
 
-            if pre_backward is not None:
-                # pp grad send receive sync here, safe for now, maybe not safe in the future
-                with torch.cuda.stream(get_com_stream()):
-                    b_schedule_plan.wait_current_stream()
-                    with b_context:
-                        pre_backward()
-                    b_schedule_plan.record_current_stream()
-
-        return tmp
-
-    def layer_pre_backward_dw():
-        pass
 
     f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
     b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
@@ -805,38 +808,37 @@ def schedule_chunk_1f1b(
         f_layer = f_schedule_plan.get_layer(i)
         b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
         torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
-        layer_pre_forward, layer_pre_backward, layer_pre_backward_dw = schedule_layer_1f1b(
+        f_input, grad = schedule_layer_1f1b(
             f_layer,
             b_layer,
-            pre_forward=layer_pre_forward,
-            pre_backward=layer_pre_backward,
-            pre_backward_dw=layer_pre_backward_dw,
+            f_input=f_input,
+            b_grad=grad,
             f_context=f_context,
             b_context=b_context,
+            is_last_layer_in_bwd=(i == b_num_layers - 1),
+            block_level_wgrad_compute=block_level_wgrad_compute,
         )
         torch.cuda.nvtx.range_pop()
 
-    # tail forward
-    f_input = layer_pre_forward()
-    del layer_pre_forward
-
-    # tail backward
-    grad = layer_pre_backward()
-    del layer_pre_backward
 
     with b_context:
         for i in range(overlaped_layers, b_num_layers):
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
             torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
-            _, grad, _ = schedule_layer_1f1b(None, b_layer, b_grad=grad)
+            _, grad, = schedule_layer_1f1b(
+                None,
+                b_layer,
+                b_grad=grad,
+                is_last_layer_in_bwd=(i == b_num_layers - 1),
+                block_level_wgrad_compute=block_level_wgrad_compute
+            )
             torch.cuda.nvtx.range_pop()
-
 
     with f_context:
         for i in range(overlaped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
             torch.cuda.nvtx.range_push(f"layer_{i}f")
-            f_input, _, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
+            f_input, _ = schedule_layer_1f1b(f_layer, None, f_input=f_input)
             torch.cuda.nvtx.range_pop()
 
     # output pp send receive, overlapped with attn backward
@@ -847,16 +849,21 @@ def schedule_chunk_1f1b(
             with torch.cuda.stream(get_com_stream()):
                 f_schedule_plan.wait_current_stream()
                 post_forward(f_input)
+                del post_forward
 
     # pp grad send / receive, overlapped with attn dw of cur micro-batch and forward attn of next micro-batch
     if b_schedule_plan is not None and post_backward is not None:
         with b_context:
             b_schedule_plan.wait_current_stream()
             post_backward(grad)
+            del post_backward
 
-    # The last wgrad of attention
-    layer_pre_backward_dw()
-    del layer_pre_backward_dw
+    # Delay the last attn_dw in backward pass (attn_dw of the first layer)
+    # for overlapping with the p2p comm
+    if not block_level_wgrad_compute and b_num_layers > 0:
+        with b_context:
+            b_schedule_plan.get_layer(0).attn_pre.dw()
+            b_schedule_plan.get_layer(0).attn_post.dw()
 
     with f_context:
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
@@ -870,7 +877,21 @@ def schedule_chunk_1f1b(
     if b_schedule_plan:
         b_schedule_plan.wait_current_stream()
 
-    return f_input
+    # Release reference as early as possible, this helps avoid memory leak.
+    if b_schedule_plan is not None:
+        b_schedule_plan.release_state()
+
+    if b_num_layers and block_level_wgrad_compute:
+        def chunk_backward_dw():
+            with b_context:
+                for i in range(b_num_layers):
+                    b_layer = b_schedule_plan.get_layer(i)
+                    b_layer.attn_pre.dw()
+                    b_layer.attn_post.dw()
+                    b_layer.mlp.dw()
+        return f_input, chunk_backward_dw
+
+    return f_input, None
 
 
 def build_model_chunk_schedule_plan(
@@ -919,7 +940,6 @@ def build_model_chunk_schedule_plan(
         model_chunk_schedule_plan.add_layer(layer_plan)
     # build post process
     if model.post_process:
-
         model_chunk_schedule_plan.post_process = PostProcessNode(model, state, event, comp_stream)
         model_chunk_schedule_plan.post_process.name = "post_process"
 

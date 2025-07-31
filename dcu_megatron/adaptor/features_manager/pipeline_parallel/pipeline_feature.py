@@ -1,3 +1,5 @@
+import os
+
 from argparse import ArgumentParser
 from megatron.core.utils import is_te_min_version
 
@@ -12,31 +14,43 @@ class PipelineFeature(AbstractFeature):
     def register_args(self, parser: ArgumentParser):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument('--schedule-method', type=str,
-                           default='interleaved_1f1b',
-                           choices=['dualpipev',
-                                    'interleaved_1f1b'])
+                           default='vanilla',
+                           choices=['vanilla', 'dualpipev', 'interleaved_1f1b'],
+                           help='Use pipeline provided by megatron if schedule-method is set to vanilla')
         group.add_argument('--combined-1f1b', action='store_true',
                            help='Batch-level overlapping in 1f1b stage.')
         group.add_argument('--combined-1f1b-recipe', type=str,
                            choices=['ep_a2a', 'golden'],
                            default='golden',
                            help='Options are "ep_a2a" and "golden".')
-        group.add_argument('--split-bw', action='store_true',
+        group.add_argument('--delay-wgrad-compute', action='store_true',
                            help='Split dgrad and wgrad for batch-level overlapping')
 
     def validate_args(self, args):
+        if args.schedule_method == "interleaved_1f1b":
+            assert args.combined_1f1b, "combined-1f1b should be true when using interleaved_1f1b provided by dcu-megatron."
+
         if args.schedule_method == "dualpipev":
             if args.num_layers_per_virtual_pipeline_stage is not None:
                 raise AssertionError(
                     "The dualpipev and virtual_pipeline are incompatible.")
-            if args.num_layers < args.pipeline_model_parallel_size * 2:
-                raise AssertionError(
-                    'number of layers must be at least 2*pipeline_model_parallel_size in dualpipe')
+            # if args.num_layers < args.pipeline_model_parallel_size * 2:
+            #     raise AssertionError(
+            #         'number of layers must be at least 2*pipeline_model_parallel_size in dualpipe')
 
             num_micro_batch = args.global_batch_size // args.micro_batch_size // args.data_parallel_size
             if num_micro_batch < args.pipeline_model_parallel_size:
                 raise AssertionError(
                     "num_micro_batch should NOT be smaller than pipeline_model_parallel_size")
+
+            if not args.delay_wgrad_compute:
+                raise AssertionError("delay-wgrad-compute should be True")
+
+            if not bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))):
+                raise AssertionError("NVTE_OVERLAP_GRAD_REDUCE should be set to 1")
+
+            if not is_te_min_version("2.4.0"):
+                raise AssertionError("Must have at least transformer-engine version of 2.4.0")
 
         if args.combined_1f1b:
             assert args.transformer_impl == "transformer_engine", \
@@ -45,8 +59,8 @@ class PipelineFeature(AbstractFeature):
                 'moe a2a overlap is only supported with vpp or dualpipev'
 
     def register_patches(self, patch_manager, args):
-        if args.schedule_method == "interleaved_1f1b" and not args.combined_1f1b:
-            args.schedule_method = None
+        if args.schedule_method == "vanilla":
+            return
 
         if args.schedule_method == "dualpipev":
             from megatron.training.utils import print_rank_0
@@ -106,92 +120,107 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
                                         forward_backward_pipelining_with_interleaving)
 
-        if args.combined_1f1b:
-            from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TERowParallelLinear
+        
+        from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TERowParallelLinear
 
-            from dcu_megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
-            from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
-            from dcu_megatron.core.models.gpt.gpt_model import GPTModel
-            from dcu_megatron.core.extensions.transformer_engine import (
-                _get_extra_te_kwargs_wrapper,
-                TELinear,
-                TELayerNormColumnParallelLinear,
-            )
-            from dcu_megatron.core.transformer.multi_latent_attention import MLASelfAttention
-            from dcu_megatron.core.transformer.attention import SelfAttention
-            from dcu_megatron.core.transformer.mlp import MLP
-            from dcu_megatron.core.transformer.moe.experts import GroupedMLP, TEGroupedMLP, SequentialMLP
-            from dcu_megatron.core.transformer.moe.moe_layer import MoELayer
+        from dcu_megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
+        from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
+        from dcu_megatron.core.transformer.transformer_block import TransformerBlock
+        from dcu_megatron.core.models.gpt.gpt_model import GPTModel
+        from dcu_megatron.core.extensions.transformer_engine import (
+            _get_extra_te_kwargs_wrapper,
+            TELinear,
+            TELayerNormColumnParallelLinear,
+        )
+        from dcu_megatron.core.transformer.multi_latent_attention import MLASelfAttention
+        from dcu_megatron.core.transformer.attention import SelfAttention
+        from dcu_megatron.core.transformer.mlp import MLP
+        from dcu_megatron.core.transformer.moe.experts import GroupedMLP, TEGroupedMLP, SequentialMLP
+        from dcu_megatron.core.transformer.moe.moe_layer import MoELayer
+        from dcu_megatron.core.distributed.data_parallel_base import _BaseDataParallel
+        from dcu_megatron.core.transformer.module import Float16Module
 
-            patch_manager.register_patch('megatron.core.transformer.moe.token_dispatcher.MoEAlltoAllTokenDispatcher',
-                                        MoEAlltoAllTokenDispatcher)
+        patch_manager.register_patch('megatron.core.transformer.moe.token_dispatcher.MoEAlltoAllTokenDispatcher',
+                                    MoEAlltoAllTokenDispatcher)
 
-            patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer',
-                                        TransformerLayer)
+        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer',
+                                    TransformerLayer)
 
-            patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
-                                        GPTModel.build_schedule_plan,
-                                        create_dummy=True)
+        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
+                                    GPTModel.build_schedule_plan,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.backward_dw',
+                                    GPTModel.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.distributed.data_parallel_base._BaseDataParallel.backward_dw',
+                                    _BaseDataParallel.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.module.Float16Module.backward_dw',
+                                    Float16Module.backward_dw,
+                                    create_dummy=True)
 
-            # backward_dw
-            patch_manager.register_patch('megatron.core.extensions.transformer_engine._get_extra_te_kwargs',
-                                        _get_extra_te_kwargs_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('megatron.core.extensions.transformer_engine.TELinear',
-                                        TELinear)
-            patch_manager.register_patch('megatron.core.extensions.transformer_engine.TELayerNormColumnParallelLinear',
-                                        TELayerNormColumnParallelLinear)
-            TEColumnParallelLinear.__bases__ = (TELinear,)
-            TERowParallelLinear.__bases__ = (TELinear,)
+        # backward_dw
+        patch_manager.register_patch('megatron.core.extensions.transformer_engine._get_extra_te_kwargs',
+                                    _get_extra_te_kwargs_wrapper,
+                                    apply_wrapper=True)
+        patch_manager.register_patch('megatron.core.extensions.transformer_engine.TELinear',
+                                    TELinear)
+        patch_manager.register_patch('megatron.core.extensions.transformer_engine.TELayerNormColumnParallelLinear',
+                                    TELayerNormColumnParallelLinear)
+        TEColumnParallelLinear.__bases__ = (TELinear,)
+        TERowParallelLinear.__bases__ = (TELinear,)
 
-            if is_te_min_version("1.9.0.dev0"):
-                from megatron.core.extensions.transformer_engine import TEColumnParallelGroupedLinear, TERowParallelGroupedLinear
-                from dcu_megatron.core.extensions.transformer_engine import TEGroupedLinear
+        if is_te_min_version("1.9.0.dev0"):
+            from megatron.core.extensions.transformer_engine import TEColumnParallelGroupedLinear, TERowParallelGroupedLinear
+            from dcu_megatron.core.extensions.transformer_engine import TEGroupedLinear
 
-                patch_manager.register_patch('megatron.core.extensions.transformer_engine.TEGroupedLinear',
-                                             TEGroupedLinear)
-                TEColumnParallelGroupedLinear.__bases__ = (TEGroupedLinear,)
-                TERowParallelGroupedLinear.__bases__ = (TEGroupedLinear,)
+            patch_manager.register_patch('megatron.core.extensions.transformer_engine.TEGroupedLinear',
+                                         TEGroupedLinear)
+            TEColumnParallelGroupedLinear.__bases__ = (TEGroupedLinear,)
+            TERowParallelGroupedLinear.__bases__ = (TEGroupedLinear,)
 
-            patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
-                                        MLASelfAttention.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_qkv',
-                                        SelfAttention.compute_qkv,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_attn',
-                                        SelfAttention.compute_attn,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_proj',
-                                        SelfAttention.compute_proj,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_dw',
-                                        SelfAttention.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_qkv_dw',
-                                        SelfAttention.backward_qkv_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_proj_dw',
-                                        SelfAttention.backward_proj_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
-                                        MLP.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.backward_dw',
-                                        GroupedMLP.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.backward_dw',
-                                        TEGroupedMLP.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.moe.experts.SequentialMLP.backward_dw',
-                                        SequentialMLP.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_dw',
-                                        MoELayer.backward_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_shared_expert_dw',
-                                        MoELayer.backward_shared_expert_dw,
-                                        create_dummy=True)
-            patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_routed_expert_dw',
-                                        MoELayer.backward_routed_expert_dw,
-                                        create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
+                                    MLASelfAttention.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_qkv',
+                                    SelfAttention.compute_qkv,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_attn',
+                                    SelfAttention.compute_attn,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_proj',
+                                    SelfAttention.compute_proj,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_dw',
+                                    SelfAttention.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_qkv_dw',
+                                    SelfAttention.backward_qkv_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.backward_proj_dw',
+                                    SelfAttention.backward_proj_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
+                                    MLP.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.backward_dw',
+                                    GroupedMLP.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.backward_dw',
+                                    TEGroupedMLP.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.experts.SequentialMLP.backward_dw',
+                                    SequentialMLP.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.backward_dw',
+                                    TransformerBlock.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_dw',
+                                    MoELayer.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_shared_expert_dw',
+                                    MoELayer.backward_shared_expert_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_routed_expert_dw',
+                                    MoELayer.backward_routed_expert_dw,
+                                    create_dummy=True)

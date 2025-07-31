@@ -1,7 +1,6 @@
 import contextlib
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from typing import List, Union
+from contextlib import contextmanager, nullcontext
 
 import torch
 from torch import Tensor
@@ -9,12 +8,20 @@ from torch.autograd.variable import Variable
 
 from megatron.training import get_args
 from megatron.core import parallel_state
-from megatron.core.distributed import DistributedDataParallel
-
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
+
+try:
+    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
+    from megatron.legacy.model import Float16Module as LegacyFloat16Module
+
+    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, custom_FSDP, Float16Module, torch_FSDP, LegacyFloat16Module)
+except ImportError:
+    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, custom_FSDP, Float16Module)
 
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
 
@@ -78,6 +85,7 @@ class ScheduleNode:
 
         if not isinstance(inputs, tuple):
             inputs = (inputs,)
+
         return self._forward(
                 *inputs,
                 stream_wait_event=stream_wait_event,
@@ -127,6 +135,7 @@ class ScheduleNode:
         """schedule node backward"""
         if not isinstance(output_grad, tuple):
             output_grad = (output_grad,)
+
         return self._backward(
                 *output_grad,
                 stream_wait_event=stream_wait_event,
@@ -181,7 +190,6 @@ class ScheduleNode:
         del self.backward_func
 
 
-
 class AbstractSchedulePlan(ABC):
     """to use combined 1f1b, model must implement build_schedule_plan while take the same
     signature as model forward but return an instance of AbstractSchedulePlan"""
@@ -214,6 +222,7 @@ def schedule_chunk_1f1b(
     pre_backward=None,
     post_forward=None,
     post_backward=None,
+    block_level_wgrad_compute=False,
 ):
     """model level 1f1b fine-grained schedule"""
     return type(f_schedule_plan or b_schedule_plan).forward_backward(
@@ -226,6 +235,7 @@ def schedule_chunk_1f1b(
         pre_backward=pre_backward,
         post_forward=post_forward,
         post_backward=post_backward,
+        block_level_wgrad_compute=block_level_wgrad_compute,
     )
 
 
@@ -243,7 +253,7 @@ def set_streams(comp_stream=None, com_stream=None):
     if comp_stream is None:
         comp_stream = torch.cuda.current_stream()
     if com_stream is None:
-        com_stream = torch.cuda.Stream(device="cuda", priority=0)
+        com_stream = torch.cuda.Stream(device=torch.cuda.current_device(), priority=0)
 
     assert _COMP_STREAM is None
     assert _COM_STREAM is None
@@ -301,6 +311,7 @@ def forward_backward_step(
     is_first_microbatch=False,
     current_microbatch=None,
     encoder_decoder_xattn=False,
+    block_level_wgrad_compute=False,
 ):
     """Forward step for passed-in model.
 
@@ -363,6 +374,8 @@ def forward_backward_step(
             Whether it is the first microbatch. Defaults to False.
         current_microbatch (int, optional):
             The current microbatch. Defaults to None.
+        block_level_wgrad_compute (bool, optional):
+            Delay the wgrad compute for batch-level overlapping
 
     Returns:
         Tensor or list[Tensor]: The output object(s) from the forward step.
@@ -436,7 +449,7 @@ def forward_backward_step(
     grad = b_output_tensor_grad[0] if b_model else None
     with context_manager:
         # schedule forward and backward
-        output_tensor = schedule_chunk_1f1b(
+        output_tensor, chunk_backward_dw_func = schedule_chunk_1f1b(
             f_schedule_plan,
             b_schedule_plan,
             grad,
@@ -446,6 +459,7 @@ def forward_backward_step(
             pre_backward=pre_backward,
             post_forward=post_forward,
             post_backward=post_backward,
+            block_level_wgrad_compute=block_level_wgrad_compute,
         )
 
     # forward post process
@@ -541,21 +555,11 @@ def forward_backward_step(
         if unwrap_input_tensor_grad:
             input_tensor_grad = input_tensor_grad[0]
 
-    return output_tensor, num_tokens, input_tensor_grad
-
-def get_default_cls_for_unwrap():
-    cls = (DistributedDataParallel, Float16Module)
-    try:
-        # legacy should not be used in core, but for backward compatibility, we support it here
-        from megatron.legacy.model import Float16Module as LegacyFloat16Module
-        cls = cls + (LegacyFloat16Module,)
-    except:
-        pass
-    return cls
+    return output_tensor, num_tokens, input_tensor_grad, chunk_backward_dw_func
 
 
-def unwrap_model(model, module_instances=get_default_cls_for_unwrap()):
-    """unwrap_model DistributedDataParallel and Float16Module wrapped model"""
+def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
+    """Unwrap_model to return the final model instance"""
     return_list = True
     if not isinstance(model, list):
         model = [model]

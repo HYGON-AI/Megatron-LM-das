@@ -293,3 +293,6 @@ class GPTModel:
             inference_params=inference_params,
             loss_mask=loss_mask,
         )
+
+    def backward_dw(self):
+        self.decoder.backward_dw()

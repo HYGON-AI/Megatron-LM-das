@@ -572,7 +572,7 @@ def forward_backward_pipelining_with_interleaving(
                 b_output_tensor = output_tensors[model_chunk_id].pop(0)
                 b_output_tensor_grad = output_tensor_grads[model_chunk_id].pop(0)
 
-        output_tensor, num_tokens, input_tensor_grad = forward_backward_step(
+        output_tensor, num_tokens, input_tensor_grad, _ = forward_backward_step(
             forward_step_func,
             data_iterator[f_model_chunk_id] if f_model_chunk_id is not None else None,
             model[f_model_chunk_id] if f_model_chunk_id is not None else None,
