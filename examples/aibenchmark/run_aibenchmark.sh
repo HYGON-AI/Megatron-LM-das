@@ -10,8 +10,8 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
 # Those variables need to modify
 DTK_ENV=""                                                               # where env.sh of dtk
-DATA_PATH=""                                                             # path to mmap_deepseekv3_datasets_text_document
-TOKENIZER_MODEL_PATH=""                                                  # path to config.json and tokenizer.json
+DATA_PATH=""                                                             # path to redpajama_text_document
+TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
 CHECKPOINT_PATH=""                                                       # path to ckpt
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
@@ -22,7 +22,7 @@ GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
 HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
 PORT="25900"
 
-# Runs DeepseekV3 671B model
+# Runs aibenchmark model
 source ${NCCL_ENV}
 mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
@@ -31,7 +31,7 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_deepseekv3_671B_$((${GPUS} / 8))nodes.sh \
+                    ./train_aibenchmark_$((${GPUS} / 8))nodes.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \

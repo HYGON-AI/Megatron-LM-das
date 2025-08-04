@@ -113,15 +113,14 @@ def unpermute(
 
 分为2种，git方式或离线方式
 
-1. git方式下载
+1、git方式下载
 
-1.1 使用git clone下载项目后
+```shell
+git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/dcu_megatron.git 或
+git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99//dcutoolkit/deeplearing/dcu_megatron.git
+```
 
-1.2 cd Megatron-LM
-
-1.3 git submodule update --init --recursive
-
-2. 离线下载
+2、离线下载
 
 2.1 离线下载该仓库的离线代码包
 
@@ -140,5 +139,14 @@ examples/
 ├── llama
 ├── mixtral
 └── qwen
+```
+
+### 节点筛查(此次检查是基于GPT-MOE 567B模型单机参数)
+
+```shell
+1、到check_nodes目录下，将要筛查的节点写入clushnode文件
+2、bash clush.sh，检查环境基本情况，如显存、内存等是否已释放
+3、打开check_nodes.sh，将基本环境变量补齐或做相应修改
+4、bash run_check.sh 1/4，进行单机或者四机的节点筛查 # 当前只支持单机和四机筛查
 ```
 

@@ -23,6 +23,7 @@ HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
 PORT="25900"
 
 # Runs GPT 567B model
+source ${NCCL_ENV}
 mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
                     --bind-to none \

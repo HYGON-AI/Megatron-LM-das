@@ -10,19 +10,19 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
 # Those variables need to modify
 DTK_ENV=""                                                               # where env.sh of dtk
-DATA_PATH=""                                                             # path to mmap_deepseekv3_datasets_text_document
-TOKENIZER_MODEL_PATH=""                                                  # path to config.json and tokenizer.json
+DATA_PATH=""                                                             # path to redpajama_text_document
+TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
 CHECKPOINT_PATH=""                                                       # path to ckpt
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
 # Those variables no need to modify
-HOSTFILE="hostfile_$(basename "$0" | sed -E 's/^run_(.+)\.sh$/\1/')"
+HOSTFILE=${1}
 GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
 HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
 PORT="25900"
 
-# Runs DeepseekV3 671B model
+# Runs GPT 567B model
 source ${NCCL_ENV}
 mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
@@ -31,13 +31,13 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_deepseekv3_671B_$((${GPUS} / 8))nodes.sh \
+                    ../examples/gpt3/train_gpt_567B_$((${GPUS} / 8))nodes.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \
                     --tokenizer_path=$TOKENIZER_MODEL_PATH \
                     --checkpoint_path=$CHECKPOINT_PATH \
                     --launch_with_binding=${LAUNCH_WITH_BINDING} \
-                    --profiling=$profiling" > log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log 2>&1
+                    --profiling=$profiling"
 
 wait
