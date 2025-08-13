@@ -152,14 +152,15 @@ class CoreAdaptation(MegatronAdaptationABC):
         pass
 
     def patch_core_models(self):
-        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_forward
+        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_postprocess
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
                                     gpt_model_init_wrapper,
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
-                                    gpt_model_forward)
+        # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',
+                                    gpt_model_postprocess)
 
     def patch_core_transformers(self):
         from ..core import transformer_block_init_wrapper
@@ -288,14 +289,15 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         all_to_all)
 
     def patch_training(self):
-        from ..training.tokenizer import build_tokenizer
+        from ..training.tokenizer import build_tokenizer_wrapper
         from ..training.initialize import _initialize_distributed
         from ..training.initialize import _compile_dependencies
         from ..training.training import train
         from ..training.initialize import _set_random_seed
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
-                                    build_tokenizer)
+                                    build_tokenizer_wrapper,
+                                    apply_wrapper=True)
         # specify init_method
         MegatronAdaptation.register('megatron.training.initialize._initialize_distributed',
                                     _initialize_distributed)

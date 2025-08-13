@@ -3,10 +3,12 @@ import random
 import time
 import numpy as np
 import torch
+import warnings
 
 from datetime import timedelta
 
 from megatron.training import get_args
+from megatron.training import inprocess_restart
 from megatron.core import mpu, tensor_parallel
 
 
@@ -76,7 +78,7 @@ def _compile_dependencies():
         )
 
 
-def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
+def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, store):
     """Initialize torch.distributed and core model parallel."""
     args = get_args()
 
@@ -109,6 +111,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
         # Call the init process
         init_process_group_kwargs = {
             'backend': args.distributed_backend,
+            'store': store,
             'world_size': args.world_size,
             'rank': args.rank,
             'init_method': args.dist_url,
@@ -116,6 +119,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
         }
 
         torch.distributed.init_process_group(**init_process_group_kwargs)
+        inprocess_restart.maybe_force_nccl_backend_init(device_id)
 
     # Set the tensor model-parallel, pipeline model-parallel, and
     # data-parallel communicators.
@@ -123,12 +127,28 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
         if mpu.model_parallel_is_initialized():
             print("model parallel is already initialized")
         else:
+            # Deprecation warning for encoder pipeline parallelism
+            if args.encoder_pipeline_model_parallel_size > 0 or args.encoder_tensor_model_parallel_size > 0:
+                warnings.warn(
+                    "Encoder-specific pipeline parallelism functionality is deprecated and will be removed in core_r0.14.0. "
+                    "This includes the parameters 'encoder_tensor_model_parallel_size' and 'encoder_pipeline_model_parallel_size', "
+                    "as well as all associated encoder pipeline parallel logic and infrastructure. "
+                    "This functionality is being replaced by the new 'orthotope' parallelism management system, which provides "
+                    "a more general and flexible approach to handling complex parallelism configurations including encoder-decoder models. "
+                    "Please refrain from building new features or dependencies on encoder pipeline parallelism as this entire "
+                    "capability will not be supported in future releases. For migration guidance and information on the orthotope "
+                    "system, please refer to the Megatron-LM documentation.",
+                    DeprecationWarning,
+                    stacklevel=2
+                )
+
             mpu.initialize_model_parallel(
                 args.tensor_model_parallel_size,
                 args.pipeline_model_parallel_size,
                 args.virtual_pipeline_model_parallel_size,
                 args.pipeline_model_parallel_split_rank,
                 pipeline_model_parallel_comm_backend=args.pipeline_model_parallel_comm_backend,
+                use_sharp=args.use_sharp,
                 context_parallel_size=args.context_parallel_size,
                 hierarchical_context_parallel_sizes=args.hierarchical_context_parallel_sizes,
                 expert_model_parallel_size=args.expert_model_parallel_size,
@@ -142,6 +162,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
                 get_embedding_ranks=get_embedding_ranks,
                 get_position_embedding_ranks=get_position_embedding_ranks,
                 create_gloo_process_groups=args.enable_gloo_process_groups,
+                high_priority_stream_groups=args.high_priority_stream_groups,
             )
             if args.rank == 0:
                 print(

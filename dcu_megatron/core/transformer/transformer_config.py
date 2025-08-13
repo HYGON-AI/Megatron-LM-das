@@ -24,14 +24,7 @@ def transformer_config_post_init_wrapper(post_init_func):
 
         args = get_args()
         fields = []
-        # TE will get an unexpected keyword argument 'delay_wgrad_compute' if delay_wgrad_compute = True
-        exclude_keys = {
-            "delay_wgrad_compute"
-        }
         for key, value in vars(args).items():
-            if key in exclude_keys:
-                continue
-
             field_name = str(key)
             field_type = type(value)
             if not hasattr(self, key):
@@ -40,9 +33,6 @@ def transformer_config_post_init_wrapper(post_init_func):
         self.__class__ = make_dataclass(self.__class__.__name__, fields=fields, bases=(self.__class__,))
 
         for key, value in vars(args).items():
-            if key in exclude_keys:
-                continue
-
             if not hasattr(self, key):
                 setattr(self, key, value)
 

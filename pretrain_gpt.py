@@ -131,9 +131,6 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         )
         print_rank_0(model)
 
-    torch_comm_cu_nums = int(os.environ.get("TORCH_COMM_CU_NUMS", "0"))
-    print_rank_0(f"torch_comm_cu_nums: {torch_comm_cu_nums}")
-
     return model
 
 

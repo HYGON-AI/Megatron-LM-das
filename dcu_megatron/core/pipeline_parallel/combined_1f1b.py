@@ -381,6 +381,11 @@ def forward_backward_step(
         Tensor or list[Tensor]: The output object(s) from the forward step.
         Tensor: The number of tokens.
     """
+
+    assert (
+        checkpoint_activations_microbatch is None
+    ), "checkpoint_activations_microbatch is not supported for combined_1f1b"
+
     from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 
     if config.timers is not None:
@@ -393,12 +398,14 @@ def forward_backward_step(
 
     # forward preprocess
     unwrap_output_tensor = False
+    f_schedule_plan = None
     if f_model is not None:
         with f_context:
             if is_first_microbatch and hasattr(f_model, 'set_is_first_microbatch'):
                 f_model.set_is_first_microbatch()
             if current_microbatch is not None:
                 set_current_microbatch(f_model, current_microbatch)
+
             if not isinstance(input_tensor, list):
                 input_tensor = [input_tensor]
                 unwrap_output_tensor = True
@@ -407,14 +414,9 @@ def forward_backward_step(
             set_input_tensor(input_tensor)
 
             with context_manager:
-                if checkpoint_activations_microbatch is None:
-                    output_tensor, loss_func = forward_step_func(data_iterator, f_model)
-                else:
-                    output_tensor, loss_func = forward_step_func(
-                        data_iterator, f_model, checkpoint_activations_microbatch
-                    )
+                f_schedule_plan, loss_func = forward_step_func(data_iterator, f_model)
                 assert isinstance(
-                    output_tensor, AbstractSchedulePlan
+                    f_schedule_plan, AbstractSchedulePlan
                 ), "first output of forward_step_func must be one instance of AbstractSchedulePlan"
 
     # backward preprocess
@@ -425,6 +427,7 @@ def forward_backward_step(
         if not isinstance(b_input_tensor, list):
             b_input_tensor = [b_input_tensor]
             unwrap_input_tensor_grad = True
+
         for x in b_input_tensor:
             if x is not None:
                 x.retain_grad()
@@ -445,9 +448,16 @@ def forward_backward_step(
             torch.autograd.backward(b_output_tensor[0], grad_tensors=b_output_tensor_grad[0])
             b_output_tensor_grad[0] = loss_node.get_grad()
 
-    f_schedule_plan = output_tensor if f_model else None
+    # If fp8_recipe is delayed, wrap the entire pass with get_fp8_context(),
+    # otherwise do nothing extra at the outer level
+    # if we are using other fp8 recipes, then the context manager enter&exit are free
+    # we can wrap fp8_context within the for loop over layers, so that we can fine-grained
+    # control which layer will be fp8 or bf16
+    use_outer_fp8_context = config.fp8 and config.fp8_recipe == Fp8Recipe.delayed
+    outer_fp8_context = get_fp8_context(config) if use_outer_fp8_context else nullcontext()
+
     grad = b_output_tensor_grad[0] if b_model else None
-    with context_manager:
+    with context_manager and outer_fp8_context:
         # schedule forward and backward
         output_tensor, chunk_backward_dw_func = schedule_chunk_1f1b(
             f_schedule_plan,
@@ -466,13 +476,20 @@ def forward_backward_step(
     num_tokens = None
     if f_model:
         with f_context:
+            vp_stage = f_context.vpp_rank if hasattr(f_context, 'vpp_rank') else None
+            model_vp_stage = getattr(f_model, "vp_stage", None)
+            if vp_stage is not None and model_vp_stage is not None:
+                assert (
+                    vp_stage == model_vp_stage
+                ), f"vp_stage ({vp_stage}) doesn't match model_vp_stage ({model_vp_stage})"
+
             num_tokens = torch.tensor(0, dtype=torch.int)
             args = get_args()
             is_last_stage = False
             if args.schedule_method == "dualpipev":
                 is_last_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
             else:
-                is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False)
+                is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
             if is_last_stage:
                 if not collect_non_loss_data:
                     loss_node = ScheduleNode(
@@ -487,7 +504,6 @@ def forward_backward_step(
                         output_tensor, num_tokens, loss_reduced = outputs
                         if not config.calculate_per_token_loss:
                             output_tensor /= num_tokens
-                            output_tensor *= parallel_state.get_context_parallel_world_size()
                             output_tensor /= num_microbatches
                     else:
                         # preserve legacy loss averaging behavior (ie, over the number of microbatches)

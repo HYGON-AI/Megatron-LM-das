@@ -14,9 +14,13 @@ from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.transformer_layer import TransformerLayer as MegatronCoreTransformerLayer
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.utils import (
+    nvtx_range_pop,
+    nvtx_range_push,
+)
 
 
-def get_transformer_layer_offset(config: TransformerConfig):
+def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
     args = get_args()
     pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
@@ -68,75 +72,30 @@ def get_transformer_layer_offset(config: TransformerConfig):
                 - num_layers_in_last_pipeline_stage
             )
 
-            if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
-                vp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
-                vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
-
-                # Calculate number of layers in each virtual model chunk
-                # If the num_layers_in_first_pipeline_stage and
-                # num_layers_in_last_pipeline_stage are not set, all pipeline stages
-                # will be treated as middle pipeline stages in the calculation
-                num_layers_per_virtual_model_chunk_in_first_pipeline_stage = (
-                    0
-                    if config.num_layers_in_first_pipeline_stage is None
-                    else config.num_layers_in_first_pipeline_stage // vp_size
-                )
-
-                num_layers_per_virtual_model_chunk_in_last_pipeline_stage = (
-                    0
-                    if config.num_layers_in_last_pipeline_stage is None
-                    else config.num_layers_in_last_pipeline_stage // vp_size
-                )
-
-                num_layers_per_vritual_model_chunk_in_middle_pipeline_stage = (
-                    middle_num_layers // vp_size
-                )
-
-                # First stage + middle stage + last stage
-                total_virtual_chunks = (
-                    num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                    + num_layers_per_vritual_model_chunk_in_middle_pipeline_stage
-                    + num_layers_per_virtual_model_chunk_in_last_pipeline_stage
-                )
-
-                # Calculate the layer offset with interleaved uneven pipeline parallelism
-                if pipeline_rank == 0:
-                    offset = vp_rank * total_virtual_chunks
-                else:
-                    offset = (
-                        vp_rank * total_virtual_chunks
-                        + num_layers_per_virtual_model_chunk_in_first_pipeline_stage
-                        + (pipeline_rank - 1)
-                        * (
-                            num_layers_per_vritual_model_chunk_in_middle_pipeline_stage
-                            // middle_pipeline_stages
-                        )
-                    )
+            if middle_pipeline_stages > 0:
+                num_layers_per_pipeline_rank = middle_num_layers // middle_pipeline_stages
             else:
-                if middle_pipeline_stages > 0:
-                    num_layers_per_pipeline_rank = middle_num_layers // middle_pipeline_stages
-                else:
-                    num_layers_per_pipeline_rank = 0
+                num_layers_per_pipeline_rank = 0
 
+            middle_pipeline_rank = (
+                pipeline_rank
+                if config.num_layers_in_first_pipeline_stage is None
+                else pipeline_rank - 1
+            )
+
+            if not getattr(args, 'dualpipev_first_chunk', True):
                 middle_pipeline_rank = (
-                    pipeline_rank
+                    config.pipeline_model_parallel_size
                     if config.num_layers_in_first_pipeline_stage is None
-                    else pipeline_rank - 1
-                )
+                    else config.pipeline_model_parallel_size - 1
+                ) + (config.pipeline_model_parallel_size - (pipeline_rank + 1))
 
-                if not getattr(args, 'dualpipev_first_chunk', True):
-                    middle_pipeline_rank = (
-                        config.pipeline_model_parallel_size
-                        if config.num_layers_in_first_pipeline_stage is None
-                        else config.pipeline_model_parallel_size - 1
-                    ) + (config.pipeline_model_parallel_size - (pipeline_rank + 1))
-
-                if getattr(args, 'dualpipev_first_chunk', True) and pipeline_rank == 0:
-                        offset = 0
-                else:
-                    offset = (
-                        middle_pipeline_rank * num_layers_per_pipeline_rank
-                    ) + num_layers_in_first_pipeline_stage
+            if getattr(args, 'dualpipev_first_chunk', True) and pipeline_rank == 0:
+                    offset = 0
+            else:
+                offset = (
+                    middle_pipeline_rank * num_layers_per_pipeline_rank
+                ) + num_layers_in_first_pipeline_stage
         else:
             num_layers = config.num_layers
 
@@ -152,34 +111,17 @@ def get_transformer_layer_offset(config: TransformerConfig):
             if args.schedule_method == 'dualpipev':
                 num_layers_per_pipeline_rank = num_layers_per_pipeline_rank // 2
 
-            if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
-                vp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
-                vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
-
-                num_layers_per_virtual_rank = num_layers_per_pipeline_rank // vp_size
-                total_virtual_chunks = num_layers // vp_size
-                offset = vp_rank * total_virtual_chunks + (
-                    pipeline_rank * num_layers_per_virtual_rank
-                )
-
-                # Reduce the offset of embedding layer from the total layer number
-                if (
-                    config.account_for_embedding_in_pipeline_split
-                    and not parallel_state.is_pipeline_first_stage()
-                ):
-                    offset -= 1
+            if getattr(args, 'dualpipev_first_chunk', True):
+                offset = pipeline_rank * num_layers_per_pipeline_rank
             else:
-                if getattr(args, 'dualpipev_first_chunk', True):
-                    offset = pipeline_rank * num_layers_per_pipeline_rank
-                else:
-                    offset = num_layers - (pipeline_rank + 1) * num_layers_per_pipeline_rank
+                offset = num_layers - (pipeline_rank + 1) * num_layers_per_pipeline_rank
 
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split:
-                    if not parallel_state.is_pipeline_first_stage():
-                        offset -= 1
-                    elif not getattr(args, 'dualpipev_first_chunk', True):
-                        offset -= 1
+            # Reduce the offset of embedding layer from the total layer number
+            if config.account_for_embedding_in_pipeline_split:
+                if not parallel_state.is_pipeline_first_stage():
+                    offset -= 1
+                elif not getattr(args, 'dualpipev_first_chunk', True):
+                    offset -= 1
     else:
         offset = 0
     return offset
@@ -189,9 +131,9 @@ class TransformerLayer(MegatronCoreTransformerLayer):
     def forward(
         self,
         hidden_states: Tensor,
+        attention_mask: Optional[Tensor] = None,
         context: Optional[Tensor] = None,
         context_mask: Optional[Tensor] = None,
-        attention_mask: Optional[Tensor] = None,
         rotary_pos_emb: Optional[Tensor] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
@@ -209,9 +151,9 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         ):
             return super().forward(
                     hidden_states=hidden_states,
+                    attention_mask=attention_mask,
                     context=context,
                     context_mask=context_mask,
-                    attention_mask=attention_mask,
                     rotary_pos_emb=rotary_pos_emb,
                     rotary_pos_cos=rotary_pos_cos,
                     rotary_pos_sin=rotary_pos_sin,
@@ -225,9 +167,8 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         (
             hidden_states,
             pre_mlp_layernorm_output,
-            tokens_per_expert,
             permutated_local_input_tokens,
-            _,
+            probs,
         ) = self._submodule_attention_router_compound_forward(
             hidden_states,
             attention_mask,
@@ -241,18 +182,18 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             inference_params=inference_params,
         )
 
-        (tokens_per_expert, global_input_tokens) = self._submodule_dispatch_forward(
-            tokens_per_expert,
+        dispatched_input, probs = self._submodule_dispatch_forward(
             permutated_local_input_tokens,
+            probs，
         )
 
-        (expert_output, shared_expert_output, mlp_bias) = self._submodule_moe_forward(
-            tokens_per_expert,
-            global_input_tokens,
+        expert_output, shared_expert_output, mlp_bias = self._submodule_moe_forward(
+            dispatched_input,
+            probs,
             pre_mlp_layernorm_output
         )
 
-        expert_output = self._submodule_combine_forward(expert_output)[0]
+        expert_output = self._submodule_combine_forward(expert_output)
 
         output = self._submodule_post_combine_forward(
             expert_output,
@@ -293,6 +234,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
+        nvtx_range_push(suffix="self_attention")
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
@@ -304,6 +246,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+        nvtx_range_pop(suffix="self_attention")
 
         if self.recompute_input_layernorm:
             # discard the output of the input layernorm and register the recompute
@@ -314,10 +257,12 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
+        nvtx_range_push(suffix="self_attn_bda")
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
+        nvtx_range_pop(suffix="self_attn_bda")
 
         return hidden_states
 
@@ -395,10 +340,12 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
+        nvtx_range_push(suffix="self_attn_bda")
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
+        nvtx_range_pop(suffix="self_attn_bda")
 
         return hidden_states
 
@@ -424,17 +371,12 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         else:
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
-        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
-        tokens_per_expert, permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(
-            pre_mlp_layernorm_output, probs, routing_map
-        )
-
+        permutated_local_input_tokens, probs, pre_mlp_layernorm_output = self.mlp.router_and_preprocess(pre_mlp_layernorm_output)
         outputs = [
-            hidden_states,
-            pre_mlp_layernorm_output,
-            tokens_per_expert,
+            hidden_states，
             permutated_local_input_tokens,
             probs,
+            pre_mlp_layernorm_output,
         ]
         return tuple(outputs)
 
@@ -442,17 +384,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         self,
         pre_mlp_layernorm_output
     ):
-        probs, routing_map = self.mlp.router(pre_mlp_layernorm_output)
-
-        tokens_per_expert, permutated_local_input_tokens = self.mlp.token_dispatcher.dispatch_preprocess(
-            pre_mlp_layernorm_output, probs, routing_map
-        )
-
-        outputs = [
-            tokens_per_expert,
-            permutated_local_input_tokens,
-            probs
-        ]
+        permutated_local_input_tokens, probs, pre_mlp_layernorm_output = self.mlp.router_and_preprocess(pre_mlp_layernorm_output)
 
         return tuple(outputs)
 
@@ -496,15 +428,14 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         (
-            tokens_per_expert,
             permutated_local_input_tokens,
-            probs
+            probs,
+            pre_mlp_layernorm_output,
         ) = self._submodule_router_forward(pre_mlp_layernorm_output)
 
         outputs = [
             hidden_states,
             pre_mlp_layernorm_output,
-            tokens_per_expert,
             permutated_local_input_tokens,
             probs,
         ]
@@ -549,9 +480,7 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         else:
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
-        shared_expert_output = None
-        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self._submodule_shared_expert_forward(pre_mlp_layernorm_output)
+        shared_expert_output = self._submodule_shared_expert_forward(pre_mlp_layernorm_output)
 
         outputs = [
             hidden_states,
@@ -580,7 +509,6 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         (
             hidden_states,
             pre_mlp_layernorm_output,
-            tokens_per_expert,
             permutated_local_input_tokens,
             probs,
         ) = self._submodule_attention_router_compound_forward(
@@ -596,14 +524,11 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             inference_params=inference_params,
         )
 
-        shared_expert_output = None
-        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
+        shared_expert_output = self._submodule_shared_expert_forward(pre_mlp_layernorm_output)
 
         outputs = [
             hidden_states,
             shared_expert_output,
-            tokens_per_expert,
             permutated_local_input_tokens,
             probs,
         ]
@@ -618,24 +543,20 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         Performs a combined forward pass that includes self-attention, MLP routing and shared-experts logic.
         """
         (
-            hidden_states,
-            pre_mlp_layernorm_output,
-            tokens_per_expert,
+            hidden_states，
             permutated_local_input_tokens,
             probs,
+            pre_mlp_layernorm_output,
         ) = self._submodule_attention_postprocess_router_compound_forward(
             residual,
             core_attn_out,
         )
 
-        shared_expert_output = None
-        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
+        shared_expert_output = self._submodule_shared_expert_forward(pre_mlp_layernorm_output)
 
         outputs = [
             hidden_states,
             shared_expert_output,
-            tokens_per_expert,
             permutated_local_input_tokens,
             probs,
         ]
@@ -650,14 +571,14 @@ class TransformerLayer(MegatronCoreTransformerLayer):
             shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
         return shared_expert_output
 
-    def _submodule_dispatch_forward(self, tokens_per_expert, permutated_local_input_tokens):
+    def _submodule_dispatch_forward(self, permutated_local_input_tokens, probs):
         """
         Dispatches tokens to the appropriate experts based on the router output.
         """
-        tokens_per_expert, global_input_tokens = self.mlp.token_dispatcher.dispatch_all_to_all(
-            tokens_per_expert, permutated_local_input_tokens
+        dispatched_input, probs = self.mlp.dispatch(
+            permutated_local_input_tokens, probs
         )
-        return [tokens_per_expert, global_input_tokens]
+        return dispatched_input, probs
 
     def _submodule_dense_forward(self, hidden_states):
         residual = hidden_states
@@ -673,35 +594,29 @@ class TransformerLayer(MegatronCoreTransformerLayer):
 
         return output
 
-    def _submodule_moe_forward(self, tokens_per_expert, global_input_tokens, pre_mlp_layernorm_output):
+    def _submodule_moe_forward(self, dispatched_input, probs, pre_mlp_layernorm_output):
         """
         Performs a forward pass for the MLP submodule, including both expert-based
         and optional shared-expert computations.
         """
-        shared_expert_output = None
-        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self.mlp.shared_experts(pre_mlp_layernorm_output)
+        shared_expert_output = self._submodule_shared_expert_forward(pre_mlp_layernorm_output)
+        expert_output, mlp_bias = self._submodule_routed_experts_forward(dispatched_input, probs)
 
-        (dispatched_input, tokens_per_expert) = (
-            self.mlp.token_dispatcher.dispatch_postprocess(tokens_per_expert, global_input_tokens)
-        )
-        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
-        expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         return expert_output, shared_expert_output, mlp_bias
 
-    def _submodule_routed_experts_forward(self, tokens_per_expert, global_input_tokens):
+    def _submodule_routed_experts_forward(self, dispatched_input, probs):
         """
         Performs a forward pass for the MLP submodule, including only routed-expert computations.
         """
-        (dispatched_input, tokens_per_expert) = (
-            self.mlp.token_dispatcher.dispatch_postprocess(tokens_per_expert, global_input_tokens)
+        dispatched_input, tokens_per_expert, permuted_probs = (
+            self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input, probs)
         )
-        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
+        expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert, permuted_probs)
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
         return expert_output, mlp_bias
 
-    def _submodule_combine_forward(self, hidden_states):
-        return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
+    def _submodule_combine_forward(self, expert_output):
+        return self.mlp.token_dispatcher.token_combine(expert_output)
 
     def _submodule_post_combine_forward(
         self, expert_output, shared_expert_output, mlp_bias, residual
@@ -744,13 +659,13 @@ class TransformerLayer(MegatronCoreTransformerLayer):
         self.mlp.backward_dw()
 
     def _submodule_attention_qkv_dw(self):
-        self.self_attention.backward_qkv_dw()
+        self.self_attention._backward_qkv_proj()
 
     def _submodule_attention_proj_dw(self):
-        self.self_attention.backward_proj_dw()
+        self.self_attention._backward_output_proj()
 
     def _submodule_attention_proj_router_shared_expert_compound_dw(self):
-        self.self_attention.backward_proj_dw()
+        self.self_attention._backward_output_proj()
         self.mlp.backward_shared_expert_dw()
 
     def _submodule_routed_experts_dw(self):

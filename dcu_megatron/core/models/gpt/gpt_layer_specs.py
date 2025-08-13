@@ -48,9 +48,11 @@ def get_gpt_layer_with_flux_spec(
     moe_grouped_gemm: Optional[bool] = False,
     qk_layernorm: Optional[bool] = False,
     multi_latent_attention: Optional[bool] = False,
-    fp8: Optional[str] = None,  # pylint: disable=unused-arguments
+    fp8: Optional[str] = None,  # pylint: disable=unused-argument
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
     qk_l2_norm: Optional[bool] = False,
+    use_te_op_fuser: Optional[bool] = False,  # pylint: disable=unused-argument
+    use_kitchen: bool = False,  # pylint: disable=unused-argument
 ) -> ModuleSpec:
     """Use this spec to use flux modules (required for fp8 training).
 

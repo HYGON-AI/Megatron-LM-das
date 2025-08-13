@@ -1,6 +1,16 @@
 import dataclasses
 
 import torch
+
+try:
+    from megatron.post_training.algos.distillation import (
+        get_tensor_shapes_adjust_fn_for_distillation,
+    )
+
+    has_nvidia_modelopt = True
+except ImportError:
+    has_nvidia_modelopt = False
+
 from functools import wraps
 from typing import List, Optional
 from megatron.core import mpu, tensor_parallel
@@ -75,18 +85,20 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Print number of parameters.
     num_parameters = sum(
-        [sum([p.nelement() for p in model_module.parameters()])
-         for model_module in model]
+        [sum([p.nelement() for p in model_module.parameters()]) for model_module in model]
     )
 
-    # Print number of parameters.
-    if mpu.get_data_parallel_rank() == 0:
-        print(' > number of parameters on (tensor, pipeline) '
-              'model parallel rank ({}, {}): {}'.format(
-                  mpu.get_tensor_model_parallel_rank(),
-                  mpu.get_pipeline_model_parallel_rank(),
-                  sum([sum([p.nelement() for p in model_module.parameters()])
-                       for model_module in model])), flush=True)
+
+    if mpu.get_data_parallel_rank() == 0 and mpu.get_context_parallel_rank() == 0:
+        print(
+            ' > number of parameters on (tensor, pipeline) '
+            'model parallel rank ({}, {}): {}'.format(
+                mpu.get_tensor_model_parallel_rank(),
+                mpu.get_pipeline_model_parallel_rank(),
+                num_parameters,
+            ),
+            flush=True,
+        )
 
     # GPU allocation.
     for model_module in model:
@@ -99,6 +111,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     if wrap_with_ddp:
         config = get_model_config(model[0])
+
         kwargs = {}
         for f in dataclasses.fields(DistributedDataParallelConfig):
             if hasattr(args, f.name):
@@ -122,7 +135,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
         if not getattr(args, "use_torch_fsdp2", False):
             # In the custom FSDP and DDP use path, we need to initialize the bucket size.
-
             # If bucket_size is not provided as an input, use sane default.
             # If using very large dp_sizes, make buckets larger to ensure that chunks used in NCCL
             # ring-reduce implementations are large enough to remain bandwidth-bound rather than
@@ -151,8 +163,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     return model
 
 
-def train_step(forward_step_func, data_iterator,
-               model, optimizer, opt_param_scheduler, config):
+def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
     """Single training step."""
     args = get_args()
     timers = get_timers()
@@ -164,6 +175,14 @@ def train_step(forward_step_func, data_iterator,
             model_chunk.zero_grad_buffer()
         optimizer.zero_grad()
 
+        if has_nvidia_modelopt:
+            # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
+            adjust_tensor_shapes_fn = get_tensor_shapes_adjust_fn_for_distillation(
+                model, args.seq_length, args.micro_batch_size, args.decoder_seq_length
+            )
+        else:
+            adjust_tensor_shapes_fn = None
+
         # Forward pass.
         forward_backward_func = get_forward_backward_func()
         losses_reduced = forward_backward_func(
@@ -174,7 +193,9 @@ def train_step(forward_step_func, data_iterator,
             seq_length=args.seq_length,
             micro_batch_size=args.micro_batch_size,
             decoder_seq_length=args.decoder_seq_length,
-            forward_only=False)
+            forward_only=False,
+            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
+        )
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None
@@ -210,9 +231,7 @@ def train_step(forward_step_func, data_iterator,
 
     # Update learning rate.
     if update_successful:
-        increment = get_num_microbatches() * \
-                    args.micro_batch_size * \
-                    args.data_parallel_size
+        increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
         opt_param_scheduler.step(increment=increment)
         skipped_iter = 0
     else:
@@ -225,27 +244,51 @@ def train_step(forward_step_func, data_iterator,
     if mpu.is_pipeline_first_stage(ignore_virtual=True):
         # Average loss across microbatches.
         loss_reduced = {}
+
         for key in losses_reduced[0].keys():
-            numerator = 0
-            denominator = 0
-            for x in losses_reduced:
-                val = x[key]
-                # there is one dict per microbatch. in new reporting, we average
-                # over the total number of tokens across the global batch.
-                if isinstance(val, tuple) or isinstance(val, list):
-                    numerator += val[0]
-                    denominator += val[1]
+            val = [x[key].view(-1) for x in losses_reduced]
+            if val[0].numel() == 2:
+                if args.sft:
+                    # in mcore the normalization happens on micro batch instead of global
+                    val = torch.vstack(val)
+                    val = val[:, 0] / val[:, 1]
+                    val = val.mean()
+                    torch.distributed.all_reduce(
+                        val,
+                        group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    val /= torch.distributed.get_world_size(
+                        group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    loss_reduced[key] = val
                 else:
-                    # legacy behavior. we average over the number of microbatches,
-                    # and so the denominator is 1.
-                    numerator += val
-                    denominator += 1
-            loss_reduced[key] = numerator / denominator
-        return loss_reduced, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
+                    # there is one dict per microbatch. in new reporting, we average
+                    # over the total number of tokens across the global batch.
+                    val = torch.vstack(val).sum(dim=0)
+                    torch.distributed.all_reduce(
+                        val,
+                        group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    loss_reduced[key] = val[0] / val[1]
+            elif val[0].numel() == 1:
+                # legacy behavior, we average over the number of microbatches
+                val = torch.cat(val).mean()
+                loss_reduced[key] = val
+            else:
+                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+        return (
+            loss_reduced,
+            skipped_iter,
+            should_checkpoint,
+            should_exit,
+            exit_code,
+            grad_norm,
+            num_zeros_in_grad,
+        )
     return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
 
-def get_num_layers_to_build(config: TransformerConfig) -> int:
+def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] = None) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
     Args:

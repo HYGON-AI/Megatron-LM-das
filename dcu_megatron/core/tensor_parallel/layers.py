@@ -16,7 +16,11 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
     get_tensor_model_parallel_world_size,
 )
-from megatron.core.utils import prepare_input_tensors_for_wgrad_compute
+from megatron.core.utils import (
+    get_pg_size,
+    prepare_input_tensors_for_wgrad_compute,
+    get_tensor_model_parallel_group_if_none,
+)
 from megatron.core.tensor_parallel.mappings import (
     _reduce,
     copy_to_tensor_model_parallel_region,
@@ -43,15 +47,22 @@ try:
 except ImportError:
     _grad_accum_fusion_available = False
 
+try:
+    import transformer_engine  # pylint: disable=unused-import
+
+    HAVE_TE = True
+except ImportError:
+    HAVE_TE = False
+
 
 def get_tensor_model_parallel_node_size(group=None):
     """ 获取节点数
     """
     if group is None:
-        group=get_tensor_model_parallel_group()
+        group=get_tensor_model_parallel_group_if_none()
 
     hostname = socket.gethostname()
-    hostnames = [None] * get_tensor_model_parallel_world_size()
+    hostnames = [None] * get_pg_size(group)
     torch.distributed.all_gather_object(hostnames, hostname, group=group)
     num_nodes = len(set(hostnames))
     return num_nodes
@@ -70,6 +81,7 @@ class AGLinear(torch.autograd.Function):
         sequence_parallel,
         grad_output_buffer,
         wgrad_deferral_limit,
+        tp_group,
         transpose_weight=False,
         fw_ag_gemm_op=None,
         bw_gemm_rs_op=None,
@@ -81,6 +93,7 @@ class AGLinear(torch.autograd.Function):
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.sequence_parallel = sequence_parallel
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
+        ctx.tp_group = tp_group
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
         ctx.bw_gemm_rs_op = bw_gemm_rs_op
@@ -88,14 +101,13 @@ class AGLinear(torch.autograd.Function):
         if sequence_parallel:
             sequence_len, batch_size, input_hidden_size = input.size()
             output_hidden_size = weight.size(0)
-            world_size = get_tensor_model_parallel_world_size()
 
             if fw_ag_gemm_op is None:
                 if not is_flux_min_version("1.1.0"):
                     fw_ag_gemm_op = flux.AGKernel(
-                        get_tensor_model_parallel_group(),
+                        tp_group,
                         get_tensor_model_parallel_node_size(),
-                        sequence_len * batch_size * world_size,
+                        sequence_len * batch_size * tp_group.size(),
                         output_hidden_size,
                         input_hidden_size,
                         input.dtype,
@@ -116,7 +128,7 @@ class AGLinear(torch.autograd.Function):
             )
 
             torch.cuda.current_stream().synchronize()
-            output = output.view(sequence_len * world_size, batch_size, -1)
+            output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
             if bias is not None:
@@ -132,6 +144,7 @@ class AGLinear(torch.autograd.Function):
         use_bias = ctx.use_bias
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
+        tp_group = ctx.tp_group
         transpose_weight = ctx.transpose_weight
         bw_gemm_rs_op = ctx.bw_gemm_rs_op
 
@@ -141,17 +154,16 @@ class AGLinear(torch.autograd.Function):
                 grad_output_buffer.append(grad_output)
                 wgrad_compute = False
 
-        world_size = get_tensor_model_parallel_world_size()
         if wgrad_compute:
             if ctx.sequence_parallel:
                 dim_size = list(input.size())
-                dim_size[0] = dim_size[0] * world_size
+                dim_size[0] = dim_size[0] * tp_group.size()
 
                 all_gather_buffer = get_global_memory_buffer().get_tensor(
                     dim_size, input.dtype, "mpu"
                 )
                 handle = dist_all_gather_func(
-                    all_gather_buffer, input, group=get_tensor_model_parallel_group(), async_op=True
+                    all_gather_buffer, input, group=tp_group, async_op=True
                 )
 
                 # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
@@ -167,7 +179,7 @@ class AGLinear(torch.autograd.Function):
                 input_hidden_size = weight.size(-1)
                 if not is_flux_min_version("1.1.0"):
                     bw_gemm_rs_op = flux.GemmRS(
-                        get_tensor_model_parallel_group(),
+                        tp_group,
                         get_tensor_model_parallel_node_size(),
                         sequence_len * batch_size,
                         input_hidden_size,
@@ -188,7 +200,7 @@ class AGLinear(torch.autograd.Function):
             )
 
             torch.cuda.current_stream().synchronize()
-            grad_input = grad_input.view(sequence_len // world_size, batch_size, -1)
+            grad_input = grad_input.view(sequence_len // tp_group.size(), batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
 
@@ -204,11 +216,11 @@ class AGLinear(torch.autograd.Function):
             if weight.requires_grad:
                 # Asynchronous all-reduce
                 handle = torch.distributed.all_reduce(
-                    grad_input, group=get_tensor_model_parallel_group(), async_op=True
+                    grad_input, group=tp_group, async_op=True
                 )
             else:
                 grad_input = _reduce(grad_input)
-                return grad_input, None, None, None, None, None, None, None, None, None, None
+                return grad_input, None, None, None, None, None, None, None, None, None, None, None
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -252,7 +264,7 @@ class AGLinear(torch.autograd.Function):
         if not ctx.sequence_parallel and ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None
 
 
 def ag_linear(
@@ -264,6 +276,7 @@ def ag_linear(
     sequence_parallel: bool,
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
+    tp_group: Optional[torch.distributed.ProcessGroup] = None,
     transpose_weight: Optional[bool] = False,
     fw_ag_gemm_op=None,
     bw_gemm_rs_op=None
@@ -327,6 +340,9 @@ def ag_linear(
             micro-batches for which embedding weight gradient GEMM should be
             deferred. Disable by setting this to 0. Defaults to 0.
 
+        tp_group (torch.distributed.ProcessGroup required): The process group to use for tensor
+                                                   parallel operations.
+
         transpose_weight: transpose weight.
 
         fw_ag_gemm_op: flux AGKernel for forward.
@@ -334,6 +350,8 @@ def ag_linear(
         bw_gemm_rs_op: flux GemmRS for backward.
 
     """
+
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group)
 
     args = [
         input,
@@ -344,6 +362,7 @@ def ag_linear(
         sequence_parallel,
         grad_output_buffer,
         wgrad_deferral_limit,
+        tp_group,
         transpose_weight,
         fw_ag_gemm_op,
         bw_gemm_rs_op,
@@ -386,9 +405,10 @@ class LinearRS(torch.autograd.Function):
         sequence_parallel,
         grad_output_buffer,
         wgrad_deferral_limit,
+        tp_group,
         transpose_weight=False,
         fw_gemm_rs_op=None,
-        bw_ag_gemm_op=None
+        bw_ag_gemm_op=None,
     ):
         """Forward."""
         ctx.save_for_backward(input, weight)
@@ -397,11 +417,10 @@ class LinearRS(torch.autograd.Function):
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.sequence_parallel = sequence_parallel
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
+        ctx.tp_group = tp_group
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
         ctx.bw_ag_gemm_op = bw_ag_gemm_op
-
-        world_size = get_tensor_model_parallel_world_size()
 
         sequence_len, batch_size, _ = input.size()
         output_hidden_size = weight.size(0)
@@ -410,7 +429,7 @@ class LinearRS(torch.autograd.Function):
             if fw_gemm_rs_op is None:
                 if not is_flux_min_version("1.1.0"):
                     fw_gemm_rs_op = flux.GemmRS(
-                        get_tensor_model_parallel_group(),
+                        tp_group,
                         get_tensor_model_parallel_node_size(),
                         sequence_len * batch_size,
                         output_hidden_size,
@@ -430,7 +449,7 @@ class LinearRS(torch.autograd.Function):
                 fast_accum=False,
             )
             torch.cuda.current_stream().synchronize()
-            output = output.view(sequence_len // world_size, batch_size, -1)
+            output = output.view(sequence_len // tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
 
@@ -444,6 +463,7 @@ class LinearRS(torch.autograd.Function):
         use_bias = ctx.use_bias
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
+        tp_group = ctx.tp_group
         transpose_weight = ctx.transpose_weight
         bw_ag_gemm_op = ctx.bw_ag_gemm_op
 
@@ -453,18 +473,16 @@ class LinearRS(torch.autograd.Function):
                 grad_output_buffer.append(grad_output)
                 wgrad_compute = False
 
-        world_size = get_tensor_model_parallel_world_size()
-
         if wgrad_compute:
             if ctx.sequence_parallel:
                 dim_size = list(grad_output.size())
-                dim_size[0] = dim_size[0] * world_size
+                dim_size[0] = dim_size[0] * tp_group.size()
 
                 all_gather_buffer = get_global_memory_buffer().get_tensor(
                     dim_size, grad_output.dtype, "mpu"
                 )
                 handle = dist_all_gather_func(
-                    all_gather_buffer, grad_output, group=get_tensor_model_parallel_group(), async_op=True
+                    all_gather_buffer, grad_output, group=tp_group, async_op=True
                 )
 
                 # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
@@ -480,9 +498,9 @@ class LinearRS(torch.autograd.Function):
             if bw_ag_gemm_op is None:
                 if not is_flux_min_version("1.1.0"):
                     bw_ag_gemm_op = flux.AGKernel(
-                        get_tensor_model_parallel_group(),
+                        tp_group,
                         get_tensor_model_parallel_node_size(),
-                        sequence_len * batch_size * world_size,
+                        sequence_len * batch_size * tp_group.size(),
                         input_hidden_size,
                         output_hidden_size,
                         grad_output.dtype,
@@ -501,7 +519,7 @@ class LinearRS(torch.autograd.Function):
                 fast_accum=False,
             )
             torch.cuda.current_stream().synchronize()
-            grad_input = grad_input.view(sequence_len * world_size, batch_size, -1)
+            grad_input = grad_input.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
 
@@ -555,7 +573,7 @@ class LinearRS(torch.autograd.Function):
             grad_weight = total_grad_output.t().matmul(total_input)
         grad_bias = total_grad_output.sum(dim=0) if use_bias else None
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None
 
 
 def linear_rs(
@@ -565,6 +583,7 @@ def linear_rs(
     gradient_accumulation_fusion: bool,
     allreduce_dgrad: bool,
     sequence_parallel: bool,
+    tp_group: Optional[torch.distributed.ProcessGroup] = None,
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
     transpose_weight: Optional[bool] = False,
@@ -622,6 +641,9 @@ def linear_rs(
             all gathered, and the backward pass the input gradients are
             reduce scattered.
 
+        tp_group (torch.distributed.ProcessGroup required): The process group to use for tensor
+                                                   parallel operations.
+
         grad_output_buffer (List[torch.Tensor] optional): Buffer used to save
             output gradients when embedding table wgrad compute is deferred.
             Defaults to None.
@@ -637,7 +659,7 @@ def linear_rs(
         bw_ag_gemm_op: flux GemmRS for backward.
 
     """
-
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     args = [
         input,
         weight,
@@ -647,6 +669,7 @@ def linear_rs(
         sequence_parallel,
         grad_output_buffer,
         wgrad_deferral_limit,
+        tp_group,
         transpose_weight,
         fw_gemm_rs_op,
         bw_ag_gemm_op,
@@ -743,6 +766,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: str = None,  # Not used
         disable_grad_reduce: bool = False,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super(FluxColumnParallelLinear, self).__init__(
             input_size=input_size,
@@ -760,6 +784,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             disable_grad_reduce=disable_grad_reduce,
+            tp_group=tp_group,
         )
 
         # flux params
@@ -806,12 +831,6 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
                     f"not {expected_shape} as expected"
                 )
 
-        if self.config._cpu_offloading_context is not None:
-            if self.config._cpu_offloading_context.inside_context is True:
-                assert (
-                    self.config.cpu_offloading is False
-                ), "CPU Offloading cannot be enabled while using non-TE modules"
-
         bias = self.bias if not self.skip_bias_add else None
 
         if (
@@ -822,7 +841,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         ):
             input_parallel = input_
         else:
-            input_parallel = copy_to_tensor_model_parallel_region(input_)
+            input_parallel = copy_to_tensor_model_parallel_region(input_, group=self.tp_group)
 
         if self.config.defer_embedding_wgrad_compute:
             if (
@@ -877,6 +896,15 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
 
         allreduce_dgrad = False if self.explicit_expert_comm else self.allreduce_dgrad
 
+        if self.config._cpu_offloading_context is not None:
+            if self.config._cpu_offloading_context.inside_context is True:
+                if not HAVE_TE:
+                    assert (
+                        self.config.cpu_offloading is False
+                    ), "CPU Offloading cannot be enabled while TE is not present"
+                else:
+                    input_parallel.activation_offloading = self.config.cpu_offloading_activations
+
         output_parallel = self._forward_impl(
             input=input_parallel,
             weight=weight,
@@ -886,9 +914,10 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
             sequence_parallel=False if self.explicit_expert_comm else self.sequence_parallel,
             grad_output_buffer=self.grad_output_buffer if self.config.defer_embedding_wgrad_compute else None,
             wgrad_deferral_limit=self.config.wgrad_deferral_limit if self.config.defer_embedding_wgrad_compute else None,
+            tp_group=self.tp_group,
             transpose_weight=self.flux_transpose_weight,
             fw_ag_gemm_op=self.fw_ag_gemm_op,
-            bw_gemm_rs_op=self.bw_gemm_rs_op
+            bw_gemm_rs_op=self.bw_gemm_rs_op,
         )
 
         gather_output = self.gather_output
@@ -898,8 +927,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
 
         if gather_output:
             # All-gather across the partitions.
-            assert not self.sequence_parallel
-            output = gather_from_tensor_model_parallel_region(output_parallel)
+            output = gather_from_tensor_model_parallel_region(output_parallel, group=self.tp_group)
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -964,6 +992,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         keep_master_weight_for_test: bool = False,
         is_expert: bool = False,
         tp_comm_buffer_name: str = None,  # Not used
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 
         super(FluxRowParallelLinear, self).__init__(
@@ -978,6 +1007,7 @@ class FluxRowParallelLinear(RowParallelLinear):
             keep_master_weight_for_test=keep_master_weight_for_test,
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
+            tp_group=tp_group,
         )
 
         # flux params
@@ -999,18 +1029,12 @@ class FluxRowParallelLinear(RowParallelLinear):
             - bias
         """
 
-        if self.config._cpu_offloading_context is not None:
-            if self.config._cpu_offloading_context.inside_context is True:
-                assert (
-                    self.config.cpu_offloading is False
-                ), "CPU Offloading cannot be enabled while using non-TE modules"
-
         # Set up backprop all-reduce.
         if self.input_is_parallel:
             input_parallel = input_
         else:
             assert not self.sequence_parallel
-            input_parallel = scatter_to_tensor_model_parallel_region(input_)
+            input_parallel = scatter_to_tensor_model_parallel_region(input_, group=self.tp_group)
 
         # flux kernels
 
@@ -1058,6 +1082,15 @@ class FluxRowParallelLinear(RowParallelLinear):
 
             self.previous_flux_params = current_flux_params
 
+        if self.config._cpu_offloading_context is not None:
+            if self.config._cpu_offloading_context.inside_context is True:
+                if not HAVE_TE:
+                    assert (
+                        self.config.cpu_offloading is False
+                    ), "CPU Offloading cannot be enabled while TE is not present"
+                else:
+                    input_parallel.activation_offloading = self.config.cpu_offloading_activations
+
         output_parallel = self._forward_impl(
             input=input_parallel,
             weight=self.weight,
@@ -1065,6 +1098,7 @@ class FluxRowParallelLinear(RowParallelLinear):
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             allreduce_dgrad=False,
             sequence_parallel=False if self.explicit_expert_comm else self.sequence_parallel,
+            tp_group=None,
             grad_output_buffer=None,
             transpose_weight=self.flux_transpose_weight,
             fw_gemm_rs_op=self.fw_gemm_rs_op,
@@ -1077,7 +1111,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         elif self.sequence_parallel:
             output_ = output_parallel
         else:
-            output_ = reduce_from_tensor_model_parallel_region(output_parallel)
+            output_ = reduce_from_tensor_model_parallel_region(output_parallel, group=self.tp_group)
 
         if not self.skip_bias_add:
             output_bias = None

@@ -1,115 +1,40 @@
+from functools import wraps
+
 from transformers import AutoTokenizer, Qwen2Tokenizer
 from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
-from megatron.training.tokenizer.tokenizer import (
-    _BertWordPieceTokenizer,
-    _GPT2BPETokenizer,
-    _SentencePieceTokenizer,
-    _GPTSentencePieceTokenizer,
-    _HuggingFaceTokenizer,
-    _Llama2Tokenizer,
-    CustomTikTokenizer,
-    _NullTokenizer,
-    _NullMultimodalTokenizer,
-    _vocab_size_with_padding
-)
-from megatron.training.tokenizer.multimodal_tokenizer import MultimodalTokenizer
+from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
 
 
-def build_tokenizer(args, **kwargs):
-    """Initialize tokenizer."""
-    if args.rank == 0:
-        print('> building {} tokenizer ...'.format(args.tokenizer_type), flush=True)
+def build_tokenizer_wrapper(build_tokenizer_func):
+    @wraps(build_tokenizer_func)
+    def wrapper(args, **kwargs):
+        extra_tokenizer_types = {
+            "Llama3Tokenizer",
+            "QwenTokenizer",
+            "DeepSeekV2Tokenizer",
+        }
+        if args.tokenizer_type in extra_tokenizer_types:
+            if args.rank == 0:
+                print('> building {} tokenizer ...'.format(args.tokenizer_type), flush=True)
 
-    # Select and instantiate the tokenizer.
-    if args.tokenizer_type == 'BertWordPieceLowerCase':
-        assert args.vocab_file is not None
-        tokenizer = _BertWordPieceTokenizer(
-            vocab_file=args.vocab_file, lower_case=True, vocab_extra_ids=args.vocab_extra_ids
-        )
-    elif args.tokenizer_type == 'BertWordPieceCase':
-        assert args.vocab_file is not None
-        tokenizer = _BertWordPieceTokenizer(
-            vocab_file=args.vocab_file, lower_case=False, vocab_extra_ids=args.vocab_extra_ids
-        )
-    elif args.tokenizer_type == 'GPT2BPETokenizer':
-        assert args.vocab_file is not None
-        assert args.merge_file is not None
-        tokenizer = _GPT2BPETokenizer(args.vocab_file, args.merge_file)
-    elif args.tokenizer_type == 'SentencePieceTokenizer':
-        assert args.tokenizer_model is not None
-        tokenizer = _SentencePieceTokenizer(
-            args.tokenizer_model, vocab_extra_ids=args.vocab_extra_ids
-        )
-    elif args.tokenizer_type == 'GPTSentencePieceTokenizer':
-        assert args.tokenizer_model is not None
-        tokenizer = _GPTSentencePieceTokenizer(args.tokenizer_model)
-    elif args.tokenizer_type == 'HuggingFaceTokenizer':
-        tokenizer = _HuggingFaceTokenizer(args.tokenizer_model, **kwargs)
-    elif args.tokenizer_type == 'Llama2Tokenizer':
-        assert args.tokenizer_model is not None
-        tokenizer = _Llama2Tokenizer(args.tokenizer_model)
-    elif args.tokenizer_type == 'Llama3Tokenizer':
-        assert args.tokenizer_model is not None
-        tokenizer = _Llama3Tokenizer(args.tokenizer_model)
-    elif args.tokenizer_type == 'QwenTokenizer':
-        tokenizer = _Qwen2Tokenizer(args.vocab_file, args.merge_file)
-    elif args.tokenizer_type == 'TikTokenizer':
-        assert args.tokenizer_model is not None
-        assert args.tiktoken_pattern is not None
-        assert args.tiktoken_pattern in {"v1", "v2"}
-        pattern = PATTERN_TIKTOKEN if args.tiktoken_pattern == "v1" else PATTERN_TIKTOKEN_V2
-        tokenizer = CustomTikTokenizer(
-            path=args.tokenizer_model,
-            pattern=pattern,
-            vocab_size=args.vocab_size,
-            num_special_tokens=args.tiktoken_num_special_tokens,
-            special_tokens=args.tiktoken_special_tokens,
-        )
-    elif args.tokenizer_type == 'NullTokenizer':
-        assert args.vocab_size is not None
-        tokenizer = _NullTokenizer(args.vocab_size)
-    elif args.tokenizer_type == "MultimodalTokenizer":
-        try:
-            import transformers
-        except ImportError:
-            raise ImportError(
-                "MultimodalTokenizer currently requires transformers library to be installed"
-            )
+            if args.tokenizer_type == 'Llama3Tokenizer':
+                assert args.tokenizer_model is not None
+                tokenizer = _Llama3Tokenizer(args.tokenizer_model)
+            elif args.tokenizer_type == 'QwenTokenizer':
+                tokenizer = _Qwen2Tokenizer(args.vocab_file, args.merge_file)
+            elif args.tokenizer_type == "DeepSeekV2Tokenizer":
+                tokenizer = _DeepSeekV2Tokenizer(args.tokenizer_model, args.extra_vocab_size)
+                args.padded_vocab_size = tokenizer.vocab_size
 
-        kwargs = dict()
-        if args.tokenizer_prompt_format == "nvlm-yi-34b":
-            kwargs = {
-                "from_slow": True,
-                "legacy": False,
-                "add_bos_token": True,
-            }
+            # Add vocab size (if not already set from a checkpoint).
+            if getattr(args, "padded_vocab_size", None) is None:
+                args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size, args)
 
-        # Currently, only HuggingFace tokenizers are supported.
-        underlying_tokenizer = transformers.AutoTokenizer.from_pretrained(
-            pretrained_model_name_or_path=args.tokenizer_model, **kwargs
-        )
+            return tokenizer
 
-        tokenizer = MultimodalTokenizer(
-            underlying_tokenizer,
-            args.tokenizer_prompt_format,
-            args.special_tokens,
-            args.image_tag_type,
-            args.force_system_message,
-        )
-    elif args.tokenizer_type == 'NullMultimodalTokenizer':
-        assert args.vocab_size is not None
-        tokenizer = _NullMultimodalTokenizer(args.vocab_size)
-    elif args.tokenizer_type == "DeepSeekV2Tokenizer":
-        tokenizer = _DeepSeekV2Tokenizer(args.tokenizer_model, args.extra_vocab_size)
-        args.padded_vocab_size = tokenizer.vocab_size
-    else:
-        raise NotImplementedError('{} tokenizer is not ' 'implemented.'.format(args.tokenizer_type))
+        return build_tokenizer_func(args, **kwargs)
 
-    # Add vocab size (if not already set from a checkpoint).
-    if getattr(args, "padded_vocab_size", None) is None:
-        args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size, args)
-
-    return tokenizer
+    return wrapper
 
 
 class _Llama3Tokenizer(MegatronTokenizer):

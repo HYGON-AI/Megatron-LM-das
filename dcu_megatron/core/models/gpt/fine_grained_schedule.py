@@ -158,11 +158,10 @@ class PostProcessNode(ScheduleNode):
                 inp=hidden_states, requires_grad=True, keep_graph=True
             )
 
-        # Process inference output.
-        if inference_context and not inference_context.is_static_batching():
-            hidden_states = inference_context.last_token_logits(
-                hidden_states.squeeze(1).unsqueeze(0)
-            ).unsqueeze(1)
+        # If this TransformerBlock is empty, input and output hidden states will be the same node
+        # on the computational graph and will lead to unexpected errors in pipeline schedules.
+        if not gpt_model.decoder.pre_process and len(gpt_model.decoder.layers) == 0 and not gpt_model.decoder.final_layernorm:
+            hidden_states = hidden_states.clone()
 
         # logits and loss
         output_weight = None
@@ -204,10 +203,18 @@ class PostProcessNode(ScheduleNode):
         if (
             not gpt_model.training
             and inference_context is not None
-            and inference_context.is_static_batching()
             and inference_context.materialize_only_last_token_logits
         ):
-            hidden_states = hidden_states[-1:, :, :]
+            if inference_context.is_static_batching():
+                hidden_states = hidden_states[-1:, :, :]
+            else:
+                # Reshape [B, 1, H] to [1, B, H] → extract each sample’s true last‐token hidden
+                # state ([B, H]) → unsqueeze back to [1, B, H]
+                # (so that the output layer, which expects S×B×H, receives only the final token)
+                hidden_states = inference_context.last_token_logits(
+                    hidden_states.squeeze(1).unsqueeze(0)
+                ).unsqueeze(1)
+
         logits, _ = gpt_model.output_layer(
             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
         )
@@ -785,11 +792,6 @@ def schedule_chunk_1f1b(
     if b_schedule_plan:
         b_schedule_plan.record_current_stream()
 
-        assert grad is not None
-        if b_schedule_plan.post_process is not None:
-            with b_context:
-                grad = b_schedule_plan.post_process.backward(grad)
-
         if pre_backward is not None:
             # pp grad send receive sync here, safe for now, maybe not safe in the future
             with torch.cuda.stream(get_com_stream()):
@@ -799,6 +801,10 @@ def schedule_chunk_1f1b(
                     del pre_backward
                 b_schedule_plan.record_current_stream()
 
+        assert grad is not None
+        if b_schedule_plan.post_process is not None:
+            with b_context:
+                grad = b_schedule_plan.post_process.backward(grad)
 
     f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
     b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
@@ -819,7 +825,6 @@ def schedule_chunk_1f1b(
             block_level_wgrad_compute=block_level_wgrad_compute,
         )
         torch.cuda.nvtx.range_pop()
-
 
     with b_context:
         for i in range(overlaped_layers, b_num_layers):

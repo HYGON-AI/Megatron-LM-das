@@ -1,22 +1,17 @@
-from typing import Optional
 from functools import wraps
 
 import torch
 
 from megatron.core import tensor_parallel
-from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.moe.moe_layer import MoESubmodules
 
 
 def moe_layer_init_wrapper(moe_layer_init_func):
     @wraps(moe_layer_init_func)
-    def wrapper(
-        self,
-        config: TransformerConfig,
-        submodules: Optional[MoESubmodules] = None,
-        layer_number: Optional[int] = None,
-    ):
-        moe_layer_init_func(self, config, submodules, layer_number)
+    def wrapper(self, *args, **kwargs ):
+
+        moe_layer_init_func(self, *args, **kwargs)
+
+        config = args[0] if len(args) > 1 else kwargs['config']
 
         self.experts_recompute = (
             config.recompute_granularity == 'selective' and "experts" in config.recompute_modules

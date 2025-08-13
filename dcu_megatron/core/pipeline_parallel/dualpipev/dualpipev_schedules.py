@@ -3,7 +3,7 @@
 
 import contextlib
 from functools import wraps
-from typing import Iterator, List, Union
+from typing import Iterator, List, Union, Callable, Optional
 
 from megatron.training import print_rank_0
 
@@ -533,6 +533,7 @@ def forward_backward_pipelining_with_cutinhalf(
     forward_only: bool = False,
     collect_non_loss_data: bool = False,
     first_val_step: bool = None,
+    adjust_tensor_shapes_fn: Optional[Callable] = None,  # pylint: disable=unused-argument
 ):
     args = get_args()
     args.moe_fb_overlap = True

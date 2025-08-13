@@ -45,129 +45,37 @@ def gpt_model_init_wrapper(fn):
     return wrapper
 
 
-def gpt_model_forward(
+def gpt_model_postprocess(
     self,
-    input_ids: Tensor,
-    position_ids: Tensor,
-    attention_mask: Tensor,
-    decoder_input: Tensor = None,
-    labels: Tensor = None,
-    inference_context: BaseInferenceContext = None,
-    packed_seq_params: PackedSeqParams = None,
-    extra_block_kwargs: dict = None,
-    runtime_gather_output: Optional[bool] = None,
-    *,
-    inference_params: Optional[BaseInferenceContext] = None,
-    loss_mask: Optional[Tensor] = None,
-) -> Tensor:
-    """Forward function of the GPT Model This function passes the input tensors
-    through the embedding layer, and then the decoeder and finally into the post
-    processing layer (optional).
+    hidden_states,
+    input_ids,
+    position_ids,
+    labels,
+    rotary_pos_emb,
+    rotary_pos_cos,
+    rotary_pos_sin,
+    mtp_in_postprocess=None,
+    loss_mask=None,
+    decoder_input=None,
+    attention_mask=None,
+    inference_params=None,
+    packed_seq_params=None,
+    sequence_len_offset=None,
+    runtime_gather_output=None,
+    extra_block_kwargs=None,
+    inference_context=None,
+):
+    """Postprocesses decoder hidden states to generate logits or compute loss.
 
-    It either returns the Loss values if labels are given  or the final hidden units
-
-    Args:
-        runtime_gather_output (bool): Gather output at runtime. Default None means
-            `parallel_output` arg in the constructor will be used.
+    Applies Multi-Token Prediction if enabled, generates output logits through
+    the output layer, and computes language model loss when labels are provided.
     """
-    # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
-    # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
-
-    inference_context = deprecate_inference_params(inference_context, inference_params)
-
-    # Decoder embedding.
-    if decoder_input is not None:
-        pass
-    elif self.pre_process:
-        decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
-    else:
-        # intermediate stage of pipeline
-        # decoder will get hidden_states from encoder.input_tensor
-        decoder_input = None
-
-    # Rotary positional embeddings (embedding is None for PP intermediate devices)
-    rotary_pos_emb = None
-    rotary_pos_cos = None
-    rotary_pos_sin = None
-    if self.position_embedding_type == 'rope' and not self.config.multi_latent_attention:
-        if not self.training and self.config.flash_decode and inference_context:
-            assert (
-                inference_context.is_static_batching()
-            ), "GPTModel currently only supports static inference batching."
-            # Flash decoding uses precomputed cos and sin for RoPE
-            rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb_cache.setdefault(
-                inference_context.max_sequence_length,
-                self.rotary_pos_emb.get_cos_sin(inference_context.max_sequence_length),
-            )
-        else:
-            rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
-                inference_context, self.decoder, decoder_input, self.config, packed_seq_params
-            )
-            rotary_pos_emb = self.rotary_pos_emb(
-                rotary_seq_len,
-                packed_seq=packed_seq_params is not None
-                and packed_seq_params.qkv_format == 'thd',
-            )
-    elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
-        if self.training or not self.config.flash_decode:
-            rotary_pos_emb = self.rotary_pos_emb(position_ids, self.mrope_section)
-        else:
-            # Flash decoding uses precomputed cos and sin for RoPE
-            raise NotImplementedError(
-                "Flash decoding uses precomputed cos and sin for RoPE, not implmented in "
-                "MultimodalRotaryEmbedding yet."
-            )
-
-    if (
-        (self.config.enable_cuda_graph or self.config.flash_decode)
-        and rotary_pos_cos is not None
-        and inference_context
-        and inference_context.is_static_batching()
-        and not self.training
-    ):
-        sequence_len_offset = torch.tensor(
-            [inference_context.sequence_len_offset] * inference_context.current_batch_size,
-            dtype=torch.int32,
-            device=rotary_pos_cos.device,  # Co-locate this with the rotary tensors
-        )
-    else:
-        sequence_len_offset = None
-
-    # Wrap decoder_input to allow the decoder (TransformerBlock) to delete the
-    # reference held by this caller function, enabling early garbage collection for
-    # inference. Skip wrapping if decoder_input is logged after decoder completion.
-    if (
-        inference_context is not None
-        and not self.training
-        and not has_config_logger_enabled(self.config)
-    ):
-        decoder_input = WrappedTensor(decoder_input)
-
-    # Run decoder.
-    hidden_states = self.decoder(
-        hidden_states=decoder_input,
-        attention_mask=attention_mask,
-        inference_context=inference_context,
-        rotary_pos_emb=rotary_pos_emb,
-        rotary_pos_cos=rotary_pos_cos,
-        rotary_pos_sin=rotary_pos_sin,
-        packed_seq_params=packed_seq_params,
-        sequence_len_offset=sequence_len_offset,
-        **(extra_block_kwargs or {}),
-    )
-
-    # Process inference output.
-    if inference_context and not inference_context.is_static_batching():
-        hidden_states = inference_context.last_token_logits(
-            hidden_states.squeeze(1).unsqueeze(0)
-        ).unsqueeze(1)
-
     # logits and loss
     output_weight = None
     if self.share_embeddings_and_output_weights:
         output_weight = self.shared_embedding_or_output_weight()
 
-    if self.mtp_process:
+    if mtp_in_postprocess:
         hidden_states = self.mtp(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -202,10 +110,17 @@ def gpt_model_forward(
     if (
         not self.training
         and inference_context is not None
-        and inference_context.is_static_batching()
         and inference_context.materialize_only_last_token_logits
     ):
-        hidden_states = hidden_states[-1:, :, :]
+        if inference_context.is_static_batching():
+            hidden_states = hidden_states[-1:, :, :]
+        else:
+            # Reshape [B, 1, H] to [1, B, H] → extract each sample’s true last‐token hidden
+            # state ([B, H]) → unsqueeze back to [1, B, H]
+            # (so that the output layer, which expects S×B×H, receives only the final token)
+            hidden_states = inference_context.last_token_logits(
+                hidden_states.squeeze(1).unsqueeze(0)
+            ).unsqueeze(1)
     logits, _ = self.output_layer(
         hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
     )
@@ -229,6 +144,7 @@ def gpt_model_forward(
     loss = self.compute_language_model_loss(labels, logits)
 
     return loss
+
 
 
 class GPTModel:
