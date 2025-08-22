@@ -55,12 +55,11 @@ class PowerSGDCompressor(Compressor):
         self.memory_out: Dict[torch.nn.Parameter, torch.Tensor] = {}
         self.reuse_query = True
         self._cached_modified_Q = {}
-        if torch.distributed.get_rank() == 0:
-            self._init_printer()
+        self._init_printer()
 
     def _init_printer(self):
         print_rank_0('===== PowerSGD Compressor =====')
-        print_rank_0(' >> compression_dtype: ', self.compression_dtype)
+        print_rank_0(f' >> compression_dtype: {self.compression_dtype}')
         print_rank_0(' >> use_error_feedback: True')
         print_rank_0('============================')
 
