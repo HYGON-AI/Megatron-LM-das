@@ -1,291 +1,99 @@
 import contextlib
-from abc import ABC, abstractmethod
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 
 import torch
-from torch import Tensor
-from torch.autograd.variable import Variable
 
+from megatron.core.enums import Fp8Recipe
+from megatron.core.fp8_utils import get_fp8_context
 from megatron.training import get_args
 from megatron.core import parallel_state
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
-from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
-from megatron.core.utils import get_attr_wrapped_model, make_viewless_tensor
-
-try:
-    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
-    from megatron.legacy.model import Float16Module as LegacyFloat16Module
-
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, custom_FSDP, Float16Module, torch_FSDP, LegacyFloat16Module)
-except ImportError:
-    ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, custom_FSDP, Float16Module)
+from megatron.core.pipeline_parallel.utils import ScheduleNode
+from megatron.core.utils import get_attr_wrapped_model
+from megatron.training.utils import unwrap_model
 
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
+from dcu_megatron.core.pipeline_parallel.utils import AbstractSchedulePlan
 
 
-def make_viewless(e):
-    """make_viewless util func"""
-    e = make_viewless_tensor(inp=e, requires_grad=e.requires_grad, keep_graph=True)
-    return e
-
-
-@contextmanager
-def stream_acquire_context(stream, event):
-    event.wait(stream)
-    try:
-        yield
-    finally:
-        event.record(stream)
-
-
-class ScheduleNode:
-    """base node for fine-grained schedule"""
-
-    def __init__(
-        self,
-        forward_func,
-        stream,
-        event,
-        backward_func=None,
-        free_inputs=False,
-        name="schedule_node",
-    ):
-        self.name = name
-        self.forward_func = forward_func
-        self.backward_func = backward_func
-        self.stream = stream
-        self.event = event
-        self.free_inputs = free_inputs
-        self.inputs = None
-        self.outputs = None
-
-    def default_backward_func(self, outputs, output_grad):
-        # Handle scalar output
-        if output_grad is None:
-            assert outputs.numel() == 1, "implicit grad requires scalar output."
-            output_grad = torch.ones_like(outputs, memory_format=torch.preserve_format)
-
-        Variable._execution_engine.run_backward(
-            tensors=outputs,
-            grad_tensors=output_grad,
-            keep_graph=False,
-            create_graph=False,
-            inputs=tuple(),
-            allow_unreachable=True,
-            accumulate_grad=True,
-        )
-
-        return output_grad
-
-    def forward(self, inputs=(), stream_wait_event=None, stream_record_event=None):
-        """schedule node forward"""
-
-        if not isinstance(inputs, tuple):
-            inputs = (inputs,)
-
-        return self._forward(
-                *inputs,
-                stream_wait_event=stream_wait_event,
-                stream_record_event=stream_record_event,
-            )
-
-    def _forward(self, *inputs, stream_wait_event=None, stream_record_event=None):
-        with stream_acquire_context(self.stream, self.event):
-            torch.cuda.nvtx.range_push(f"{self.name} forward")
-            with torch.cuda.stream(self.stream):
-                if stream_wait_event is not None:
-                    stream_wait_event.wait(self.stream)
-
-                self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
-                for i, input in enumerate(self.inputs):
-                    if input is not None:
-                        input.requires_grad = inputs[i].requires_grad
-
-                data = tuple(self.inputs)
-                data = self.forward_func(*data)
-
-                if not isinstance(data, tuple):
-                    data = make_viewless(data)
-                else:
-                    data = tuple([make_viewless(e) if isinstance(e, Tensor) else e for e in data])
-
-                self.output = data
-
-            if stream_record_event is not None:
-                stream_record_event.record(self.stream)
-
-            torch.cuda.nvtx.range_pop()
-
-        if self.free_inputs:
-            for input in inputs:
-                if input is not None:
-                    input.record_stream(self.stream)
-                    input.untyped_storage().resize_(0)
-
-        return self.output
-
-    def get_output(self):
-        """get the forward output"""
-        return self.output
-
-    def backward(self, output_grad, stream_wait_event=None, stream_record_event=None):
-        """schedule node backward"""
-        if not isinstance(output_grad, tuple):
-            output_grad = (output_grad,)
-
-        return self._backward(
-                *output_grad,
-                stream_wait_event=stream_wait_event,
-                stream_record_event=stream_record_event,
-            )
-
-    def _backward(self, *output_grad, stream_wait_event=None, stream_record_event=None):
-        with stream_acquire_context(self.stream, self.event):
-            torch.cuda.nvtx.range_push(f"{self.name} backward")
-            with torch.cuda.stream(self.stream):
-                if stream_wait_event is not None:
-                    stream_wait_event.wait(self.stream)
-
-                outputs = self.output
-                if not isinstance(outputs, tuple):
-                    outputs = (outputs,)
-                assert len(outputs) == len(
-                    output_grad
-                ), f"{len(outputs)} of {type(outputs[0])} vs {len(output_grad)} of {type(output_grad[0])}"
-                if self.backward_func is not None:
-                    output_grad = self.backward_func(outputs, output_grad)
-                else:
-                    output_grad = self.default_backward_func(outputs, output_grad)
-
-            if stream_record_event is not None:
-                stream_record_event.record(self.stream)
-
-            torch.cuda.nvtx.range_pop()
-
-        # output_grad maybe from another stream
-        for g in output_grad:
-            g.record_stream(self.stream)
-
-        grads = self.get_grad()
-        self._release_state()
-
-        return grads
-
-    def get_grad(self):
-        """Get the grad of inputs"""
-        grad = tuple([e.grad if e is not None else None for e in self.inputs])
-        # multiple in, multiple out
-        if len(grad) == 1:
-            grad = grad[0]
-        return grad
-
-    def _release_state(self):
-        """Clear the state of the node"""
-        self.inputs = None
-        self.output = None
-        del self.forward_func
-        del self.backward_func
-
-
-class AbstractSchedulePlan(ABC):
-    """to use combined 1f1b, model must implement build_schedule_plan while take the same
-    signature as model forward but return an instance of AbstractSchedulePlan"""
-
-    @classmethod
-    @abstractmethod
-    def forward_backward(
-        cls,
-        f_schedule_plan,
-        b_schedule_plan,
-        grad=None,
-        f_context=None,
-        b_context=None,
-        pre_forward=None,
-        pre_backward=None,
-        post_forward=None,
-        post_backward=None,
-    ):
-        """forward_backward is the protocol between our schedule logic and model"""
-        ...
-
-
-def schedule_chunk_1f1b(
-    f_schedule_plan,
-    b_schedule_plan,
-    grad=None,
-    f_context=None,
-    b_context=None,
-    pre_forward=None,
-    pre_backward=None,
-    post_forward=None,
-    post_backward=None,
-    block_level_wgrad_compute=False,
+def forward_step_calc_loss(
+    model,
+    output_tensor,
+    loss_func,
+    config,
+    vp_stage,
+    collect_non_loss_data,
+    num_microbatches,
+    forward_data_store,
 ):
-    """model level 1f1b fine-grained schedule"""
-    return type(f_schedule_plan or b_schedule_plan).forward_backward(
-        f_schedule_plan,
-        b_schedule_plan,
-        grad=grad,
-        f_context=f_context,
-        b_context=b_context,
-        pre_forward=pre_forward,
-        pre_backward=pre_backward,
-        post_forward=post_forward,
-        post_backward=post_backward,
-        block_level_wgrad_compute=block_level_wgrad_compute,
-    )
+    """Calculate the loss and number of tokens for forward_step()"""
+    model_vp_stage = getattr(model, "vp_stage", None)
+    if vp_stage is not None and model_vp_stage is not None:
+        assert (
+            vp_stage == model_vp_stage
+        ), f"vp_stage ({vp_stage}) doesn't match model_vp_stage ({model_vp_stage})"
+    num_tokens = torch.tensor(0, dtype=torch.int)
 
+    args = get_args()
+    is_last_stage = False
+    if args.schedule_method == "dualpipev":
+        is_last_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
+    else:
+        is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
+    if is_last_stage:
+        if not collect_non_loss_data:
+            outputs = loss_func(output_tensor)
+            if len(outputs) == 3:
+                output_tensor, num_tokens, loss_reduced = outputs
+                if not config.calculate_per_token_loss:
+                    output_tensor /= num_tokens
+                    output_tensor /= num_microbatches
+            else:
+                # preserve legacy loss averaging behavior (ie, over the number of microbatches)
+                assert len(outputs) == 2
+                output_tensor, loss_reduced = outputs
+                output_tensor *= parallel_state.get_context_parallel_world_size()
+                output_tensor /= num_microbatches
+            forward_data_store.append(loss_reduced)
+        else:
+            data = loss_func(output_tensor, non_loss_data=True)
+            forward_data_store.append(data)
 
-_COMP_STREAM = None
-_COM_STREAM = None
+    if config.timers is not None:
+        config.timers('forward-compute').stop()
 
+    # Set the loss scale for the auxiliary loss of the MoE layer.
+    # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
+    # explicitly.
+    if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
+        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        loss_scale = (
+            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            if config.grad_scale_func is not None
+            else torch.ones(1, device=output_tensor.device)
+        )
+        # Set the loss scale
+        if config.calculate_per_token_loss:
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
+        else:
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
 
-def set_streams(comp_stream=None, com_stream=None):
-    """set the streams for communication and computation"""
-    global _COMP_STREAM
-    global _COM_STREAM
-    if _COMP_STREAM is not None:
-        return
+    # Set the loss scale for Multi-Token Prediction (MTP) loss.
+    if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
+        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        loss_scale = (
+            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            if config.grad_scale_func is not None
+            else torch.ones(1, device=output_tensor.device)
+        )
+        # Set the loss scale
+        if config.calculate_per_token_loss:
+            MTPLossAutoScaler.set_loss_scale(loss_scale)
+        else:
+            MTPLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
 
-    if comp_stream is None:
-        comp_stream = torch.cuda.current_stream()
-    if com_stream is None:
-        com_stream = torch.cuda.Stream(device=torch.cuda.current_device(), priority=0)
-
-    assert _COMP_STREAM is None
-    assert _COM_STREAM is None
-    _COMP_STREAM = comp_stream
-    _COM_STREAM = com_stream
-
-
-def get_comp_stream():
-    """get the stream for computation"""
-    global _COMP_STREAM
-    return _COMP_STREAM
-
-
-def get_com_stream():
-    """get the stream for communication"""
-    global _COM_STREAM
-    return _COM_STREAM
-
-
-class VppContextManager:
-    """a reusable context manager for switch vpp stage"""
-
-    def __init__(self, vpp_rank):
-        self.vpp_rank = vpp_rank
-
-    def __enter__(self):
-        self.origin_vpp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
-        parallel_state.set_virtual_pipeline_model_parallel_rank(self.vpp_rank)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        parallel_state.set_virtual_pipeline_model_parallel_rank(self.origin_vpp_rank)
+    return output_tensor, num_tokens
 
 
 def forward_backward_step(
@@ -384,11 +192,11 @@ def forward_backward_step(
 
     assert (
         checkpoint_activations_microbatch is None
-    ), "checkpoint_activations_microbatch is not supported for combined_1f1b"
+    ), "checkpoint_activations_microbatch is not supported for overlap_moe_expert_parallel_comm"
 
     from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 
-    if config.timers is not None:
+    if f_model is not None and config.timers is not None:
         config.timers('forward-compute', log_level=2).start()
 
     if config.enable_autocast:
@@ -396,7 +204,7 @@ def forward_backward_step(
     else:
         context_manager = contextlib.nullcontext()
 
-    # forward preprocess
+    # forward preprocess, the same as the forward_step()
     unwrap_output_tensor = False
     f_schedule_plan = None
     if f_model is not None:
@@ -414,7 +222,8 @@ def forward_backward_step(
             set_input_tensor(input_tensor)
 
             with context_manager:
-                f_schedule_plan, loss_func = forward_step_func(data_iterator, f_model)
+                unwrapped_model = unwrap_model(f_model)
+                f_schedule_plan, loss_func = forward_step_func(data_iterator, unwrapped_model, return_schedule_plan=True)
                 assert isinstance(
                     f_schedule_plan, AbstractSchedulePlan
                 ), "first output of forward_step_func must be one instance of AbstractSchedulePlan"
@@ -440,11 +249,13 @@ def forward_backward_step(
         # Backward pass for loss function
         b_schedule_plan = b_output_tensor[0].schedule_plan
         b_output_tensor[0].schedule_plan = None
-        if b_output_tensor_grad[0] is None and config.grad_scale_func is not None:
+        if b_output_tensor_grad[0] is None:
             # backward schedule plan
             loss_node = b_output_tensor[0].loss_func
             b_output_tensor[0].loss_func = None
-            b_output_tensor[0] = config.grad_scale_func(b_output_tensor[0])
+            if config.grad_scale_func is not None:
+                b_output_tensor[0] = config.grad_scale_func(b_output_tensor[0])
+
             torch.autograd.backward(b_output_tensor[0], grad_tensors=b_output_tensor_grad[0])
             b_output_tensor_grad[0] = loss_node.get_grad()
 
@@ -456,13 +267,13 @@ def forward_backward_step(
     use_outer_fp8_context = config.fp8 and config.fp8_recipe == Fp8Recipe.delayed
     outer_fp8_context = get_fp8_context(config) if use_outer_fp8_context else nullcontext()
 
-    grad = b_output_tensor_grad[0] if b_model else None
+    b_grad = b_output_tensor_grad[0] if b_model else None
     with context_manager and outer_fp8_context:
         # schedule forward and backward
-        output_tensor, chunk_backward_dw_func = schedule_chunk_1f1b(
+        output_tensor, chunk_backward_dw_func = type(f_schedule_plan or b_schedule_plan).run(
             f_schedule_plan,
             b_schedule_plan,
-            grad,
+            b_grad=b_grad,
             f_context=f_context,
             b_context=b_context,
             pre_forward=pre_forward,
@@ -474,84 +285,26 @@ def forward_backward_step(
 
     # forward post process
     num_tokens = None
-    if f_model:
+    if f_model is not None:
         with f_context:
-            vp_stage = f_context.vpp_rank if hasattr(f_context, 'vpp_rank') else None
-            model_vp_stage = getattr(f_model, "vp_stage", None)
-            if vp_stage is not None and model_vp_stage is not None:
-                assert (
-                    vp_stage == model_vp_stage
-                ), f"vp_stage ({vp_stage}) doesn't match model_vp_stage ({model_vp_stage})"
-
-            num_tokens = torch.tensor(0, dtype=torch.int)
-            args = get_args()
-            is_last_stage = False
-            if args.schedule_method == "dualpipev":
-                is_last_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
-            else:
-                is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
-            if is_last_stage:
-                if not collect_non_loss_data:
-                    loss_node = ScheduleNode(
-                        loss_func,
-                        torch.cuda.current_stream(),
-                        f_schedule_plan.event,
-                        name="loss_func",
-                    )
-                    loss_func = loss_node.forward
-                    outputs = loss_func(output_tensor)
-                    if len(outputs) == 3:
-                        output_tensor, num_tokens, loss_reduced = outputs
-                        if not config.calculate_per_token_loss:
-                            output_tensor /= num_tokens
-                            output_tensor /= num_microbatches
-                    else:
-                        # preserve legacy loss averaging behavior (ie, over the number of microbatches)
-                        assert len(outputs) == 2
-                        output_tensor, loss_reduced = outputs
-                        output_tensor *= parallel_state.get_context_parallel_world_size()
-                        output_tensor = output_tensor / num_microbatches
-                    forward_data_store.append(loss_reduced)
-
-                    # attach loss_func on output_tensor
-                    output_tensor.loss_func = loss_node
-                else:
-                    data = loss_func(output_tensor, non_loss_data=True)
-                    forward_data_store.append(data)
-            # attach schedule plan on output tensor
+            loss_node = ScheduleNode(
+                loss_func, torch.cuda.current_stream(), f_schedule_plan.event, name="loss_func"
+            )
+            loss_func = loss_node.forward
+            output_tensor, num_tokens = forward_step_calc_loss(
+                f_model,
+                output_tensor,
+                loss_func,
+                config,
+                f_context.vpp_rank if hasattr(f_context, 'vpp_rank') else None,
+                collect_non_loss_data,
+                num_microbatches,
+                forward_data_store,
+            )
+            # Set the schedule plan and loss function to the output tensor
+            # This is used to get the schedule plan and loss function in the backward pass
             output_tensor.schedule_plan = f_schedule_plan
-            if config.timers is not None:
-                config.timers('forward-compute').stop()
-
-            # Set the loss scale for the auxiliary loss of the MoE layer.
-            # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
-            # explicitly.
-            if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
-                # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
-                loss_scale = (
-                    config.grad_scale_func(torch.ones(1, device=output_tensor.device))
-                    if config.grad_scale_func is not None
-                    else torch.ones(1, device=output_tensor.device)
-                )
-                # Set the loss scale
-                if config.calculate_per_token_loss:
-                    MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
-                else:
-                    MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
-
-            # Set the loss scale for Multi-Token Prediction (MTP) loss.
-            if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
-                # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
-                loss_scale = (
-                    config.grad_scale_func(torch.ones(1, device=output_tensor.device))
-                    if config.grad_scale_func is not None
-                    else torch.ones(1, device=output_tensor.device)
-                )
-                # Set the loss scale
-                if config.calculate_per_token_loss:
-                    MTPLossAutoScaler.set_loss_scale(loss_scale)
-                else:
-                    MTPLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+            output_tensor.loss_func = loss_node
 
             if not unwrap_output_tensor:
                 output_tensor, num_tokens = [output_tensor], num_tokens
@@ -572,31 +325,3 @@ def forward_backward_step(
             input_tensor_grad = input_tensor_grad[0]
 
     return output_tensor, num_tokens, input_tensor_grad, chunk_backward_dw_func
-
-
-def unwrap_model(model, module_instances=ALL_MODULE_WRAPPER_CLASSNAMES):
-    """Unwrap_model to return the final model instance"""
-    return_list = True
-    if not isinstance(model, list):
-        model = [model]
-        return_list = False
-    unwrapped_model = []
-    for model_module in model:
-        while isinstance(model_module, module_instances):
-            model_module = model_module.module
-        unwrapped_model.append(model_module)
-    if not return_list:
-        return unwrapped_model[0]
-    return unwrapped_model
-
-
-def wrap_forward_func(config, forward_step_func):
-    """wrap the input to forward_step_func, to make forward_step_func return schedule plan"""
-
-    def wrapped_func(data_iterator, model):
-        return forward_step_func(data_iterator, unwrap_model(model).build_schedule_plan)
-
-    if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a":
-        return wrapped_func
-    else:
-        return forward_step_func

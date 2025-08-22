@@ -34,6 +34,7 @@ def is_flux_min_version(version, check_equality=True):
         return get_flux_version() >= PkgVersion(version)
     return get_flux_version() > PkgVersion(version)
 
+
 def _get_elapsed_time_all_ranks(barrier):
     # First make sure all the callers are in sync.
     if barrier:

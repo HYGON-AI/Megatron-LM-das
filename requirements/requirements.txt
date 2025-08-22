@@ -9,6 +9,7 @@ pybind11
 blobfile
 flux
 tiktoken
+torch >=2.6.0
 
 # ==== test ====
 nltk

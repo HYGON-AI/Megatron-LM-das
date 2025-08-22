@@ -166,6 +166,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
+        from ..core.transformer.attention import self_attention_get_query_key_value_tensors_wrapper
         
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
@@ -179,6 +180,10 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     moe_layer_init_wrapper)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
                                     moe_layer_forward_wrapper)
+        # query, key use the same norm
+        MegatronAdaptation.register('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
+                                    self_attention_get_query_key_value_tensors_wrapper,
+                                    apply_wrapper=True)
 
         # Moe
         # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
@@ -294,6 +299,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.initialize import _compile_dependencies
         from ..training.training import train
         from ..training.initialize import _set_random_seed
+        from ..training.training import train_step
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
@@ -312,6 +318,10 @@ class CoreAdaptation(MegatronAdaptationABC):
         # add trace_handler
         MegatronAdaptation.register('megatron.training.training.train',
                                     train)
+        # support dualpipev, edgc
+        MegatronAdaptation.register('megatron.training.training.train_step',
+                                    train_step)
+
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args, validate_args_func_decorator

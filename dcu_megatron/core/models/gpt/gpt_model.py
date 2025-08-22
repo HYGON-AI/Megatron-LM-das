@@ -193,21 +193,19 @@ class GPTModel:
         Returns:
             ModelChunkSchedulePlan: The model chunk schedule plan.
         """
-        from .fine_grained_schedule import build_model_chunk_schedule_plan
+        from ..common.model_chunks_schedule_plan import TransformerModelChunkSchedulePlan
 
-        return build_model_chunk_schedule_plan(
+        return TransformerModelChunkSchedulePlan(
             self,
             input_ids,
             position_ids,
             attention_mask,
-            decoder_input=decoder_input,
-            labels=labels,
-            inference_context=inference_context,
-            packed_seq_params=packed_seq_params,
-            extra_block_kwargs=extra_block_kwargs,
-            runtime_gather_output=runtime_gather_output,
-            inference_params=inference_params,
-            loss_mask=loss_mask,
+            decoder_input,
+            labels,
+            packed_seq_params,
+            extra_block_kwargs,
+            runtime_gather_output,
+            loss_mask,
         )
 
     def backward_dw(self):

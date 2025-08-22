@@ -1,7 +1,8 @@
 import contextlib
-from typing import Iterator, List, Union
-
 import torch
+
+from functools import wraps, partial
+from typing import Iterator, List, Union, Optional, Callable
 
 from megatron.training import get_args
 from megatron.core import parallel_state
@@ -23,8 +24,40 @@ from megatron.core.pipeline_parallel.schedules import (
     finish_embedding_wgrad_compute,
     clear_embedding_activation_buffer,
 )
+from megatron.core.utils import (
+    nvtx_range_pop,
+    nvtx_range_push,
+)
 
-from .combined_1f1b import VppContextManager, forward_backward_step, set_streams, wrap_forward_func
+from .combined_1f1b import forward_backward_step
+from .utils import VppContextManager, set_streams
+from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
+
+
+def get_forward_backward_func_wrapper(fn):
+    @wraps(fn)
+    def wrapper():
+        """Retrieves the appropriate forward_backward function given the
+        configuration of parallel_state.
+
+        Returns a function that will perform all of the forward and
+        backward passes of the model given the pipeline model parallel
+        world size and virtual pipeline model parallel world size in the
+        global parallel_state.
+
+        """
+
+        args = get_args()
+        if args.schedule_method == "vanilla":
+            return fn()
+        elif args.schedule_method == "dualpipev":
+            return forward_backward_pipelining_with_cutinhalf
+        elif args.schedule_method == "interleaved_1f1b":
+            return forward_backward_pipelining_with_interleaving
+        else:
+            raise ValueError(f"schedule_method {args.schedule_method} is not supported")
+
+    return wrapper
 
 
 def get_pp_rank_microbatches(
@@ -55,7 +88,7 @@ def get_pp_rank_microbatches(
             num_warmup_microbatches = (pipeline_parallel_size - pipeline_parallel_rank - 1) * 2
             num_warmup_microbatches += (num_model_chunks - 1) * microbatch_group_size_per_vp_stage
 
-            if args.combined_1f1b:
+            if args.overlap_moe_expert_parallel_comm:
                 num_warmup_microbatches = num_warmup_microbatches + 1
     else:
         # forward_backward_no_pipelining
@@ -115,10 +148,6 @@ def forward_backward_pipelining_with_interleaving(
     config = get_model_config(model[0])
 
     set_streams()
-    if config.combined_1f1b and not forward_only:
-        # in combined_1f1b, we need to wrap the forward_step_func
-        # to return a schedule plan instead of the forward output tensor
-        forward_step_func = wrap_forward_func(forward_step_func)
 
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
@@ -553,7 +582,7 @@ def forward_backward_pipelining_with_interleaving(
                     backward_step_helper_preprocess(b_virtual_microbatch_id, b_model_chunk_id)
                 )
 
-        output_tensor, num_tokens, input_tensor_grad = forward_backward_step(
+        output_tensor, num_tokens, input_tensor_grad, _ = forward_backward_step(
             forward_step_func,
             data_iterator[f_model_chunk_id] if f_model_chunk_id is not None else None,
             model[f_model_chunk_id] if f_model_chunk_id is not None else None,
@@ -583,7 +612,6 @@ def forward_backward_pipelining_with_interleaving(
                 ),
             ),
             current_microbatch=f_microbatch_id,
-            vp_stage=f_model_chunk_id,
         )
 
         # forward post process
@@ -613,10 +641,10 @@ def forward_backward_pipelining_with_interleaving(
         wrap forward_helper、backward_helper、combined_forward_backward_helper in a unified way
         """
 
-        if config.combined_1f1b and config.combined_1f1b_recipe == "ep_a2a" and not forward_only:
+        if config.overlap_moe_expert_parallel_comm and not forward_only:
             assert (
                 checkpoint_activations_microbatch is None
-            ), "checkpoint_activations_microbatch not supported when combined_1f1b is true"
+            ), "checkpoint_activations_microbatch not supported when overlap_moe_expert_parallel_comm is true"
             return combined_forward_backward_helper(
                 f_virtual_microbatch_id=f_virtual_microbatch_id,
                 b_virtual_microbatch_id=b_virtual_microbatch_id,
@@ -856,11 +884,13 @@ def forward_backward_pipelining_with_interleaving(
         
         microbatch_id = get_microbatch_id_in_model_chunk(forward_k, forward=True)
         if config.overlap_p2p_comm:
-            def pp_pre_forward():
+            def pp_pre_forward(vp_stage=None):
                 nonlocal recv_prev_wait_handles
-                cur_model_chunk_id = get_model_chunk_id(forward_k, forward=True)
 
-                if not is_vp_first_stage(vp_stage=cur_model_chunk_id):
+                if vp_stage is None:
+                    vp_stage = get_model_chunk_id(forward_k, forward=True)
+
+                if not is_vp_first_stage(vp_stage=vp_stage):
 
                     if config.overlap_p2p_comm_warmup_flush:
                         assert recv_prev_wait_handles, (
@@ -876,18 +906,17 @@ def forward_backward_pipelining_with_interleaving(
 
                 deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
-            def pp_post_forward(output_tensor):
+            def pp_post_forward(output_tensor, vp_stage=None):
                 nonlocal send_next_wait_handle
                 nonlocal fwd_recv_buffer
                 nonlocal fwd_wait_handles
                 nonlocal recv_prev_wait_handles
 
-                # Determine if current stage has anything to send in either direction,
-                # otherwise set tensor to None.
-                forward_model_chunk_id = get_model_chunk_id(forward_k, forward=True)
+                if vp_stage is None:
+                    vp_stage = get_model_chunk_id(forward_k, forward=True)
 
                 # Last virtual stage no activation tensor to send.
-                if is_vp_last_stage(vp_stage=forward_model_chunk_id):
+                if is_vp_last_stage(vp_stage=vp_stage):
                     output_tensor = None
 
                 recv_prev, next_forward_model_chunk_id = recv_tensor_from_previous_stage(
@@ -931,10 +960,12 @@ def forward_backward_pipelining_with_interleaving(
             # Backward pass.
             backward_k = k
             # grad send receive sync
-            def pp_pre_backward():
+            def pp_pre_backward(vp_stage=None):
                 nonlocal recv_next_wait_handles
-                backward_model_chunk_id = get_model_chunk_id(backward_k, forward=False)
-                if not is_vp_last_stage(vp_stage=backward_model_chunk_id):
+
+                if vp_stage is None:
+                    vp_stage = get_model_chunk_id(backward_k, forward=False)
+                if not is_vp_last_stage(vp_stage=vp_stage):
                     if config.overlap_p2p_comm_warmup_flush:
                         assert recv_next_wait_handles, (
                             f'pp rank {pipeline_parallel_rank}, bwd iteration {backward_k}, '
@@ -948,15 +979,16 @@ def forward_backward_pipelining_with_interleaving(
                             recv_next_wait_handle.wait()
 
             # async grad send receive
-            def pp_post_backward(input_tensor_grad):
+            def pp_post_backward(input_tensor_grad, vp_stage=None):
                 nonlocal send_prev_wait_handle
                 nonlocal bwd_wait_handles
                 nonlocal recv_next_wait_handles
                 nonlocal bwd_recv_buffer
 
                 # First virtual stage no activation gradient tensor to send.
-                backward_model_chunk_id = get_model_chunk_id(backward_k, forward=False)
-                if is_vp_first_stage(vp_stage=backward_model_chunk_id):
+                if vp_stage is None:
+                    vp_stage = get_model_chunk_id(backward_k, forward=False)
+                if is_vp_first_stage(vp_stage=vp_stage):
                     input_tensor_grad = None
 
                 recv_next, next_backward_model_chunk_id = recv_tensor_from_previous_stage(

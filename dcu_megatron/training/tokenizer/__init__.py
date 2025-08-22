@@ -1,1 +1,1 @@
-from .tokenizer import build_tokenizer
+from .tokenizer import build_tokenizer_wrapper

@@ -1,5 +1,7 @@
 from typing import Optional, Tuple, Union
+from functools import wraps
 
+import torch
 from torch import Tensor
 
 from megatron.core.inference.contexts import BaseInferenceContext
@@ -28,11 +30,34 @@ except:
     HAVE_FA3 = False
 
 
+def self_attention_get_query_key_value_tensors_wrapper(get_query_key_value_tensors_func):
+    @wraps(get_query_key_value_tensors_func)
+    def wrapper(self, hidden_states, key_value_states=None):
+        query, key, value = get_query_key_value_tensors_func(self, hidden_states=hidden_states, key_value_states=key_value_states)
+
+        # ================================================
+        # QK_norm before RoPE
+        # ================================================
+        if self.config.use_qk_norm:
+            qk_norm = torch.nn.RMSNorm(normalized_shape=query.shape[-1]).cuda()
+            query = qk_norm(query).type_as(query)
+            key = qk_norm(key).type_as(key)
+
+        return query, key, value
+
+    return wrapper
+
+
 class SelfAttention():
     def compute_qkv(
         self,
         hidden_states: Tensor,
         key_value_states: Optional[Tensor] = None,
+        inference_context=None,  # pylint: disable=unused-arguments
+        packed_seq_params=None,  # pylint: disable=unused-arguments
+        position_ids=None,       # pylint: disable=unused-arguments
+        *,
+        inference_params=None,   # pylint: disable=unused-arguments
     ):
         """
         Perform a forward pass through the attention module.

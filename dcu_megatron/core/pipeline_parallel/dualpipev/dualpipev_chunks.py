@@ -2,35 +2,18 @@ import dataclasses
 
 import torch
 
-try:
-    from megatron.post_training.algos.distillation import (
-        get_tensor_shapes_adjust_fn_for_distillation,
-    )
-
-    has_nvidia_modelopt = True
-except ImportError:
-    has_nvidia_modelopt = False
-
 from functools import wraps
-from typing import List, Optional
+from typing import Optional
 from megatron.core import mpu, tensor_parallel
 from megatron.core.utils import get_model_config
 from megatron.core.transformer.module import Float16Module
-from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.enums import ModelType
-from megatron.training.global_vars import get_args, get_timers
-from megatron.training.utils import unwrap_model
-from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.training.global_vars import get_args
 from megatron.core.transformer.module import fp32_to_float16, float16_to_fp32
-from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core import parallel_state
-from megatron.training.utils import (
-    logical_and_across_model_parallel_group,
-    reduce_max_stat_across_model_parallel_group
-)
 
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
 
@@ -163,131 +146,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     return model
 
 
-def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
-    """Single training step."""
-    args = get_args()
-    timers = get_timers()
-
-    rerun_state_machine = get_rerun_state_machine()
-    while rerun_state_machine.should_run_forward_backward(data_iterator):
-        # Set grad to zero.
-        for model_chunk in model:
-            model_chunk.zero_grad_buffer()
-        optimizer.zero_grad()
-
-        if has_nvidia_modelopt:
-            # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
-            adjust_tensor_shapes_fn = get_tensor_shapes_adjust_fn_for_distillation(
-                model, args.seq_length, args.micro_batch_size, args.decoder_seq_length
-            )
-        else:
-            adjust_tensor_shapes_fn = None
-
-        # Forward pass.
-        forward_backward_func = get_forward_backward_func()
-        losses_reduced = forward_backward_func(
-            forward_step_func=forward_step_func,
-            data_iterator=data_iterator,
-            model=model,
-            num_microbatches=get_num_microbatches(),
-            seq_length=args.seq_length,
-            micro_batch_size=args.micro_batch_size,
-            decoder_seq_length=args.decoder_seq_length,
-            forward_only=False,
-            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
-        )
-    should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
-    if should_exit:
-        return {}, True, should_checkpoint, should_exit, exit_code, None, None
-
-    # Empty unused memory.
-    if args.empty_unused_memory_level >= 1:
-        torch.cuda.empty_cache()
-
-    # Vision gradients.
-    if args.vision_pretraining and args.vision_pretraining_type == "dino":
-        unwrapped_model = unwrap_model(model[0])
-        unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
-
-    # Update parameters.
-
-    timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    timers('optimizer').stop()
-
-    # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
-    # so we must gather across mp ranks
-    update_successful = logical_and_across_model_parallel_group(update_successful)
-    # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
-    # so we must gather across mp ranks
-    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
-    if args.log_num_zeros_in_grad:
-        num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
-
-    # Vision momentum.
-    if args.vision_pretraining and args.vision_pretraining_type == "dino":
-        unwrapped_model = unwrap_model(model[0])
-        unwrapped_model.update_momentum(args.curr_iteration)
-
-    # Update learning rate.
-    if update_successful:
-        increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
-        opt_param_scheduler.step(increment=increment)
-        skipped_iter = 0
-    else:
-        skipped_iter = 1
-
-    # Empty unused memory.
-    if args.empty_unused_memory_level >= 2:
-        torch.cuda.empty_cache()
-
-    if mpu.is_pipeline_first_stage(ignore_virtual=True):
-        # Average loss across microbatches.
-        loss_reduced = {}
-
-        for key in losses_reduced[0].keys():
-            val = [x[key].view(-1) for x in losses_reduced]
-            if val[0].numel() == 2:
-                if args.sft:
-                    # in mcore the normalization happens on micro batch instead of global
-                    val = torch.vstack(val)
-                    val = val[:, 0] / val[:, 1]
-                    val = val.mean()
-                    torch.distributed.all_reduce(
-                        val,
-                        group=mpu.get_data_parallel_group(with_context_parallel=True)
-                    )
-                    val /= torch.distributed.get_world_size(
-                        group=mpu.get_data_parallel_group(with_context_parallel=True)
-                    )
-                    loss_reduced[key] = val
-                else:
-                    # there is one dict per microbatch. in new reporting, we average
-                    # over the total number of tokens across the global batch.
-                    val = torch.vstack(val).sum(dim=0)
-                    torch.distributed.all_reduce(
-                        val,
-                        group=mpu.get_data_parallel_group(with_context_parallel=True)
-                    )
-                    loss_reduced[key] = val[0] / val[1]
-            elif val[0].numel() == 1:
-                # legacy behavior, we average over the number of microbatches
-                val = torch.cat(val).mean()
-                loss_reduced[key] = val
-            else:
-                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
-        return (
-            loss_reduced,
-            skipped_iter,
-            should_checkpoint,
-            should_exit,
-            exit_code,
-            grad_norm,
-            num_zeros_in_grad,
-        )
-    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
-
-
 def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] = None) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
@@ -298,6 +156,16 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] =
         int: The number of layers to be built for the current pipeline stage.
     """
     args = get_args()
+    if args.num_layers_to_build is not None:
+        if isinstance(args.num_layers_to_build, int):
+            return args.num_layers_to_build
+
+        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+        if getattr(args, 'dualpipev_first_chunk', True):
+            return args.num_layers_to_build[pp_rank]
+        else:
+            return args.num_layers_to_build[-1-pp_rank]
+
     if (
         config.num_layers_in_first_pipeline_stage is not None
         or config.num_layers_in_last_pipeline_stage is not None
@@ -335,12 +203,14 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] =
         # parallel stage.
         if (
             parallel_state.is_pipeline_first_stage(ignore_virtual=True)
+            and getattr(args, 'dualpipev_first_chunk', True)
             and config.num_layers_in_first_pipeline_stage is not None
         ):
             num_layers_per_pipeline_rank = config.num_layers_in_first_pipeline_stage
 
         if (
-            parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+            parallel_state.is_pipeline_first_stage(ignore_virtual=True)
+            and not getattr(args, 'dualpipev_first_chunk', True)
             and config.num_layers_in_last_pipeline_stage is not None
         ):
             num_layers_per_pipeline_rank = config.num_layers_in_last_pipeline_stage

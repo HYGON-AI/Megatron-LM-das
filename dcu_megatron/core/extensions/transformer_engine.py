@@ -1,28 +1,34 @@
 import os
-import copy
 import torch
 import dataclasses
 import transformer_engine as te
 
-from typing import Any, Optional, Callable
+from typing import Any, Optional
 from packaging.version import Version as PkgVersion
 
-from megatron.training import get_args
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
 from megatron.core.utils import get_te_version, is_te_min_version
 from megatron.core.extensions.transformer_engine import TEDotProductAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.model_parallel_config import ModelParallelConfig
-from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear as MegatronCoreTELayerNormColumnParallelLinear
+from megatron.core.process_groups_config import ModelCommProcessGroups
 
 from megatron.core.parallel_state import (
-    get_context_parallel_global_ranks,
     get_context_parallel_group,
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
 )
+
+try:
+    import transformer_engine as te
+
+    HAVE_TE = True
+except ImportError:
+    from unittest.mock import MagicMock
+
+    te = MagicMock()
+    HAVE_TE = False
 
 
 class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):

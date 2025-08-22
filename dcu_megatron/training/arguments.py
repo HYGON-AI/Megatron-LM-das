@@ -1,4 +1,3 @@
-import os
 import argparse
 
 from typing import Union
@@ -85,6 +84,8 @@ def _add_extra_network_size_args(parser):
     group.add_argument('--normalization', default='LayerNorm',
                        choices=['LayerNorm', 'RMSNorm', 'LightopRMSNorm'],
                        help='Which normalization technique to use.')
+    group.add_argument('--use-qk-norm', action='store_true',default=False,
+                       help='Enable RMSNorm on Q, K before RoPE')
     return parser
 
 
@@ -179,7 +180,27 @@ def validate_args_func_decorator(validate_args_func):
         if defaults is None:
             defaults = {}
 
+        for feature in ADAPTOR_FEATURES:
+            args = feature.pre_validate_args(args)
+
+        # set num_layers. Otherwise validate_args will raise an error with msg 'Number of layers should be divisible by the pipeline-model-parallel size'
+        if args.schedule_method == "dualpipev":
+            args.encoder_num_layers = args.num_layers
+            args.num_layers = None
+
+        # delay_wgrad_compute supports overlap_grad_reduce
+        origin_delay_wgrad_compute = args.delay_wgrad_compute
+        args.delay_wgrad_compute = False
+
         args = validate_args_func(args, defaults)
+
+        # Check delay_wgrad_compute compatibility
+        args.delay_wgrad_compute = origin_delay_wgrad_compute
+        if args.delay_wgrad_compute:
+            assert not args.moe_use_legacy_grouped_gemm, \
+                'delay_wgrad_compute is not supported with legacy groupedgemm implementation'
+            assert args.transformer_impl == 'transformer_engine', \
+                'delay_wgrad_compute is only supported with transformer_engine implementation'
 
         for feature in ADAPTOR_FEATURES:
             feature.validate_args(args)

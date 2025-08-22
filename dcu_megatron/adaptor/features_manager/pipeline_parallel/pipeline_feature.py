@@ -1,9 +1,42 @@
 import os
+import re
 
 from argparse import ArgumentParser
-from megatron.core.utils import is_te_min_version
+from megatron.core.utils import is_te_min_version, is_torch_min_version
 
 from ..feature import AbstractFeature
+
+
+def _eval_pattern(pattern):
+    """ Validate and evaluate a string containing a Python list expression """
+    assert isinstance(pattern, str)
+
+    # validate input, only allow comma, digits, [, ], (, ), +, and *
+    if bool(re.compile(r'[^,\d\[\]\(\)\+\*]').search(pattern)):
+        raise ValueError(f"Invalid pattern: {pattern}")
+
+    return eval(pattern)
+
+
+def num_layers_build_type(x):
+    """number of layers to build.
+
+    Accepts either:
+    - An integer N: meaning n layers for each model block
+    - A string "N": Same as above, but provided as a string
+    - A string containing a Python list expression that defines a custom pattern, e.g.:
+      "([1]*3+[2]*1)*3" evaluates to [1,1,1,2,1,1,1,2,1,1,1,2]
+      The pattern length must match the total number of transformer blocks.
+    """
+    if isinstance(x, int):
+        return x
+    assert isinstance(x, str)
+    if '[' in x:
+        # it's a custom pattern
+        return _eval_pattern(x)
+    else:
+        # it's a single int but in str
+        return int(x)
 
 
 class PipelineFeature(AbstractFeature):
@@ -17,18 +50,40 @@ class PipelineFeature(AbstractFeature):
                            default='vanilla',
                            choices=['vanilla', 'dualpipev', 'interleaved_1f1b'],
                            help='Use pipeline provided by megatron if schedule-method is set to vanilla')
-        group.add_argument('--combined-1f1b', action='store_true',
-                           help='Batch-level overlapping in 1f1b stage.')
-        group.add_argument('--combined-1f1b-recipe', type=str,
-                           choices=['ep_a2a', 'golden'],
-                           default='golden',
-                           help='Options are "ep_a2a" and "golden".')
-        group.add_argument('--delay-wgrad-compute', action='store_true',
-                           help='Split dgrad and wgrad for batch-level overlapping')
+        # MoE communication overlap arguments
+        group.add_argument('--overlap-moe-expert-parallel-comm', action='store_true',
+                           help='Overlap the EP A2A communication by batch-level overlapping in 1f1b stage.')
+        group.add_argument('--num-layers-to-build', type=num_layers_build_type, default=None,
+                           help='number of layers to build: '
+                                '- An integer N: meaning n layers for each model block '
+                                '- A string containing a Python list expression that defines a custom pattern')
+
+    def pre_validate_args(self, args):
+        if args.schedule_method != "dualpipev":
+            return args
+
+        pp_size = args.pipeline_model_parallel_size * 2
+        if args.num_layers is None and args.num_layers_to_build is not None:
+            pp_size = args.pipeline_model_parallel_size
+            if isinstance(args.num_layers_to_build, int):
+                args.num_layers = args.num_layers_to_build * pp_size * 2
+            else:
+                assert len(args.num_layers_to_build) == pp_size * 2, "The pattern length must match the total number of transformer blocks"
+                args.num_layers = sum(args.num_layers_to_build)
+
+        return args
 
     def validate_args(self, args):
+        if args.schedule_method in {"interleaved_1f1b", "dualpipev"}:
+            if args.delay_wgrad_compute and args.overlap_grad_reduce:
+                assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
+                    "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"
+
         if args.schedule_method == "interleaved_1f1b":
-            assert args.combined_1f1b, "combined-1f1b should be true when using interleaved_1f1b provided by dcu-megatron."
+            assert args.overlap_moe_expert_parallel_comm, "overlap_moe_expert_parallel_comm should be true when using interleaved_1f1b provided by dcu-megatron."
+
+        if args.overlap_moe_expert_parallel_comm:
+            assert is_torch_min_version("2.6.0"), "A2A Overlap encounters hang issue with torch version < 2.6.0"
 
         if args.schedule_method == "dualpipev":
             if args.num_layers_per_virtual_pipeline_stage is not None:
@@ -36,6 +91,16 @@ class PipelineFeature(AbstractFeature):
 
             layers_to_distribute = args.num_layers
             pipeline_stages_left = args.pipeline_model_parallel_size * 2
+            if args.num_layers_to_build is not None:
+                assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, \
+                    "--decoder-first-pipeline-num-layers and --decoder-last-pipeline-num-layers should NOT be set when using --num-layers-to-build"
+
+                if isinstance(args.num_layers_to_build, int):
+                    assert args.num_layers_to_build * pipeline_stages_left == layers_to_distribute, "num-layers-to-build mismatch with num-layers"
+                else:
+                    assert len(args.num_layers_to_build) == pipeline_stages_left, "The pattern length must match the total number of transformer blocks"
+                    assert sum(args.num_layers_to_build) == args.num_layers
+
             if args.decoder_first_pipeline_num_layers is not None and args.decoder_last_pipeline_num_layers is not None:
                 if args.decoder_first_pipeline_num_layers is not None:
                     layers_to_distribute -= args.decoder_first_pipeline_num_layers
@@ -55,30 +120,32 @@ class PipelineFeature(AbstractFeature):
             if not args.delay_wgrad_compute:
                 raise AssertionError("delay-wgrad-compute should be True")
 
-            if not bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))):
-                raise AssertionError("NVTE_OVERLAP_GRAD_REDUCE should be set to 1")
-
             if not is_te_min_version("2.4.0"):
                 raise AssertionError("Must have at least transformer-engine version of 2.4.0")
 
-        if args.combined_1f1b:
+        if args.overlap_moe_expert_parallel_comm:
             assert args.transformer_impl == "transformer_engine", \
                 "moe a2a overlap is only supported with transformer_engine implementation"
             assert args.schedule_method == "dualpipev" or args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
                 'moe a2a overlap is only supported with vpp or dualpipev'
 
     def register_patches(self, patch_manager, args):
+        from dcu_megatron.core.pipeline_parallel.schedules import get_forward_backward_func_wrapper
+
+        patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_forward_backward_func',
+                                    get_forward_backward_func_wrapper,
+                                    apply_wrapper=True)
+
         if args.schedule_method == "vanilla":
             return
 
         if args.schedule_method == "dualpipev":
             from megatron.training.utils import print_rank_0
-            from dcu_megatron.core.pipeline_parallel.dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
+
             from dcu_megatron.core.pipeline_parallel.dualpipev.dualpipev_chunks import (
                 get_model,
                 dualpipev_fp16forward,
                 get_num_layers_to_build,
-                train_step,
                 _allreduce_embedding_grads_wrapper
             )
             from dcu_megatron.training.training import evaluate
@@ -88,10 +155,6 @@ class PipelineFeature(AbstractFeature):
 
             patch_manager.register_patch(
                 'megatron.training.training.get_model', get_model)
-            patch_manager.register_patch(
-                'megatron.training.training.train_step', train_step)
-            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_without_interleaving',
-                                         forward_backward_pipelining_with_cutinhalf)
             patch_manager.register_patch(
                 'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
             patch_manager.register_patch(
@@ -120,14 +183,10 @@ class PipelineFeature(AbstractFeature):
                 get_batch_on_this_tp_rank)
 
         if args.schedule_method == "interleaved_1f1b":
-            from dcu_megatron.core.pipeline_parallel.schedules import get_pp_rank_microbatches, forward_backward_pipelining_with_interleaving
+            from dcu_megatron.core.pipeline_parallel.schedules import get_pp_rank_microbatches
             # num_warmup_microbatches + 1
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_pp_rank_microbatches',
                                         get_pp_rank_microbatches)
-
-            # a2a_overlap
-            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
-                                        forward_backward_pipelining_with_interleaving)
 
         from dcu_megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
@@ -143,13 +202,12 @@ class PipelineFeature(AbstractFeature):
 
         patch_manager.register_patch('megatron.core.transformer.moe.token_dispatcher.MoEAlltoAllTokenDispatcher',
                                     MoEAlltoAllTokenDispatcher)
-
-        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer',
-                                    TransformerLayer)
-
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
                                     GPTModel.build_schedule_plan,
-                                    create_dummy=True) # TODO 250808
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
+                                    TransformerLayer.backward_dw,
+                                    create_dummy=True)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.backward_dw',
                                     GPTModel.backward_dw,
                                     create_dummy=True)
@@ -162,6 +220,15 @@ class PipelineFeature(AbstractFeature):
 
         patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
                                     MLASelfAttention.backward_dw,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.compute_qkv',
+                                    MLASelfAttention.compute_qkv,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.compute_attn',
+                                    MLASelfAttention.compute_attn,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.compute_proj',
+                                    MLASelfAttention.compute_proj,
                                     create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_qkv',
                                     SelfAttention.compute_qkv,
