@@ -38,8 +38,8 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
                 "are enabled without also enabling sequence parallelism."
             )
 
-        def custom_forward_experts(dispatched_input, tokens_per_expert):
-            expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
+        def custom_forward_experts(dispatched_input, tokens_per_expert, permuted_probs):
+            expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert, permuted_probs)
             return expert_output, mlp_bias
         
         def custom_forward_router(hidden_states):
@@ -47,19 +47,33 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
             return probs, routing_map
 
         if self.experts_recompute or self.router_recompute:
-            probs, routing_map = tensor_parallel.checkpoint(custom_forward_router, False, hidden_states) \
-                                 if self.router_recompute else self.router(hidden_states)
-            (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
-                hidden_states, probs, routing_map
-            )
-            expert_output, mlp_bias = tensor_parallel.checkpoint(custom_forward_experts, False, dispatched_input, tokens_per_expert) \
-                                      if self.experts_recompute else self.experts(dispatched_input, tokens_per_expert)
-            output, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
-            if self.use_shared_expert and not self.shared_expert_overlap:
-                # if shared_expert_overlap is True, the expert calculation happens in
-                # the token_dispatcher to overlap communications and computations
-                output = output + self.shared_experts(hidden_states)
+            residual = hidden_states
+            if self.router_recompute:
+                probs, routing_map = tensor_parallel.checkpoint(custom_forward_router, False, hidden_states)
+            else:
+                probs, routing_map = custom_forward_router(hidden_states)
 
+            hidden_states, probs = self.token_dispatcher.dispatch_preprocess(
+                hidden_states, routing_map, probs
+            )
+
+            dispatched_input, probs = self.dispatch(hidden_states, probs)
+            shared_expert_output = None
+            if self.use_shared_expert and not self.shared_expert_overlap:
+                # Compute the shared expert separately when not overlapped with communication.
+                shared_expert_output = self.shared_experts(residual)
+            dispatched_input, tokens_per_expert, permuted_probs = (
+                self.token_dispatcher.dispatch_postprocess(hidden_states, probs)
+            )
+            if self.experts_recompute:
+                expert_output, mlp_bias = tensor_parallel.checkpoint(custom_forward_experts, False, dispatched_input, tokens_per_expert, permuted_probs)
+            else:
+                expert_output, mlp_bias = custom_forward_experts(dispatched_input, tokens_per_expert, permuted_probs)
+
+            assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
+            output = self.token_dispatcher.combine_preprocess(expert_output)
+
+            output = self.combine(output, shared_expert_output)
             return output, mlp_bias
 
         return moe_layer_foward_func(self, hidden_states=hidden_states)
