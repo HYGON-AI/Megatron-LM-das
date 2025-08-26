@@ -76,7 +76,7 @@ def unpermute(
 + 项目支持moe a2a 通算overlap。如果需要使用该特性，需要启动脚本中加入如下两个参数:
 ```
 --schedule-method interleaved_1f1b
---overlap_moe_expert_parallel_comm
+--overlap-moe-expert-parallel-comm
 ```
 + 项目支持通过delay-wgrad-compute进行dw拆分，用于实现更好的overlap。当前从测试结果看，开启delay-wgrad-compute，收益甚微，待进一步优化。
 
@@ -88,7 +88,7 @@ def unpermute(
 ```
 + dualpipev支持moe a2a overlap，如果需要overlap，额外增加两个参数
 ```
---overlap_moe_expert_parallel_comm
+--overlap-moe-expert-parallel-comm
 ```
 
 
