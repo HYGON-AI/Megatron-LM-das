@@ -191,7 +191,7 @@ class TransformerLayerSchedulePlan:
 
         f_attn_pre_b_combine_sync_event = F_ATTN_PRE_B_COMBINE_SYNC_EVENT if is_sync_1f1b else None
         if f_layer is not None:
-            with f_context:
+            with f_context and f_layer.get_fp8_context():
                 f_input = f_layer.attn_qkv.forward(
                     f_input,
                     stream_record_event=f_attn_pre_b_combine_sync_event,
@@ -208,7 +208,7 @@ class TransformerLayerSchedulePlan:
 
         f_dispatch_b_mlp_sync_event = F_DISPATCH_B_MLP_SYNC_EVENT if is_sync_1f1b else None
         if f_layer is not None:
-            with f_context:
+            with f_context and f_layer.get_fp8_context():
                 f_input = f_layer.core_attn.forward(f_input)
                 f_input = f_layer.attn_proj.forward(
                     f_input,
@@ -231,7 +231,7 @@ class TransformerLayerSchedulePlan:
                 b_grad = b_layer.moe_dispatch.backward(b_grad)
 
         if f_layer is not None:
-            with f_context:
+            with f_context and f_layer.get_fp8_context():
                 f_input = f_layer.mlp.forward(f_input)
 
         b_attn_post_f_combine_sync_event = B_ATTN_POST_F_COMBINE_SYNC_EVENT if is_sync_1f1b else None
@@ -245,7 +245,7 @@ class TransformerLayerSchedulePlan:
                 )
 
         if f_layer is not None:
-            with f_context:
+            with f_context and f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(
                     f_input,
                     stream_wait_event=b_attn_post_f_combine_sync_event,
