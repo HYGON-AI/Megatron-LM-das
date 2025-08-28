@@ -147,6 +147,24 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_tensor_parallel()
         self.patch_training()
         self.patch_miscellaneous()
+        #self.patch_core_dist_checkpointing()
+
+    def patch_core_dist_checkpointing(self):
+        from ..core.dist_checkpoint.strategies.filesystem_async import write_preloaded_data, preload_tensors
+        from ..core.dist_checkpoint.strategies.cached_metadata_filesystem_reader import CachedMetadataFileSystemReader
+        from ..core.dist_checkpoint.strategies.torch import get_reformulation_metadata
+        from ..core.dist_checkpoint.strategies.torch import TorchDistLoadShardedStrategy
+
+        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.write_preloaded_data',
+                                    write_preloaded_data)
+        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.preload_tensors',
+                                    preload_tensors) 
+        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.cached_metadata_filesystem_reader.CachedMetadataFileSystemReader',
+                                    CachedMetadataFileSystemReader)
+        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.get_reformulation_metadata',
+                                    get_reformulation_metadata)
+        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
+                                    TorchDistLoadShardedStrategy)
 
     def patch_core_distributed(self):
         pass
@@ -300,6 +318,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.training import train
         from ..training.initialize import _set_random_seed
         from ..training.training import train_step
+        from ..training.training import setup_model_and_optimizer
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
@@ -321,7 +340,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         # support dualpipev, edgc
         MegatronAdaptation.register('megatron.training.training.train_step',
                                     train_step)
-
+        # (1) edgc, (2) ckpt add save/load iter info to ckpt
+        MegatronAdaptation.register('megatron.training.training.setup_model_and_optimizer',
+                                    setup_model_and_optimizer)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args, validate_args_func_decorator

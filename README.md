@@ -109,7 +109,7 @@ def unpermute(
 + 项目支持PowerSGD低秩分解与误差反馈机制，能够根据训练阶段、系统环境及各流水线层的梯度熵变化，动态调整梯度压缩率。在显著降低通信开销的同时，有效保留关键梯度信息，兼顾训练效率与模型收敛精度。如果需要使用该特性，需要启动脚本中加入如下参数:
 ```
 --enable-dynamic-grad-comp
---rank_adjust_window_size 1000
+--rank-adjust-window-size 1000
 ```
 
 ### 项目支持激活值offload

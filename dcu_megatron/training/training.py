@@ -96,10 +96,8 @@ from megatron.training.training import (
     save_checkpoint_and_time,
     enable_forward_pre_hook,
     num_floating_point_operations,
-    training_log,
     evaluate_and_print_results,
     post_training_step_callbacks,
-    checkpoint_and_decide_exit,
     dummy_train_step,
     _TRAIN_START_TIME,
     cuda_graph_capture,
@@ -108,8 +106,14 @@ from megatron.training.training import (
     get_optimizer_param_scheduler,
     get_model,
     preprocess_common_state_dict,
+    HAVE_FSDP2,
 )
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.optimizer import (
+    OptimizerConfig,
+    get_megatron_optimizer,
+)
+from megatron.training.checkpointing import load_checkpoint
 from megatron.training.theoretical_memory_usage import report_theoretical_memory
 
 from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data_from_csv
@@ -539,6 +543,19 @@ def setup_model_and_optimizer(
             args.latest_iteration = args.iteration
             Utils.entropy = read_data_from_csv(args.entropy_path, args.latest_iteration)
             Utils.mapped_rank = read_data_from_csv(args.mapped_rank_path, args.latest_iteration)
+
+        if is_rank0():
+            #iter——log写文件
+            iter_log_path = os.path.join(args.load, 'last_ckpt_iter_log.txt')
+            try:
+                with open(iter_log_path, 'r') as f:
+                    content = f.read()
+                    current_time = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+                    updated_iter_log = current_time + content[20:]
+                    print_rank_0(f"{updated_iter_log}")
+            except FileNotFoundError:
+                pass
+
     else:
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0
@@ -643,7 +660,7 @@ def train(
         _initialize_training_flags(args)
         _initialize_log_paths(args)
         _initialize_warmup_iterations(args)
-        if torch.distributed.get_rank() == 0:
+        if is_rank0():
             append_time_to_csv(args.checkpoint_date_path, args.iteration)
 
     if args.run_workload_inspector_server:
@@ -988,7 +1005,7 @@ def train(
                 decoupled_learning_rate = param_group['lr']
             else:
                 learning_rate = param_group['lr']
-        report_memory_flag = training_log(
+        report_memory_flag, iter_log = training_log(
             loss_dict,
             total_loss_dict,
             learning_rate,
@@ -1062,6 +1079,7 @@ def train(
             num_floating_point_operations_so_far,
             checkpointing_context,
             train_data_iterator,
+            iter_log,
         )
         if should_exit:
             break
@@ -1769,7 +1787,7 @@ def training_log(
             report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval)
 
-    return report_memory_flag
+    return report_memory_flag, log_string
 
 
 def save_checkpoint_and_time_wrapper(fn):
@@ -1799,3 +1817,118 @@ def save_checkpoint_and_time_wrapper(fn):
            non_persistent_ckpt=non_persistent_ckpt, train_data_iterator=train_data_iterator)
 
     return wrapper
+
+
+def checkpoint_and_decide_exit(
+    model,
+    optimizer,
+    opt_param_scheduler,
+    iteration,
+    num_floating_point_operations_so_far,
+    checkpointing_context,
+    train_data_iterator,
+    iter_log
+):
+    """Save checkpoint and decide whether to exit based on arguments (e.g., if
+    --exit-duration-in-mins is set). Actual exit happens in main training loop
+    based on the return value of this function."""
+    args = get_args()
+    timers = get_timers()
+
+    # Exit based on signal handler.
+    saved_checkpoint = False
+    if args.exit_signal_handler:
+        signal_handler = get_signal_handler()
+        if any(signal_handler.signals_received()):
+            if args.save:
+                save_checkpoint_and_time(
+                    iteration,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    num_floating_point_operations_so_far,
+                    checkpointing_context,
+                    train_data_iterator=train_data_iterator,
+                )
+            print_datetime('exiting program after receiving SIGTERM.')
+
+            return True
+
+    # Regular save (persistent and non-persistent).
+    if args.save and args.save_interval and iteration % args.save_interval == 0:
+        save_checkpoint_and_time(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far,
+            checkpointing_context,
+            train_data_iterator=train_data_iterator,
+        )
+        saved_checkpoint = True
+
+    elif (
+        args.save
+        and args.non_persistent_save_interval
+        and iteration % args.non_persistent_save_interval == 0
+    ):
+        save_checkpoint_and_time(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far,
+            checkpointing_context,
+            non_persistent_ckpt=True,
+            train_data_iterator=train_data_iterator,
+        )
+        saved_checkpoint = True
+
+    if is_rank0() and saved_checkpoint:
+        #iter——log写文件
+        iter_log_path = os.path.join(args.save, 'last_ckpt_iter_log.txt')
+        os.makedirs(args.save, exist_ok=True)
+        with open(iter_log_path, 'w') as f:
+            f.write(str(iter_log))
+
+    # Exit based on duration.
+    if args.exit_duration_in_mins:
+        train_time = (time.time() - _TRAIN_START_TIME) / 60.0
+        done_cuda = torch.tensor(
+            [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+        )
+        torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
+        done = done_cuda.item()
+        if done:
+            if args.save and not saved_checkpoint:
+                save_checkpoint_and_time(
+                    iteration,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    num_floating_point_operations_so_far,
+                    checkpointing_context,
+                    train_data_iterator=train_data_iterator,
+                )
+            print_datetime(f'exiting program after {train_time} minutes')
+
+            return True
+
+    # Exit based on iterations.
+    if args.exit_interval and iteration % args.exit_interval == 0:
+        if args.save and not saved_checkpoint:
+            save_checkpoint_and_time(
+                iteration,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                num_floating_point_operations_so_far,
+                checkpointing_context,
+                train_data_iterator=train_data_iterator,
+            )
+        torch.distributed.barrier()
+        print_datetime(f'exiting program at iteration {iteration}')
+
+        return True
+
+    return False

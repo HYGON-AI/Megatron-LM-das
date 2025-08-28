@@ -17,15 +17,15 @@ class GradientCompressFeature(AbstractFeature):
                            help='Enable dynamic gradient compression (e.g., adaptive rank/sparsity based on training phase or gradient statistics).')
         group.add_argument('--grad-comp',
                            dest='grad_comp', action='store_true', help='use grad comp algorithm for data parallel.')
-        group.add_argument('--grad_comp_warm_up', type=float, default=0.1,
+        group.add_argument('--grad-comp-warm-up', type=float, default=0.1,
                             help='PwerSGD warm up period for accuracy gain.')
-        group.add_argument('--rank_adjust_window_size',
+        group.add_argument('--rank-adjust-window-size',
                             type=int, default=1000,
                             help='the window size of adjust rank')
-        group.add_argument('--iteration_sample_ratio',
+        group.add_argument('--iteration-sample-ratio',
                             type=float, default=0.01,
                             help='iteration_sample_ratio')
-        group.add_argument('--gradient_sample_ratio',
+        group.add_argument('--gradient-sample-ratio',
                             type=float, default=1.0,
                             help='gradient_sample_ratio')
         group.add_argument('--collect-log-path', type=str, default='./logs',
@@ -40,10 +40,8 @@ class GradientCompressFeature(AbstractFeature):
         from dcu_megatron.core.distributed.distributed_data_parallel import finish_grad_sync
         from dcu_megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup, _ParamAndGradBuffer, \
             _ParamAndGradBucket
-        from dcu_megatron.training.training import training_log
         from dcu_megatron.training.training import save_checkpoint_and_time_wrapper
         from dcu_megatron.training.training import pretrain
-        from dcu_megatron.training.training import setup_model_and_optimizer
 
         # edgc相关功能函数替换
         if args.enable_dynamic_grad_comp:
@@ -62,10 +60,6 @@ class GradientCompressFeature(AbstractFeature):
             patch_manager.register_patch('megatron.training.training.save_checkpoint_and_time',
                                         save_checkpoint_and_time_wrapper,
                                         apply_wrapper=True)
-            patch_manager.register_patch('megatron.training.training.train_training_log',
-                                        training_log)
             patch_manager.register_patch('megatron.training.training.pretrain',
                                         pretrain)
-            patch_manager.register_patch('megatron.training.training.setup_model_and_optimizer',
-                                        setup_model_and_optimizer)
 
