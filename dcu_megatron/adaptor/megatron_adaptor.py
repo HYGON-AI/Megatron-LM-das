@@ -147,24 +147,26 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_tensor_parallel()
         self.patch_training()
         self.patch_miscellaneous()
-        #self.patch_core_dist_checkpointing()
+        self.patch_core_dist_checkpointing()
 
     def patch_core_dist_checkpointing(self):
-        from ..core.dist_checkpoint.strategies.filesystem_async import write_preloaded_data, preload_tensors
-        from ..core.dist_checkpoint.strategies.cached_metadata_filesystem_reader import CachedMetadataFileSystemReader
-        from ..core.dist_checkpoint.strategies.torch import get_reformulation_metadata
-        from ..core.dist_checkpoint.strategies.torch import TorchDistLoadShardedStrategy
+        adaptor_args = get_adaptor_args()
+        if adaptor_args.use_ckpt_memory_cache:
+            from ..core.dist_checkpoint.strategies.filesystem_async import write_preloaded_data, preload_tensors
+            from ..core.dist_checkpoint.strategies.cached_metadata_filesystem_reader import CachedMetadataFileSystemReader
+            from ..core.dist_checkpoint.strategies.torch import get_reformulation_metadata
+            from ..core.dist_checkpoint.strategies.torch import TorchDistLoadShardedStrategy
 
-        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.write_preloaded_data',
-                                    write_preloaded_data)
-        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.preload_tensors',
-                                    preload_tensors) 
-        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.cached_metadata_filesystem_reader.CachedMetadataFileSystemReader',
-                                    CachedMetadataFileSystemReader)
-        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.get_reformulation_metadata',
-                                    get_reformulation_metadata)
-        MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
-                                    TorchDistLoadShardedStrategy)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.write_preloaded_data',
+                                        write_preloaded_data)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.preload_tensors',
+                                        preload_tensors)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.cached_metadata_filesystem_reader.CachedMetadataFileSystemReader',
+                                        CachedMetadataFileSystemReader)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.get_reformulation_metadata',
+                                        get_reformulation_metadata)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
+                                        TorchDistLoadShardedStrategy)
 
     def patch_core_distributed(self):
         pass

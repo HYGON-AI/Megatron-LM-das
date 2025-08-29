@@ -28,6 +28,7 @@ def process_adaptor_args(parser):
     parser = _add_extra_distributed_args(parser)
     parser = _add_extra_tokenizer_args(parser)
     parser = _add_flux_args(parser)
+    parser = _add_extra_checkpointing_args(parser)
 
     for feature in ADAPTOR_FEATURES:
         feature.register_args(parser)
@@ -171,6 +172,13 @@ def _add_flux_args(parser):
     group = parser.add_argument_group(title='flux args')
     group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                        help='Whether to transpose weight when using flux kernel')
+    return parser
+
+
+def _add_extra_checkpointing_args(parser):
+    group = parser.add_argument_group(title='extra checkpointing args')
+    group.add_argument('--use-ckpt-memory-cache', action='store_true', default=False,
+                   help='Whether to enable memory caching for checkpoints (to speed up access by keeping checkpoints in memory)')
     return parser
 
 
