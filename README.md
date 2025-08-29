@@ -66,6 +66,14 @@ def unpermute(
 ):
 ```
 
+### 项目支持内存缓存ckpt
++ 在大模型训练过程中如果需要使用内存缓存ckpt提升性能，需要在脚本中加入如下参数：
+```
+--use-ckpt-memory-cache
+```
++ 注意事项:
+1. 开启内存缓存ckpt功能后还需要一个python包和启动hyckptd进程，联系赵煜要
+
 ### 项目支持使用[flux kernel](http://10.6.10.68/dcutoolkit/deeplearing/flux)
 在tp场景下，用户可以选择使用flux通算融合算子，获得更好的训练和推理性能。项目通过替换transformer engine方法集成flux，使用该特性，需要启动脚本中加入如下参数:
 ```
