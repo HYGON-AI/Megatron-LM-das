@@ -51,12 +51,19 @@ class PipelineFeature(AbstractFeature):
                            choices=['vanilla', 'dualpipev', 'interleaved_1f1b'],
                            help='Use pipeline provided by megatron if schedule-method is set to vanilla')
         # MoE communication overlap arguments
-        group.add_argument('--overlap-moe-expert-parallel-comm', action='store_true',
+        group.add_argument('--overlap-moe-expert-parallel-comm',
+                           action='store_true',
                            help='Overlap the EP A2A communication by batch-level overlapping in 1f1b stage.')
-        group.add_argument('--num-layers-to-build', type=num_layers_build_type, default=None,
+        group.add_argument('--num-layers-to-build',
+                           type=num_layers_build_type,
+                           default=None,
                            help='number of layers to build: '
                                 '- An integer N: meaning n layers for each model block '
                                 '- A string containing a Python list expression that defines a custom pattern')
+        group.add_argument('--offload-moe-mlp-input',
+                           action='store_true',
+                           default=None,
+                           help='Enable moe mlp input offload, must be used with overlap-moe-expert-parallel-comm and with moe or moe_act recompute.')
 
     def pre_validate_args(self, args):
         if args.schedule_method != "dualpipev":
@@ -188,7 +195,6 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_pp_rank_microbatches',
                                         get_pp_rank_microbatches)
 
-        from dcu_megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
@@ -200,10 +206,11 @@ class PipelineFeature(AbstractFeature):
         from dcu_megatron.core.distributed.data_parallel_base import _BaseDataParallel
         from dcu_megatron.core.transformer.module import Float16Module
 
-        patch_manager.register_patch('megatron.core.transformer.moe.token_dispatcher.MoEAlltoAllTokenDispatcher',
-                                    MoEAlltoAllTokenDispatcher)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
                                     GPTModel.build_schedule_plan,
+                                    create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.cpu_offload_commit',
+                                    TransformerLayer.cpu_offload_commit,
                                     create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
@@ -263,3 +270,16 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_routed_expert_dw',
                                     MoELayer.backward_routed_expert_dw,
                                     create_dummy=True)
+
+        # offload_moe_mlp_input
+        if args.offload_moe_mlp_input:
+            from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
+
+            patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.forward',
+                                        GroupedMLP.forward)
+            patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
+                                        TEGroupedMLP.forward)
+            patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.checkpoint',
+                                        CheckpointWithoutOutput.checkpoint)
+            patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput._recompute',
+                                        CheckpointWithoutOutput._recompute)

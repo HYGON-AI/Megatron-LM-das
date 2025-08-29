@@ -44,4 +44,16 @@ def transformer_config_post_init_wrapper(post_init_func):
                     "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
                 )
 
+        # pp aware offload
+        if self.offload_moe_mlp_input:
+            assert (
+                not self.cpu_offloading
+            ), "offload_moe_mlp_input can not be used with cpu_offloading"
+
+            moe_recompute = self.recompute_granularity == 'selective' and (
+                "moe" in self.recompute_modules or "moe_act" in self.recompute_modules
+            )
+            assert moe_recompute, "offload_moe_mlp_input must be used with moe_recompute, 'moe' or 'moe_act' "
+            assert self.overlap_moe_expert_parallel_comm, "offload_moe_mlp_input must be used with overlap_moe_expert_parallel_comm"
+
     return wrapper

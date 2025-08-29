@@ -121,6 +121,15 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
 
 
 class TransformerLayer():
+    def cpu_offload_commit(self, tensor, callback=None):
+        from dcu_megatron.core.pipeline_parallel.cpu_offload import (
+            get_group_prefetch_offload_commit_func,
+        )
+
+        group_prefetch_offload_commit = get_group_prefetch_offload_commit_func(self.config)
+        tensor = group_prefetch_offload_commit(tensor, callback=callback)
+        return tensor
+
     def backward_dw(self):
         self.self_attention.backward_dw()
         self.mlp.backward_dw()

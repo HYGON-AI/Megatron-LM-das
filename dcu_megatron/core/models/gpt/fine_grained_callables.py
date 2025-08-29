@@ -17,6 +17,7 @@ from megatron.core.utils import (
 )
 
 from dcu_megatron.core.pipeline_parallel.utils import ScheduleNode
+from dcu_megatron.core.pipeline_parallel.cpu_offload import get_offload_context, set_offload_tag
 
 
 def weak_method(method):
@@ -439,9 +440,24 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         Performs a forward pass for shared experts.
         """
-        shared_expert_output = None
-        if layer.mlp.use_shared_expert and not layer.mlp.shared_expert_overlap:
-            shared_expert_output = layer.mlp.shared_experts(pre_mlp_layernorm_output)
+        def custom_forward(pre_mlp_layernorm_output):
+            shared_expert_output = None
+            if layer.mlp.use_shared_expert and not layer.mlp.shared_expert_overlap:
+                shared_expert_output = layer.mlp.shared_experts(pre_mlp_layernorm_output)
+            return shared_expert_output
+
+        args = [
+            pre_mlp_layernorm_output,
+        ]
+        if layer.mlp.moe_layer_recompute:
+            with get_offload_context(layer.config):
+                shared_expert_output = tensor_parallel.checkpoint(
+                    custom_forward, False, *args
+                )
+        else:
+            shared_expert_output = custom_forward(*args)
+        del args
+
         return shared_expert_output
 
     def submodule_attention_proj_router_shared_expert_compound_forward(
@@ -494,9 +510,33 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         dispatched_input, tokens_per_expert, permuted_probs = (
             layer.mlp.token_dispatcher.dispatch_postprocess(dispatched_input, dispatched_probs)
         )
-        expert_output, mlp_bias = layer.mlp.experts(dispatched_input, tokens_per_expert, permuted_probs)
-        assert mlp_bias is None
+
+        def custom_forward(
+            dispatched_input, tokens_per_expert, permuted_probs
+        ):
+            expert_output, mlp_bias = layer.mlp.experts(dispatched_input, tokens_per_expert, permuted_probs)
+            assert mlp_bias is None
+            return expert_output
+
+        args = [
+            dispatched_input,
+            tokens_per_expert,
+            permuted_probs,
+        ]
+        if layer.mlp.moe_layer_recompute:
+            # offload to cpu if configured
+            set_offload_tag(dispatched_input)
+            set_offload_tag(permuted_probs)
+            with get_offload_context(layer.config):
+                expert_output = tensor_parallel.checkpoint(
+                    custom_forward, False, *args
+                )
+        else:
+            expert_output = custom_forward(*args)
+        del args
+
         expert_output = layer.mlp.token_dispatcher.combine_preprocess(expert_output)
+        expert_output = layer.cpu_offload_commit(expert_output)
         return expert_output
 
     def submodule_combine_forward(
@@ -539,7 +579,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
 
     def mlp_wrapper(node: ScheduleNode, *args, **kwargs):
         """Wrapper for Dense forward."""
-        return layer._forward_mlp(*args, **kwargs)
+        output = layer._forward_mlp(*args, **kwargs)
+        output = layer.cpu_offload_commit(output)
+        return output
 
     def raise_not_implemented(*args):
         """Raise NotImplementedError for Dense layer."""

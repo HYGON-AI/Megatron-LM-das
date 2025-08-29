@@ -149,6 +149,11 @@ def forward_backward_pipelining_with_interleaving(
 
     set_streams()
 
+
+    if config.overlap_moe_expert_parallel_comm:
+        from .cpu_offload import reset_batch as cpu_offload_reset
+        cpu_offload_reset(config)
+
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
 
