@@ -73,6 +73,8 @@ def unpermute(
 ```
 + 注意事项:
 1. 开启内存缓存ckpt功能后还需要一个python包和启动hyckptd进程，联系赵煜要
+2. pip install hyckpt-1.0.1-py3-none-any.whl  安装到conda环境中
+3. 启动hyckptd 进程 mpirun -pernode -hostfile 主机名文件 hyckptd可执行程序 --log 日志文件路径
 
 ### 项目支持使用[flux kernel](http://10.6.10.68/dcutoolkit/deeplearing/flux)
 在tp场景下，用户可以选择使用flux通算融合算子，获得更好的训练和推理性能。项目通过替换transformer engine方法集成flux，使用该特性，需要启动脚本中加入如下参数:
