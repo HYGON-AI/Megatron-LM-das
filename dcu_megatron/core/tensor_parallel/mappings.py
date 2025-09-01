@@ -19,10 +19,11 @@ class _AllToAll(torch.autograd.Function):
         if world_size == 1:
             return input
 
+        input_dim = input.dim()
         input = input.contiguous()
         if output_split_sizes is None:
             # Equal split (all2all)
-            if use_quantize_comm:
+            if use_quantize_comm and input_dim > 1:
                 output = input.new_empty(
                     size=[input.shape[0], input.shape[1]+4],
                     dtype=torch.int8,
@@ -32,7 +33,7 @@ class _AllToAll(torch.autograd.Function):
                 output = torch.empty_like(input)
         else:
             # Unequal split (all2all-v)
-            if use_quantize_comm:
+            if use_quantize_comm and input_dim > 1:
                 output = input.new_empty(
                     size=[sum(output_split_sizes)] + list(input.size()[1:-1]) + [input.size()[-1]+4],
                     dtype=torch.int8,
@@ -45,7 +46,7 @@ class _AllToAll(torch.autograd.Function):
                     device=torch.cuda.current_device(),
             )
 
-        if use_quantize_comm:
+        if use_quantize_comm and input_dim > 1:
             output = q_alltoall(output, input, output_split_sizes, input_split_sizes,group)
         else:
             torch.distributed.all_to_all_single(

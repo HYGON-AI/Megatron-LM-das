@@ -1244,4 +1244,3 @@ def forward_backward_pipelining_with_interleaving(
     nvtx_range_pop(suffix="misc")
 
     return forward_data_store
-
