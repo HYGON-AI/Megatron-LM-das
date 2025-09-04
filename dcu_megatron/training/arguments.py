@@ -182,6 +182,8 @@ def _add_extra_checkpointing_args(parser):
     return parser
 
 
+ORIGIN_ARG_VALUES = dict()
+
 def validate_args_func_decorator(validate_args_func):
     @wraps(validate_args_func)
     def wrapper(args, defaults=None):
@@ -197,22 +199,37 @@ def validate_args_func_decorator(validate_args_func):
             args.num_layers = None
 
         # delay_wgrad_compute supports overlap_grad_reduce
-        origin_delay_wgrad_compute = args.delay_wgrad_compute
+        global ORIGIN_ARG_VALUES
+        ORIGIN_ARG_VALUES["delay_wgrad_compute"] = args.delay_wgrad_compute
         args.delay_wgrad_compute = False
 
         args = validate_args_func(args, defaults)
 
-        # Check delay_wgrad_compute compatibility
-        args.delay_wgrad_compute = origin_delay_wgrad_compute
-        if args.delay_wgrad_compute:
-            assert not args.moe_use_legacy_grouped_gemm, \
-                'delay_wgrad_compute is not supported with legacy groupedgemm implementation'
-            assert args.transformer_impl == 'transformer_engine', \
-                'delay_wgrad_compute is only supported with transformer_engine implementation'
+        args_dict = vars(args)
+        for key, value in ORIGIN_ARG_VALUES.items():
+            if key in args_dict:
+                args_dict[key] = value
+        args = argparse.Namespace(**args_dict)
 
         for feature in ADAPTOR_FEATURES:
             feature.validate_args(args)
 
         return args
+
+    return wrapper
+
+
+def _print_args_wrapper(fn):
+    @wraps(fn)
+    def wrapper(title, args):
+        global ORIGIN_ARG_VALUES
+
+        args_dict = vars(args)
+        for key, value in ORIGIN_ARG_VALUES.items():
+            if key in args_dict:
+                args_dict[key] = value
+        args = argparse.Namespace(**args_dict)
+
+        fn(title, args)
 
     return wrapper

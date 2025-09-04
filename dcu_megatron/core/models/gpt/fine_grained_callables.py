@@ -245,6 +245,7 @@ class TransformerLayerNode(ScheduleNode):
             name=name,
         )
         self.layer_state = layer_state
+        self.common_state = layer_state
         self.chunk_state = chunk_state
         self.submodule = submodule
         self.detached = tuple()
@@ -292,6 +293,7 @@ class TransformerLayerNode(ScheduleNode):
         self.before_detached = None
         self.detached = None
         self.layer_state = None
+        self.common_state = None
         self.chunk_state = None
         self.submodule = None
 

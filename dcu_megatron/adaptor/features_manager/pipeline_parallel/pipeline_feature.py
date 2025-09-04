@@ -54,6 +54,12 @@ class PipelineFeature(AbstractFeature):
         group.add_argument('--overlap-moe-expert-parallel-comm',
                            action='store_true',
                            help='Overlap the EP A2A communication by batch-level overlapping in 1f1b stage.')
+        group.add_argument('--overlap-moe-expert-parallel-comm-impl', type=str,
+                           default='dcu_megatron',
+                           choices=['megatron', 'dcu_megatron'],
+                           help='What TransformerLayerSchedulePlan implementation to use..'
+                           ' megatron: use the schedule plan implemented by megatron'
+                           ' dcu_megatron: use the schedule plan implemented by us')
         group.add_argument('--num-layers-to-build',
                            type=num_layers_build_type,
                            default=None,

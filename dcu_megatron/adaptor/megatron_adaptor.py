@@ -347,7 +347,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     setup_model_and_optimizer)
 
     def patch_miscellaneous(self):
-        from ..training.arguments import parse_args, validate_args_func_decorator
+        from ..training.arguments import parse_args, validate_args_func_decorator, _print_args_wrapper
         from ..core.parallel_state import create_group, initialize_model_parallel_wrapper
 
         MegatronAdaptation.register('megatron.training.arguments.parse_args', parse_args)
@@ -356,6 +356,12 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
         MegatronAdaptation.register('megatron.training.yaml_arguments.validate_yaml',
                                     validate_args_func_decorator,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.training.arguments._print_args',
+                                    _print_args_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.training.yaml_arguments._print_args',
+                                    _print_args_wrapper,
                                     apply_wrapper=True)
 
         # output parallel groups
