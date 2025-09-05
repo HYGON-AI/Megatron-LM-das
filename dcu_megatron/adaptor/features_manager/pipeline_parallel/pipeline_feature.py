@@ -283,8 +283,6 @@ class PipelineFeature(AbstractFeature):
 
             patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.forward',
                                         GroupedMLP.forward)
-            patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
-                                        TEGroupedMLP.forward)
             patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.checkpoint',
                                         CheckpointWithoutOutput.checkpoint)
             patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput._recompute',

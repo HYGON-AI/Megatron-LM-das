@@ -187,7 +187,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         from ..core.transformer.attention import self_attention_get_query_key_value_tensors_wrapper
-        
+        from ..core.transformer.moe.experts import TEGroupedMLP
+
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
                                     transformer_block_init_wrapper)
@@ -204,20 +205,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
                                     self_attention_get_query_key_value_tensors_wrapper,
                                     apply_wrapper=True)
-
-        # Moe
-        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.topk_softmax_with_capacity',
-        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False}),
-        #                             apply_wrapper=True)
-        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.switch_load_balancing_loss_func',
-        #                             torch.compile(options={"triton.cudagraphs": True, "triton.cudagraph_trees": False, "triton.cudagraph_support_input_mutation":True}),
-        #                             apply_wrapper=True)
-        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.permute',
-        #                             torch.compile(mode='max-autotune-no-cudagraphs'),
-        #                             apply_wrapper=True)
-        # MegatronAdaptation.register('megatron.core.transformer.moe.moe_utils.unpermute',
-        #                             torch.compile(mode='max-autotune-no-cudagraphs'),
-        #                             apply_wrapper=True)
+        # fused gelu and mul
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
+                                    TEGroupedMLP.forward)
 
     def patch_core_extentions(self):
         import transformer_engine as te
