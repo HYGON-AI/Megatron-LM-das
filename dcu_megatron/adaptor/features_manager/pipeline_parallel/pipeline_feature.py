@@ -97,6 +97,24 @@ class PipelineFeature(AbstractFeature):
 
         if args.overlap_moe_expert_parallel_comm:
             assert is_torch_min_version("2.6.0"), "A2A Overlap encounters hang issue with torch version < 2.6.0"
+            # Expert model parallelism requirements
+            assert (
+                args.expert_model_parallel_size > 1
+            ), 'overlap_moe_expert_parallel_comm is only supported with expert model parallelism'
+            assert args.moe_token_dispatcher_type in [
+                'alltoall',
+                'flex',
+            ], 'overlap_moe_expert_parallel_comm is supported with alltoall/flex token dispatcher'
+
+            assert (
+                args.recompute_granularity != 'full'
+            ), 'disable full recomputation when enabling overlap_moe_expert_parallel_comm'
+            assert (
+                args.recompute_method is None
+            ), 'disable recomputation method when enabling overlap_moe_expert_parallel_comm'
+            assert (
+                args.recompute_num_layers is None
+            ), 'recompute_num_layers must be None when enabling overlap_moe_expert_parallel_comm'
 
         if args.schedule_method == "dualpipev":
             if args.num_layers_per_virtual_pipeline_stage is not None:

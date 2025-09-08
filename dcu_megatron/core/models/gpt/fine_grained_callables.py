@@ -4,9 +4,8 @@ import weakref
 from typing import Optional
 
 import torch
-from torch import Tensor
 
-from megatron.core import tensor_parallel
+from megatron.core import parallel_state, tensor_parallel
 from megatron.core.pipeline_parallel.utils import make_viewless
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -15,6 +14,15 @@ from megatron.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
+
+try:
+    import transformer_engine as te  # pylint: disable=unused-import
+
+    from megatron.core.extensions.transformer_engine import te_checkpoint
+
+    HAVE_TE = True
+except ImportError:
+    HAVE_TE = False
 
 from dcu_megatron.core.pipeline_parallel.utils import ScheduleNode
 from dcu_megatron.core.pipeline_parallel.cpu_offload import get_offload_context, set_offload_tag
@@ -452,10 +460,19 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             pre_mlp_layernorm_output,
         ]
         if layer.mlp.moe_layer_recompute:
-            with get_offload_context(layer.config):
-                shared_expert_output = tensor_parallel.checkpoint(
-                    custom_forward, False, *args
+            if layer.config.fp8:
+                shared_expert_output = te_checkpoint(
+                    custom_forward,
+                    False,
+                    tensor_parallel.random.get_cuda_rng_tracker,
+                    parallel_state.get_tensor_model_parallel_group(),
+                    *args,
                 )
+            else:
+                with get_offload_context(layer.config):
+                    shared_expert_output = tensor_parallel.checkpoint(
+                        custom_forward, False, *args
+                    )
         else:
             shared_expert_output = custom_forward(*args)
         del args
@@ -526,18 +543,33 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             permuted_probs,
         ]
         if layer.mlp.moe_layer_recompute:
-            # offload to cpu if configured
-            set_offload_tag(dispatched_input)
-            set_offload_tag(permuted_probs)
-            with get_offload_context(layer.config):
-                expert_output = tensor_parallel.checkpoint(
-                    custom_forward, False, *args
+            if layer.config.fp8:
+                expert_output = te_checkpoint(
+                    custom_forward,
+                    False,
+                    tensor_parallel.random.get_cuda_rng_tracker,
+                    parallel_state.get_tensor_model_parallel_group(),
+                    *args,
                 )
+            else:
+                # offload to cpu if configured
+                set_offload_tag(dispatched_input)
+                set_offload_tag(permuted_probs)
+                with get_offload_context(layer.config):
+                    expert_output = tensor_parallel.checkpoint(
+                        custom_forward, False, *args
+                    )
         else:
             expert_output = custom_forward(*args)
         del args
 
         expert_output = layer.mlp.token_dispatcher.combine_preprocess(expert_output)
+
+        if layer.recompute_pre_mlp_layernorm:
+            # discard the output of the pre-mlp layernorm and register the recompute
+            # as a gradient hook of expert_output
+            layer.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
+
         expert_output = layer.cpu_offload_commit(expert_output)
         return expert_output
 
