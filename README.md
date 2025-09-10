@@ -146,7 +146,7 @@ def unpermute(
 
 ```shell
 git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/dcu_megatron.git 或
-git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99//dcutoolkit/deeplearing/dcu_megatron.git
+git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoolkit/deeplearing/dcu_megatron.git
 ```
 
 2、离线下载

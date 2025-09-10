@@ -1,7 +1,5 @@
 #!/bin/bash
-
 INITIALIZATION_ARGS=( --num-workers 2)
-
 for para in $*
 do
     if [[ $para == --data_path* ]];then
@@ -10,6 +8,8 @@ do
         tokenizer_path=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
+    elif [[ $para == --launch_with_binding* ]];then
+        launch_with_binding=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     elif [[ $para == --reproduce* ]];then
@@ -30,27 +30,24 @@ DATA_PATH=${data_path}
 TOKENIZER_MODEL_PATH=${tokenizer_path}
 CHECKPOINT_PATH=${checkpoint_path}
 
-# 运行环境参数
+# default env
 DIST_URL=${1}
 DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-
-# default env
 export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
-export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
-export NVTE_NO_PIPELINE_OVERLAP=1
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
-#增加编译缓存
-export cache_size_limit=64
+export GROUPED_GEMM_BatchLinear=1
+export NVTE_MOE_BATCHCOUNT=16
+export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -60,25 +57,27 @@ DISTRIBUTED_ARGS=(
 )
 
 GPT_MODEL_ARGS=(
-    --seq-length 4096
-    --num-layers 94
-    --hidden-size 4096
-    --ffn-hidden-size 22016 
-    --num-attention-heads 64
+    --seq-length 8192
+    --num-layers 48
+    --hidden-size 2048
+    --ffn-hidden-size 6144 
+    --moe-ffn-hidden-size 768
+    --num-attention-heads 32
     --max-position-embeddings 262144
     --num-query-groups 4
     --group-query-attention
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
+    --kv-channels 128
 )
 
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 256
-    --train-iters 50
+    --global-batch-size 128
+    --train-iters 10
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
@@ -89,16 +88,20 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --use-qk-norm
-    --rotary-base 5000000
-    --lr 3.0e-5 
+    --qk-layernorm
+    --rotary-base 10000000
+    --lr 1.0e-6 
     --lr-decay-style cosine 
-    --min-lr 3.0e-6
+    --min-lr 1.0e-8
     --lr-warmup-iters 1
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
-    --use-flash-attn
+    --overlap-param-gather
+    --use-precision-aware-optimizer
+    --main-grads-dtype bf16
+    --main-params-dtype fp16
+    --enable-cuda-graph
 )
 
 MOE_ARGS=(
@@ -107,14 +110,18 @@ MOE_ARGS=(
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-3
     --moe-token-dispatcher-type alltoall
+    --moe-expert-capacity-factor 1
+    --moe-pad-expert-input-to-capacity
     --moe-permute-fusion
     --moe-grouped-gemm
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 4
-    --pipeline-model-parallel-size 2
-    --context-parallel-size 1
+    --tensor-model-parallel-size 1
+    --pipeline-model-parallel-size 4
+    --expert-model-parallel-size 8
+    --expert-tensor-parallel-size 1
+    --context-parallel-size 2
     --use-distributed-optimizer 
     --sequence-parallel
 )
@@ -132,23 +139,23 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0 5
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp4-pp2-cp1
+    --profile-dir torch_prof_qwen3_30B_A3B_4nodes_tp1-pp4-ep8-etp1-cp2
     --use-pytorch-profiler
 )
 
 HIP_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0 5
     --profile-step-start 4
     --profile-step-end 5
     --use-hip-profiler
@@ -156,6 +163,7 @@ HIP_PROFIE_ARGS=(
 
 APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
+    ${MOE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${DATA_ARGS[@]} \

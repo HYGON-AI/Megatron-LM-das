@@ -37,7 +37,6 @@ export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
 # enable BatchLinear
 export GROUPED_GEMM_BatchLinear=1
-export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -51,7 +50,7 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 8192
     --max-position-embeddings 32768
-    --num-layers 4
+    --num-layers 2
     --hidden-size 8192
     --ffn-hidden-size 32768
     --num-attention-heads 64
@@ -65,29 +64,18 @@ MODEL_ARGS=(
     --no-position-embedding
     --rotary-base 1000000
     --ckpt-format torch
-    --use-quantize-comm
-    --use-precision-aware-optimizer
-    --main-grads-dtype bf16
-    --main-params-dtype fp16
-    --schedule-method interleaved_1f1b
-    --overlap-moe-expert-parallel-comm
-    --group-query-attention
-    --num-query-groups 8
 )
 
 MOE_ARGS=(
-    --num-experts 32
-    --moe-router-topk 4
-    --moe-router-group-topk 2
-    --moe-router-num-groups 8
+    --num-experts 16
+    --moe-router-topk 2
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-2
     --moe-token-dispatcher-type alltoall
-    --moe-permute-fusion
-    --moe-grouped-gemm
     --moe-expert-capacity-factor 1
     --moe-pad-expert-input-to-capacity
-    --moe-router-dtype fp32
+    --moe-permute-fusion
+    --moe-grouped-gemm
 )
 
 DATA_ARGS=(
@@ -99,7 +87,7 @@ DATA_ARGS=(
 
 TRAINING_ARGS=(
     --micro-batch-size 1
-    --global-batch-size 512
+    --global-batch-size 256
     --lr 1e-4
     --train-iters 10
     --lr-decay-iters 10000
@@ -114,12 +102,11 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 4
-    --pipeline-model-parallel-size 2
-    --expert-model-parallel-size 8
+    --tensor-model-parallel-size 2
+    --pipeline-model-parallel-size 1
+    --expert-model-parallel-size 4
     --expert-tensor-parallel-size 2
     --context-parallel-size 1
-    --num-layers-per-virtual-pipeline-stage 1
     --use-distributed-optimizer
     --sequence-parallel
 )
@@ -140,16 +127,16 @@ LOGGING_ARGS=(
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 6 8 32
+    --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_aibenchmark_8nodes_tp4-pp2-ep8-etp2-cp1-vp2
+    --profile-dir torch_prof_gpt_1nodes_tp2-pp1-ep4-etp2-cp1
     --use-pytorch-profiler
 )
 
 HIP_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 6 8 32
+    --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 4
     --profile-step-end 5
     --use-hip-profiler

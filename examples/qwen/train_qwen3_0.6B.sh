@@ -45,14 +45,9 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
+export GPU_MAX_HW_QUEUES=10
 export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
 export NVTE_NO_PIPELINE_OVERLAP=1
-
-
-# torch控制多流转单流
-export ALLREDUCE_STREAM_WITH_COMPUTE=1
-export SENDRECV_STREAM_WITH_COMPUTE=1 
 
 #增加编译缓存
 export cache_size_limit=64
@@ -115,9 +110,8 @@ MODEL_PARALLEL_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type QwenTokenizer
-    --merge-file ${TOKENIZER_MODEL_PATH}/merges.txt
-    --vocab-file ${TOKENIZER_MODEL_PATH}/vocab.json
+    --tokenizer-type HuggingFaceTokenizer
+    --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH} 
     --split 949,50,1
 )
@@ -138,7 +132,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp1-pp2-cp1
+    --profile-dir torch_prof_llama_1nodes_tp4-pp1-cp1
     --use-pytorch-profiler
 )
 

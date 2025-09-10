@@ -37,6 +37,7 @@ export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
 # enable BatchLinear
 export GROUPED_GEMM_BatchLinear=1
+export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -50,10 +51,9 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 8192
     --max-position-embeddings 32768
-    --num-layers 4
+    --num-layers 8
     --hidden-size 8192
     --ffn-hidden-size 32768
-    --moe-ffn-hidden-size 30720
     --num-attention-heads 64
     --init-method-std 0.01
     --attention-dropout 0.0
@@ -66,14 +66,19 @@ MODEL_ARGS=(
     --rotary-base 1000000
     --ckpt-format torch
     --use-quantize-comm
-    --combined-1f1b
-    --combined-1f1b-recipe ep_a2a
+    --use-precision-aware-optimizer
+    --main-grads-dtype bf16
+    --main-params-dtype fp16
+    --schedule-method interleaved_1f1b
+    --overlap-moe-expert-parallel-comm
+    --group-query-attention
+    --num-query-groups 8
 )
 
 MOE_ARGS=(
     --num-experts 64
-    --moe-router-topk 8
-    --moe-router-group-topk 4
+    --moe-router-topk 4
+    --moe-router-group-topk 2
     --moe-router-num-groups 8
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-2
@@ -82,6 +87,7 @@ MOE_ARGS=(
     --moe-grouped-gemm
     --moe-expert-capacity-factor 1
     --moe-pad-expert-input-to-capacity
+    --moe-router-dtype fp32
 )
 
 DATA_ARGS=(
@@ -109,11 +115,11 @@ TRAINING_ARGS=(
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 4
-    --pipeline-model-parallel-size 2
+    --pipeline-model-parallel-size 4
     --expert-model-parallel-size 16
     --expert-tensor-parallel-size 2
     --context-parallel-size 1
-    --num-layers-per-virtual-pipeline-stage 2
+    --num-layers-per-virtual-pipeline-stage 1
     --use-distributed-optimizer
     --sequence-parallel
 )
@@ -134,16 +140,16 @@ LOGGING_ARGS=(
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0 1 2 3 4 6 8 32
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_aibenchmark_128nodes_tp4-pp2-ep16-etp2-cp1-vp2
+    --profile-dir torch_prof_aibenchmark_8nodes_tp4-pp4-ep16-etp2-cp1-vp2
     --use-pytorch-profiler
 )
 
 HIP_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0 1 2 3 4 6 8 32
     --profile-step-start 4
     --profile-step-end 5
     --use-hip-profiler
