@@ -102,6 +102,7 @@ TRAINING_ARGS=(
     --main-grads-dtype bf16
     --main-params-dtype fp16
     --enable-cuda-graph
+    --te-rng-tracker
 )
 
 MOE_ARGS=(
