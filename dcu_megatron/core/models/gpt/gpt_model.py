@@ -10,6 +10,9 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 
+from .utils import offloading_checker
+from dcu_megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+
 
 def gpt_model_init_wrapper(fn):
     @wraps(fn)
@@ -143,6 +146,21 @@ def gpt_model_postprocess(
 
     return loss
 
+
+def gpt_model_forward_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        PipelineOffloadManager.get_instance().reset_chunk_handler(
+            self.decoder.num_layers_per_pipeline_rank,
+            self.vp_stage,
+            self.config.offload_activation,
+            0,
+        )
+        PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(offloading_checker)
+
+        return fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 class GPTModel:

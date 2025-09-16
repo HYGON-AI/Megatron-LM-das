@@ -58,8 +58,7 @@ except ImportError:
 def get_tensor_model_parallel_node_size(group=None):
     """ 获取节点数
     """
-    if group is None:
-        group=get_tensor_model_parallel_group_if_none()
+    group=get_tensor_model_parallel_group_if_none(group)
 
     hostname = socket.gethostname()
     hostnames = [None] * get_pg_size(group)

@@ -223,7 +223,7 @@ class PipelineFeature(AbstractFeature):
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
         from dcu_megatron.core.transformer.multi_latent_attention import MLASelfAttention
-        from dcu_megatron.core.transformer.attention import SelfAttention
+        from dcu_megatron.core.transformer.attention import Attention
         from dcu_megatron.core.transformer.mlp import MLP
         from dcu_megatron.core.transformer.moe.experts import GroupedMLP, TEGroupedMLP, SequentialMLP
         from dcu_megatron.core.transformer.moe.moe_layer import MoELayer
@@ -232,9 +232,6 @@ class PipelineFeature(AbstractFeature):
 
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
                                     GPTModel.build_schedule_plan,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.cpu_offload_commit',
-                                    TransformerLayer.cpu_offload_commit,
                                     create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
@@ -249,27 +246,17 @@ class PipelineFeature(AbstractFeature):
                                     Float16Module.backward_dw,
                                     create_dummy=True)
 
-        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.backward_dw',
-                                    MLASelfAttention.backward_dw,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.compute_qkv',
-                                    MLASelfAttention.compute_qkv,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.compute_attn',
-                                    MLASelfAttention.compute_attn,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MLASelfAttention.compute_proj',
-                                    MLASelfAttention.compute_proj,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_qkv',
-                                    SelfAttention.compute_qkv,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_attn',
-                                    SelfAttention.compute_attn,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.compute_proj',
-                                    SelfAttention.compute_proj,
-                                    create_dummy=True)
+        patch_manager.register_cls_funcs('megatron.core.transformer.multi_latent_attention.MLASelfAttention',
+                                         [MLASelfAttention.compute_qkv,
+                                          MLASelfAttention.compute_attn,
+                                          MLASelfAttention.compute_proj,
+                                          MLASelfAttention.backward_dw,],
+                                         create_dummy=True)
+        patch_manager.register_cls_funcs('megatron.core.transformer.attention.Attention',
+                                         [Attention.compute_qkv,
+                                          Attention.compute_attn,
+                                          Attention.compute_proj,],
+                                         create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
                                     MLP.backward_dw,
                                     create_dummy=True)
@@ -285,15 +272,11 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.backward_dw',
                                     TransformerBlock.backward_dw,
                                     create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_dw',
-                                    MoELayer.backward_dw,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_shared_expert_dw',
-                                    MoELayer.backward_shared_expert_dw,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.backward_routed_expert_dw',
-                                    MoELayer.backward_routed_expert_dw,
-                                    create_dummy=True)
+        patch_manager.register_cls_funcs('megatron.core.transformer.moe.moe_layer.MoELayer',
+                                         [MoELayer.backward_dw,
+                                          MoELayer.backward_shared_expert_dw,
+                                          MoELayer.backward_routed_expert_dw,],
+                                         create_dummy=True)
 
         # offload_moe_mlp_input
         if args.offload_moe_mlp_input:

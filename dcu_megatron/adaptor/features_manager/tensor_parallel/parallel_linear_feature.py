@@ -27,9 +27,9 @@ class ParallelLinearFeature(AbstractFeature):
         from dcu_megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_flux_spec
 
         if args.parallel_linear_impl == 'flux':
-            patch_manager.register("megatron.core.extensions.transformer_engine.TEColumnParallelLinear",
-                                   FluxColumnParallelLinear)
-            patch_manager.register("megatron.core.extensions.transformer_engine.TERowParallelLinear",
-                                   FluxRowParallelLinear)
-            patch_manager.register("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
-                                   get_gpt_layer_with_flux_spec)
+            patch_manager.register_patch("megatron.core.extensions.transformer_engine.TEColumnParallelLinear",
+                                         FluxColumnParallelLinear)
+            patch_manager.register_patch("megatron.core.extensions.transformer_engine.TERowParallelLinear",
+                                         FluxRowParallelLinear)
+            patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
+                                         get_gpt_layer_with_flux_spec)

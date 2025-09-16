@@ -1,3 +1,5 @@
+import warnings
+
 from functools import wraps
 from dataclasses import make_dataclass, field
 
@@ -44,16 +46,40 @@ def transformer_config_post_init_wrapper(post_init_func):
                     "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
                 )
 
-        # pp aware offload
-        if self.offload_moe_mlp_input:
+        # offload activations
+        if self.offload_activation:
             assert (
                 not self.cpu_offloading
-            ), "offload_moe_mlp_input can not be used with cpu_offloading"
+            ), "offload_activation can not be used with cpu_offloading"
 
-            moe_recompute = self.recompute_granularity == 'selective' and (
-                "moe" in self.recompute_modules or "moe_act" in self.recompute_modules
+        if self.offload_modules is None:
+            self.offload_modules = ["core_attn"]
+
+        if len(self.offload_modules) > 0:
+            allowed_modules = {
+                "self_attn", "qkv_linear", "core_attn", "attn_linear", "router_fc1", "router_fc2",
+                "shared_fc1", "shared_fc2"
+            }
+            invalid_modules = set(self.offload_modules) - allowed_modules
+            assert not invalid_modules, (
+                f'Invalid choices for offload_modules: {invalid_modules}. '
+                f'Allowed modules are: {allowed_modules}'
             )
-            assert moe_recompute, "offload_moe_mlp_input must be used with moe_recompute, 'moe' or 'moe_act' "
-            assert self.overlap_moe_expert_parallel_comm, "offload_moe_mlp_input must be used with overlap_moe_expert_parallel_comm"
+
+        if "self_attn" in self.offload_modules:
+            if "qkv_linear" in self.offload_modules:
+                self.offload_modules.remove("qkv_linear")
+            if "core_attn" in self.offload_modules:
+                self.offload_modules.remove("core_attn")
+            if "attn_linear" in self.offload_modules:
+                self.offload_modules.remove("attn_linear")
+
+        if "core_attn" in self.offload_modules:
+            warnings.warn(
+                "If you are using transformer_engine as the transformer implementation, "
+                "the core_attn is from transformer_engine and may be the fused version. "
+                "For fused attention, you have no need to set 'core_attn' to offload. "
+                "Please check that the core_attn offload is really needed."
+            )
 
     return wrapper

@@ -56,6 +56,7 @@ class _AllToAll(torch.autograd.Function):
                 input_split_sizes=input_split_sizes,
                 group=group,
             )
+
         return output
 
     @staticmethod

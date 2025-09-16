@@ -316,10 +316,6 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                 )
                 return schedule_plan, partial(loss_func, loss_mask, model=model)
             else:
-                from dcu_megatron.core.pipeline_parallel.cpu_offload import reset_chunk as cpu_offload_reset_chunk
-                unwrapped_model = unwrap_model(model)
-                cpu_offload_reset_chunk(unwrapped_model.config, unwrapped_model.decoder.num_layers_per_pipeline_rank)
-
                 output_tensor = model(
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
                 )

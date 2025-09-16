@@ -25,7 +25,6 @@ except ImportError:
     HAVE_TE = False
 
 from dcu_megatron.core.pipeline_parallel.utils import ScheduleNode
-from dcu_megatron.core.pipeline_parallel.cpu_offload import get_offload_context, set_offload_tag
 
 
 def weak_method(method):
@@ -469,10 +468,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                     *args,
                 )
             else:
-                with get_offload_context(layer.config):
-                    shared_expert_output = tensor_parallel.checkpoint(
-                        custom_forward, False, *args
-                    )
+                shared_expert_output = tensor_parallel.checkpoint(
+                    custom_forward, False, *args
+                )
         else:
             shared_expert_output = custom_forward(*args)
         del args
@@ -552,25 +550,19 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                     *args,
                 )
             else:
-                # offload to cpu if configured
-                set_offload_tag(dispatched_input)
-                set_offload_tag(permuted_probs)
-                with get_offload_context(layer.config):
-                    expert_output = tensor_parallel.checkpoint(
-                        custom_forward, False, *args
-                    )
+                expert_output = tensor_parallel.checkpoint(
+                    custom_forward, False, *args
+                )
         else:
             expert_output = custom_forward(*args)
         del args
 
         expert_output = layer.mlp.token_dispatcher.combine_preprocess(expert_output)
-
         if layer.recompute_pre_mlp_layernorm:
             # discard the output of the pre-mlp layernorm and register the recompute
             # as a gradient hook of expert_output
             layer.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
 
-        expert_output = layer.cpu_offload_commit(expert_output)
         return expert_output
 
     def submodule_combine_forward(
@@ -614,7 +606,6 @@ def build_transformer_layer_callables(layer: TransformerLayer):
     def mlp_wrapper(node: ScheduleNode, *args, **kwargs):
         """Wrapper for Dense forward."""
         output = layer._forward_mlp(*args, **kwargs)
-        output = layer.cpu_offload_commit(output)
         return output
 
     def raise_not_implemented(*args):

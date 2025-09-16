@@ -173,6 +173,17 @@ class MegatronPatchesManager:
             )
 
     @staticmethod
+    def register_cls_funcs(orig_class, new_funcs: list = None, create_dummy=False):
+        if not orig_class.endswith("."):
+            orig_class += "."
+
+        for new_func in new_funcs:
+            assert hasattr(new_func, '__name__') and not new_func.__name__.endswith(('wrapper', 'decorator'))
+
+            orig_func_name = orig_class + new_func.__name__
+            MegatronPatchesManager.register_patch(orig_func_name, new_func_or_cls=new_func, create_dummy=create_dummy)
+
+    @staticmethod
     def apply_patches():
         for patch in MegatronPatchesManager.patches_info.values():
             patch.apply_patch()

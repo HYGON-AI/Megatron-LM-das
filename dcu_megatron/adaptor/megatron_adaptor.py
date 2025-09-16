@@ -90,6 +90,17 @@ class MegatronAdaptation:
                 remove_origin_wrappers=remove_origin_wrappers
             )
 
+    @staticmethod
+    def register_cls_funcs(orig_class, new_funcs: list = None, create_dummy=False):
+        if not orig_class.endswith("."):
+            orig_class += "."
+
+        for new_func in new_funcs:
+            assert hasattr(new_func, '__name__') and not new_func.__name__.endswith(('wrapper', 'decorator'))
+
+            orig_func_name = orig_class + new_func.__name__
+            MegatronAdaptation.register(orig_func_name, new_func=new_func, create_dummy=create_dummy)
+
     @classmethod
     def apply(cls):
         """
@@ -187,6 +198,10 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         from ..core.transformer.attention import self_attention_get_query_key_value_tensors_wrapper
+        from ..core.transformer.attention import attention_init_wrapper
+        from ..core.transformer.moe.experts import te_grouped_mlp_init_wrapper
+        from ..core.transformer.transformer_layer import transformer_layer_init_wrapper
+        from ..core.transformer.mlp import mlp_init_wrapper
         from ..core.transformer.moe.experts import TEGroupedMLP
 
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
@@ -208,6 +223,19 @@ class CoreAdaptation(MegatronAdaptationABC):
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
+        # cpu offload.
+        MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
+                                    attention_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.__init__',
+                                    te_grouped_mlp_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.transformer_layer.TransformerLayer.__init__',
+                                    transformer_layer_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.mlp.MLP.__init__',
+                                    mlp_init_wrapper,
+                                    apply_wrapper=True)
 
     def patch_core_extentions(self):
         import transformer_engine as te
