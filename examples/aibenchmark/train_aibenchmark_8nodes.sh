@@ -35,8 +35,12 @@ export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
-# enable BatchLinear
-export GROUPED_GEMM_BatchLinear=1
+# int8_simulation_fp8
+export NVTE_INT8_SIM_FP8_TENSORWISE=1
+export NVTE_DISABLE_NVRTC=1
+export NVTE_INT8_SIM_FP8=1
+
+# triton cache dir
 export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
@@ -66,13 +70,13 @@ MODEL_ARGS=(
     --rotary-base 1000000
     --ckpt-format torch
     --use-quantize-comm
-    --use-precision-aware-optimizer
-    --main-grads-dtype bf16
-    --main-params-dtype fp16
     --schedule-method interleaved_1f1b
     --overlap-moe-expert-parallel-comm
     --group-query-attention
     --num-query-groups 8
+    --fp8-format hybrid
+    --fp8-recipe tensorwise 
+    --fp8-param-gather
 )
 
 MOE_ARGS=(
