@@ -134,9 +134,7 @@ class Attention():
 
         value = value.contiguous()
 
-        query = group_prefetch_offload_start(query)
-        key = group_prefetch_offload_start(key)
-        value = group_prefetch_offload_start(value)
+        query, key, value = group_prefetch_offload_start(query, key, value)
 
         handler = PipelineOffloadManager.get_instance().cur_forward_chunk()
         handler.register_offload_tensor([query, key, value])

@@ -12,6 +12,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 
 from .utils import offloading_checker
 from dcu_megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+from dcu_megatron.core.pipeline_parallel.cpu_offload import set_layer_index
 
 
 def gpt_model_init_wrapper(fn):
@@ -157,6 +158,7 @@ def gpt_model_forward_wrapper(fn):
             0,
         )
         PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(offloading_checker)
+        set_layer_index(0)
 
         return fn(self, *args, **kwargs)
 

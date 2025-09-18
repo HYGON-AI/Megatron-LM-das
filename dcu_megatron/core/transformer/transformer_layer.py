@@ -15,6 +15,8 @@ from megatron.core.utils import (
     nvtx_range_push,
 )
 
+from dcu_megatron.core.pipeline_parallel.cpu_offload import get_layer_index, set_layer_index
+
 
 def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
@@ -156,6 +158,18 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
             config.offload_activation
             and "self_attn" in config.offload_modules
         )
+
+    return wrapper
+
+
+def transformer_layer_forward_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        layer_index = get_layer_index()
+        output, context = fn(self, *args, **kwargs)
+        set_layer_index(layer_index + 1)
+
+        return output, context
 
     return wrapper
 

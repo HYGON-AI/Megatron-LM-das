@@ -36,7 +36,7 @@ class CPUOffloadFeature(AbstractFeature):
         from dcu_megatron.core.transformer.attention import Attention
         from dcu_megatron.core.transformer.moe.experts import TEGroupedMLP
         from dcu_megatron.core.transformer.mlp import MLP
-        from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
+        from dcu_megatron.core.transformer.transformer_layer import TransformerLayer, transformer_layer_forward_wrapper
 
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.forward',
                                      gpt_model_forward_wrapper,
@@ -66,6 +66,7 @@ class CPUOffloadFeature(AbstractFeature):
 
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer._forward_attention',
                                      TransformerLayer._forward_attention)
-
-
+        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.forward',
+                                     transformer_layer_forward_wrapper,
+                                     apply_wrapper=True)
         
