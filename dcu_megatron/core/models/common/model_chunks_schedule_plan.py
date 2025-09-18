@@ -534,10 +534,6 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._pre_process = None
         self._post_process = None
 
-        from dcu_megatron.core.pipeline_parallel.cpu_offload import reset_chunk as cpu_offload_reset_chunk
-
-        cpu_offload_reset_chunk(model.config, model.decoder.num_layers_per_pipeline_rank)
-
         comp_stream = get_comp_stream()
         comm_stream = get_comm_stream()
 
