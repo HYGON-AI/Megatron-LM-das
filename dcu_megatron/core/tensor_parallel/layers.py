@@ -144,7 +144,7 @@ class AGLinear(torch.autograd.Function):
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         tp_group = ctx.tp_group
-        transpose_weight = ctx.transpose_weight
+        transpose_weight = not ctx.transpose_weight
         bw_gemm_rs_op = ctx.bw_gemm_rs_op
 
         wgrad_compute = weight.requires_grad
@@ -463,7 +463,7 @@ class LinearRS(torch.autograd.Function):
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         tp_group = ctx.tp_group
-        transpose_weight = ctx.transpose_weight
+        transpose_weight = not ctx.transpose_weight
         bw_ag_gemm_op = ctx.bw_ag_gemm_op
 
         wgrad_compute = weight.requires_grad
@@ -887,7 +887,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
                         input_hidden_size,
                         input_parallel.dtype,
                         input_parallel.dtype,
-                        transpose_weight=self.flux_transpose_weight,
+                        transpose_weight=not self.flux_transpose_weight,
                         fuse_reduction=False
                     )
 
@@ -1074,7 +1074,7 @@ class FluxRowParallelLinear(RowParallelLinear):
                         output_hidden_size,
                         input_parallel.dtype,
                         output_dtype=input_parallel.dtype,
-                        transpose_weight=self.flux_transpose_weight,
+                        transpose_weight=not self.flux_transpose_weight,
                         local_copy=False,
                         ring_mode=flux.AgRingMode.Auto,
                     )
