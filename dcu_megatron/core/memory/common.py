@@ -29,6 +29,7 @@ def linear_forward_main_grad_wrapper(forward_func):
                                  sequence_parallel,
                                  grad_output_buffer,
                                  wgrad_deferral_limit,
+                                 tp_group,
                                  ):
         output = forward_func(ctx,
                               inputs,
@@ -39,6 +40,7 @@ def linear_forward_main_grad_wrapper(forward_func):
                               sequence_parallel,
                               grad_output_buffer,
                               wgrad_deferral_limit,
+                              tp_group,
                               )
         ctx.weight = weight
         return output

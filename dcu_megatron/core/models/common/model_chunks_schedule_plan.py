@@ -17,6 +17,9 @@ from dcu_megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
+from dcu_megatron.core.models.gpt.utils import offloading_checker
+from dcu_megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
+from dcu_megatron.core.pipeline_parallel.cpu_offload import set_layer_index
 
 
 class ModelChunkState:
@@ -533,6 +536,15 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._event = torch.cuda.Event()
         self._pre_process = None
         self._post_process = None
+
+        PipelineOffloadManager.get_instance().reset_chunk_handler(
+            model.decoder.num_layers_per_pipeline_rank,
+            model.vp_stage,
+            model.config.offload_activation,
+            0,
+        )
+        PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(offloading_checker)
+        set_layer_index(0)
 
         comp_stream = get_comp_stream()
         comm_stream = get_comm_stream()

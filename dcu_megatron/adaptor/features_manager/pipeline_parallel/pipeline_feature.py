@@ -277,14 +277,3 @@ class PipelineFeature(AbstractFeature):
                                           MoELayer.backward_shared_expert_dw,
                                           MoELayer.backward_routed_expert_dw,],
                                          create_dummy=True)
-
-        # offload_moe_mlp_input
-        if args.offload_moe_mlp_input:
-            from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
-
-            patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.forward',
-                                        GroupedMLP.forward)
-            patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.checkpoint',
-                                        CheckpointWithoutOutput.checkpoint)
-            patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput._recompute',
-                                        CheckpointWithoutOutput._recompute)
