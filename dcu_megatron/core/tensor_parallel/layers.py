@@ -126,7 +126,6 @@ class AGLinear(torch.autograd.Function):
                 fast_accum=False
             )
 
-            torch.cuda.current_stream().synchronize()
             output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
@@ -198,7 +197,6 @@ class AGLinear(torch.autograd.Function):
                 fast_accum=False
             )
 
-            torch.cuda.current_stream().synchronize()
             grad_input = grad_input.view(sequence_len // tp_group.size(), batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
@@ -447,7 +445,6 @@ class LinearRS(torch.autograd.Function):
                 output_scale=None,
                 fast_accum=False,
             )
-            torch.cuda.current_stream().synchronize()
             output = output.view(sequence_len // tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
@@ -517,7 +514,6 @@ class LinearRS(torch.autograd.Function):
                 output_scale=None,
                 fast_accum=False,
             )
-            torch.cuda.current_stream().synchronize()
             grad_input = grad_input.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
             grad_input = grad_output.matmul(weight)
