@@ -13,6 +13,10 @@ class ParallelLinearFeature(AbstractFeature):
                            default=None,
                            choices=['flux'],
                            help='Specify the method to replace ColumnParallelLinear/RowParallelLinear')
+        group.add_argument('--save-flux-gather-output', action='store_true', default=False,
+                           help='use gather output of AGKernel for wgrad computation')
+        group.add_argument('--flux-transpose-weight', action='store_true', default=False,
+                           help='Whether to transpose weight when using flux kernel')
 
     def validate_args(self, args):
         if args.parallel_linear_impl == "flux" and args.transformer_impl != 'transformer_engine':

@@ -37,6 +37,7 @@ from megatron.core.tensor_parallel.layers import (
     custom_bwd,
     dist_all_gather_func,
 )
+from megatron.training import get_args
 
 from dcu_megatron.core.utils import is_flux_min_version
 
@@ -86,7 +87,7 @@ class AGLinear(torch.autograd.Function):
         bw_gemm_rs_op=None,
     ):
         """Forward."""
-        ctx.save_for_backward(input, weight)
+        args = get_args()
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
         ctx.allreduce_dgrad = allreduce_dgrad
@@ -96,7 +97,9 @@ class AGLinear(torch.autograd.Function):
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
         ctx.bw_gemm_rs_op = bw_gemm_rs_op
+        ctx.save_flux_gather_output = args.save_flux_gather_output
 
+        total_input = None
         if sequence_parallel:
             sequence_len, batch_size, input_hidden_size = input.size()
             output_hidden_size = weight.size(0)
@@ -126,11 +129,19 @@ class AGLinear(torch.autograd.Function):
                 fast_accum=False
             )
 
+            if args.save_flux_gather_output:
+                total_input = fw_ag_gemm_op.gather()
+
             output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
             if bias is not None:
                 output = output + bias
+
+        if sequence_parallel and args.save_flux_gather_output:
+            ctx.save_for_backward(total_input, weight)
+        else:
+            ctx.save_for_backward(input, weight)
 
         return output
 
@@ -154,19 +165,22 @@ class AGLinear(torch.autograd.Function):
 
         if wgrad_compute:
             if ctx.sequence_parallel:
-                dim_size = list(input.size())
-                dim_size[0] = dim_size[0] * tp_group.size()
+                if ctx.save_flux_gather_output:
+                    total_input = input
+                else:
+                    dim_size = list(input.size())
+                    dim_size[0] = dim_size[0] * tp_group.size()
 
-                all_gather_buffer = get_global_memory_buffer().get_tensor(
-                    dim_size, input.dtype, "mpu"
-                )
-                handle = dist_all_gather_func(
-                    all_gather_buffer, input, group=tp_group, async_op=True
-                )
+                    all_gather_buffer = get_global_memory_buffer().get_tensor(
+                        dim_size, input.dtype, "mpu"
+                    )
+                    handle = dist_all_gather_func(
+                        all_gather_buffer, input, group=tp_group, async_op=True
+                    )
 
-                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
-                # gather is scheduled before the input gradient computation
-                total_input = all_gather_buffer
+                    # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                    # gather is scheduled before the input gradient computation
+                    total_input = all_gather_buffer
             else:
                 total_input = input
 
@@ -201,7 +215,11 @@ class AGLinear(torch.autograd.Function):
         else:
             grad_input = grad_output.matmul(weight)
 
-        if ctx.sequence_parallel and wgrad_compute:
+        if (
+            wgrad_compute
+            and ctx.sequence_parallel
+            and not ctx.save_flux_gather_output
+        ):
             handle.wait()
 
         if wgrad_compute:
@@ -469,24 +487,6 @@ class LinearRS(torch.autograd.Function):
                 grad_output_buffer.append(grad_output)
                 wgrad_compute = False
 
-        if wgrad_compute:
-            if ctx.sequence_parallel:
-                dim_size = list(grad_output.size())
-                dim_size[0] = dim_size[0] * tp_group.size()
-
-                all_gather_buffer = get_global_memory_buffer().get_tensor(
-                    dim_size, grad_output.dtype, "mpu"
-                )
-                handle = dist_all_gather_func(
-                    all_gather_buffer, grad_output, group=tp_group, async_op=True
-                )
-
-                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
-                # gather is scheduled before the input gradient computation
-                total_grad_output = all_gather_buffer
-            else:
-                total_grad_output = grad_output
-
         if ctx.sequence_parallel:
             sequence_len, batch_size, output_hidden_size = grad_output.size()
             input_hidden_size = weight.size(-1)
@@ -521,10 +521,11 @@ class LinearRS(torch.autograd.Function):
         if not weight.requires_grad:
             grad_input, None, None, None, None, None, None, None, None, None, None
 
-        if ctx.sequence_parallel and wgrad_compute:
-            handle.wait()
-
         if wgrad_compute:
+            if ctx.sequence_parallel:
+                total_grad_output = bw_ag_gemm_op.gather()
+            else:
+                total_grad_output = grad_output
             total_grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
                 total_grad_output, input
             )

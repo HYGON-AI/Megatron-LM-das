@@ -31,10 +31,6 @@ class GradientCompressFeature(AbstractFeature):
         group.add_argument('--collect-log-path', type=str, default='./logs',
                            help='If set, collect some data during the iteration process, such as the time and loss of each iteration')
 
-    def validate_args(self, args):
-        if args.parallel_linear_impl == "flux" and args.transformer_impl != 'transformer_engine':
-            raise AssertionError('flux is only supported with transformer_engine implementation')
-
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.distributed.finalize_model_grads import finalize_model_grads
         from dcu_megatron.core.distributed.distributed_data_parallel import finish_grad_sync
