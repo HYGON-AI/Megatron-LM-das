@@ -168,6 +168,11 @@ class CoreAdaptation(MegatronAdaptationABC):
             from ..core.dist_checkpoint.strategies.torch import get_reformulation_metadata
             from ..core.dist_checkpoint.strategies.torch import TorchDistLoadShardedStrategy
 
+            from ..core.dist_checkpoint.validation import _compute_shards_access, _validate_sharding_for_key_flattened
+            from ..core.dist_checkpoint.strategies.fully_parallel import FullyParallelLoadStrategyWrapper
+            from ..core.dist_checkpoint.exchange_utils import determine_main_replica_uniform_distribution
+
+            # ckpt-memory-cache
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.write_preloaded_data',
                                         write_preloaded_data)
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.preload_tensors',
@@ -178,6 +183,15 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         get_reformulation_metadata)
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
                                         TorchDistLoadShardedStrategy)
+            #ckpt-memory-cache load norm
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.validation._compute_shards_access',
+                                        _compute_shards_access)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.validation._validate_sharding_for_key_flattened',
+                                        _validate_sharding_for_key_flattened)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.fully_parallel.FullyParallelLoadStrategyWrapper.apply_loading_parallelization',
+                                        FullyParallelLoadStrategyWrapper.apply_loading_parallelization)
+            MegatronAdaptation.register('megatron.core.dist_checkpointing.exchange_utils.determine_main_replica_uniform_distribution',
+                                        determine_main_replica_uniform_distribution)
 
     def patch_core_distributed(self):
         pass
