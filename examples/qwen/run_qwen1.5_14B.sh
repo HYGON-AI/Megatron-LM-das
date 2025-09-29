@@ -11,7 +11,7 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 # Those variables need to modify
 DTK_ENV=""                                                               # where env.sh of dtk
 DATA_PATH=""                                                             # path to oscar-1GB_head-qwen_text_document
-TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
+TOKENIZER_MODEL_PATH=""                                                  # path to the directory containing vocab.json and mergse.txt
 CHECKPOINT_PATH=""                                                       # path to ckpt
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
