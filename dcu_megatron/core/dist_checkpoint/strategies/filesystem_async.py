@@ -90,11 +90,8 @@ def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List
         non_blocking (bool, optional): knob to enable pinned D2H memcpy. Default is True.
     """
     result = []
-    zyrank = torch.distributed.get_rank()
     for bucket in write_buckets:
         file_name, storage_key, (bytes_data, tensor_data) = bucket
-        if zyrank==5:
-            print(f"zytest preload_tensors file_name:{file_name} storage_key:{storage_key}\n")
         tensor_data = [
             (item, tensor.to("cpu", non_blocking=False)) for item, tensor in tensor_data
         ]
