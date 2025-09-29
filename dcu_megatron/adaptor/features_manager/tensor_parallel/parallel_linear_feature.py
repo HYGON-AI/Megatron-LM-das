@@ -13,8 +13,8 @@ class ParallelLinearFeature(AbstractFeature):
                            default=None,
                            choices=['flux'],
                            help='Specify the method to replace ColumnParallelLinear/RowParallelLinear')
-        group.add_argument('--save-flux-gather-output', action='store_true', default=False,
-                           help='use gather output of AGKernel for wgrad computation')
+        group.add_argument('--save-flux-gather-input', action='store_true', default=False,
+                           help='use gathered input of AGKernel for wgrad computation')
         group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                            help='Whether to transpose weight when using flux kernel')
 

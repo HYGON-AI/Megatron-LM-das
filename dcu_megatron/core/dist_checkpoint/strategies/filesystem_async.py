@@ -1,31 +1,18 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-
 """ Storage writer for PyT Distributed format allowing asynchronous save. """
-import dataclasses
-import logging
-import os
-import queue
-from functools import partial
-from heapq import heappop, heappush
-from itertools import chain
-from operator import itemgetter
-from pathlib import Path
-from time import time
-from typing import Callable, Dict, List, Optional, Tuple, Union
 
-import psutil
+import logging
+from pathlib import Path
+from typing import List, Tuple
+
 import torch
 from torch import multiprocessing as mp
-from torch.distributed.checkpoint import FileSystemWriter
-from torch.distributed.checkpoint.filesystem import DEFAULT_SUFFIX, _StoragePrefix, _write_item
-from torch.distributed.checkpoint.planner import SavePlan, SavePlanner, WriteItem, WriteItemType
-from torch.distributed.checkpoint.storage import WriteResult
-from torch.futures import Future
 from hyckpt_torch import _write_items
 
 from megatron.core.dist_checkpointing.strategies.async_utils import _disable_gc
 from megatron.core.dist_checkpointing.strategies.filesystem_async import _process_memory
+
 WriteBucket = Tuple[Path, str, Tuple[list, list]]  # represents writes to a single file
+
 
 @staticmethod
 @_disable_gc()
@@ -80,6 +67,7 @@ def write_preloaded_data(
         f"{local_proc_idx} consumed: {mem_after - mem_before},"
         f" before: {mem_before}, after: {mem_after}"
     )
+
 
 @staticmethod
 def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List[WriteBucket]:

@@ -97,7 +97,7 @@ class AGLinear(torch.autograd.Function):
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
         ctx.bw_gemm_rs_op = bw_gemm_rs_op
-        ctx.save_flux_gather_output = args.save_flux_gather_output
+        ctx.save_flux_gather_input = args.save_flux_gather_input
 
         total_input = None
         if sequence_parallel:
@@ -129,8 +129,8 @@ class AGLinear(torch.autograd.Function):
                 fast_accum=False
             )
 
-            if args.save_flux_gather_output:
-                total_input = fw_ag_gemm_op.gather()
+            if args.save_flux_gather_input:
+                total_input = fw_ag_gemm_op.gather_input()
 
             output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
@@ -138,7 +138,7 @@ class AGLinear(torch.autograd.Function):
             if bias is not None:
                 output = output + bias
 
-        if sequence_parallel and args.save_flux_gather_output:
+        if sequence_parallel and args.save_flux_gather_input:
             ctx.save_for_backward(total_input, weight)
         else:
             ctx.save_for_backward(input, weight)
@@ -165,7 +165,7 @@ class AGLinear(torch.autograd.Function):
 
         if wgrad_compute:
             if ctx.sequence_parallel:
-                if ctx.save_flux_gather_output:
+                if ctx.save_flux_gather_input:
                     total_input = input
                 else:
                     dim_size = list(input.size())
@@ -218,14 +218,23 @@ class AGLinear(torch.autograd.Function):
         if (
             wgrad_compute
             and ctx.sequence_parallel
-            and not ctx.save_flux_gather_output
+            and not ctx.save_flux_gather_input
         ):
             handle.wait()
 
         if wgrad_compute:
-            grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                grad_output, total_input
-            )
+            if ctx.sequence_parallel and ctx.save_flux_gather_input:
+                grad_output = grad_output.contiguous()
+                total_input = total_input.contiguous()
+                # Convert the tensor shapes to 2D for execution compatibility
+                if grad_output.dim() == 3:
+                    grad_output = grad_output.view(
+                        grad_output.shape[0] * grad_output.shape[1], grad_output.shape[2]
+                    )
+            else:
+                grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
+                    grad_output, total_input
+                )
 
         if not ctx.sequence_parallel and ctx.allreduce_dgrad:
             if weight.requires_grad:
@@ -523,7 +532,7 @@ class LinearRS(torch.autograd.Function):
 
         if wgrad_compute:
             if ctx.sequence_parallel:
-                total_grad_output = bw_ag_gemm_op.gather()
+                total_grad_output = bw_ag_gemm_op.gather_input()
             else:
                 total_grad_output = grad_output
             total_grad_output, total_input = prepare_input_tensors_for_wgrad_compute(

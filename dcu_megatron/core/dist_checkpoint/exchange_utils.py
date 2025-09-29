@@ -4,26 +4,25 @@
 
 import logging
 from collections import defaultdict
-from functools import reduce
-from itertools import zip_longest
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, TypeVar, cast
+from typing import Optional, Set
 
-import numpy as np
 import torch
 
-from megatron.core.utils import get_pg_rank, get_pg_size
-from megatron.core.dist_checkpointing.core import CheckpointingException
+from megatron.core.utils import get_pg_size
 from megatron.core.dist_checkpointing.dict_utils import nested_values
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict, ShardedTensor, is_main_replica, ReplicaId
-from megatron.core.dist_checkpointing.utils import _sharded_tensor_shard_id, _ShardId, debug_time
+from megatron.core.dist_checkpointing.utils import _sharded_tensor_shard_id, _ShardId
 from megatron.core.dist_checkpointing.exchange_utils import ShardDistribution, _shard_size, distribute_shards_to_ranks
 
+
 logger = logging.getLogger(__name__)
+
 
 def is_main_replica_norm(replica_id: ReplicaId):
     if isinstance(replica_id, int):
         return replica_id == 0
     return len(replica_id) > 0 and replica_id[-1] == 0
+
 
 def determine_main_replica_uniform_distribution(
     sharded_state_dict: ShardedStateDict,
