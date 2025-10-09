@@ -524,7 +524,7 @@ def get_offload_context(config):
         return nullcontext()
 
 
-def offload_checker_ctx(config, offload_checker_func):s
+def offload_checker_ctx(config, offload_checker_func):
     if config.offload_activation:
         return (
             PipelineOffloadManager.get_instance()

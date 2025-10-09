@@ -117,7 +117,7 @@ class MLP():
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="linear_fc1")
-        if self.offload_router_fc1:
+        if self.offload_shared_fc1:
             intermediate_parallel, bias_parallel = self._offload_shared_fc1_forward(hidden_states)
         else:
             intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
@@ -177,7 +177,7 @@ class MLP():
 
         # [s, b, h]
         nvtx_range_push(suffix="linear_fc2")
-        if self.offload_router_fc1:
+        if self.offload_shared_fc2:
             output, output_bias = self._offload_shared_fc2_forward(intermediate_parallel)
         else:
             output, output_bias = self.linear_fc2(intermediate_parallel)
