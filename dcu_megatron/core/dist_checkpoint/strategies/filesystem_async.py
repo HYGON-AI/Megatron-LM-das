@@ -86,4 +86,5 @@ def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List
         result.append((file_name, storage_key, (bytes_data, tensor_data)))
     if non_blocking:
         torch.cuda.synchronize()
+
     return result

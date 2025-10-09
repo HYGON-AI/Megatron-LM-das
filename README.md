@@ -136,6 +136,20 @@ def unpermute(
 2. 可以通过swap-modules控制做swap的模块,默认为self_attention,建议只开启self_attention
 3. 可以通过specify-layers控制做swap的layer层
 
+### zero-overhead activation offload
++ 项目提供另外一种激活值offload方式。要在启动脚本中加入以下参数：
+```
+必选:
+--offload-activation
+可选：
+--offload-modules core_attn
+```
+
++ 注意事项：
+1. te需满足te>=2.7；torch需满足torch>=2.7;
+2. offload-modules支持self_attn、qkv_linear、core_attn、attn_linear、router_fc1、router_fc2、shared_fc1、shared_fc2、moe_act，可同时offload多个module。
+
+
 ## 使用方式
 
 ### 项目下载

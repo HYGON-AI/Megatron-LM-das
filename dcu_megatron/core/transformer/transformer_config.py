@@ -58,7 +58,7 @@ def transformer_config_post_init_wrapper(post_init_func):
         if len(self.offload_modules) > 0:
             allowed_modules = {
                 "self_attn", "qkv_linear", "core_attn", "attn_linear", "router_fc1", "router_fc2",
-                "shared_fc1", "shared_fc2"
+                "shared_fc1", "shared_fc2", "moe_act"
             }
             invalid_modules = set(self.offload_modules) - allowed_modules
             assert not invalid_modules, (

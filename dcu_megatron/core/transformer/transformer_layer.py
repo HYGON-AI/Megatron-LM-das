@@ -7,6 +7,7 @@ from torch import Tensor
 from megatron.training import get_args
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.process_groups_config import ModelCommProcessGroups
 from megatron.core.utils import (
@@ -16,6 +17,12 @@ from megatron.core.utils import (
 )
 
 from dcu_megatron.core.pipeline_parallel.cpu_offload import get_layer_index, set_layer_index
+from dcu_megatron.core.pipeline_parallel.cpu_offload import (
+    PipelineOffloadManager,
+    group_prefetch_offload_start,
+    group_prefetch_offload_commit,
+)
+from .utils import DelayReleaseQKVLinearTensorContextManager
 
 
 def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None):
@@ -159,6 +166,17 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
             and "self_attn" in config.offload_modules
         )
 
+        if self.offload_self_attn and isinstance(self.input_layernorm, IdentityOp):
+            raise Exception(f"self_attn module cannot be offloaded while input_layernorm is IdentityOp")
+
+        self.offload_qkv_linear = (
+            config.offload_activation
+            and "qkv_linear" in config.offload_modules
+        )
+
+        # delay release input_layernorm_output
+        self.delay_release_qkv_linear_tensor = self.offload_qkv_linear and isinstance(self.input_layernorm, IdentityOp)
+
     return wrapper
 
 
@@ -227,37 +245,25 @@ class TransformerLayer():
             input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
                 self.input_layernorm, hidden_states
             )
+        elif self.offload_self_attn:
+            if not hidden_states.is_contiguous():
+                hidden_states = hidden_states.contiguous()
+            hidden_states = group_prefetch_offload_start(hidden_states)
+            hidden_states.offloading_activation = True
+            with PipelineOffloadManager.get_instance():
+                input_layernorm_output = self.input_layernorm(hidden_states)
+            input_layernorm_output = group_prefetch_offload_commit(
+                input_layernorm_output,
+                release_tensors=[hidden_states],
+                delay_release_module="self_attn"
+            )
+            input_layernorm_output = input_layernorm_output[0]
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
-        if self.offload_self_attn:
-            from dcu_megatron.core.pipeline_parallel.cpu_offload import (
-                PipelineOffloadManager,
-                group_prefetch_offload_start,
-                group_prefetch_offload_commit,
-            )
-            if not input_layernorm_output.is_contiguous():
-                input_layernorm_output = input_layernorm_output.contiguous()
-            input_layernorm_output = group_prefetch_offload_start(input_layernorm_output)
-            input_layernorm_output.offloading_activation = True
-            with PipelineOffloadManager.get_instance():
-                attention_output_with_bias = self.self_attention(
-                input_layernorm_output,
-                attention_mask=attention_mask,
-                inference_context=inference_context,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-            )
-
-            attention_output_with_bias = group_prefetch_offload_commit(attention_output_with_bias, release_tensors=[input_layernorm_output])
-            attention_output_with_bias = attention_output_with_bias[0]
-        else:
+        with DelayReleaseQKVLinearTensorContextManager(self.delay_release_qkv_linear_tensor):
             attention_output_with_bias = self.self_attention(
                 input_layernorm_output,
                 attention_mask=attention_mask,
@@ -286,6 +292,20 @@ class TransformerLayer():
                 attention_output_with_bias, residual, self.hidden_dropout
             )
         nvtx_range_pop(suffix="self_attn_bda")
+
+        if self.offload_self_attn:
+            cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
+            release_func = cur_forward_chunk.module_release_func_map.pop("self_attn", None)
+            if release_func is not None:
+                release_func()
+                del release_func
+
+        if self.offload_qkv_linear:
+            cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
+            release_func = cur_forward_chunk.module_release_func_map.pop("qkv_linear", None)
+            if release_func is not None:
+                release_func()
+                del release_func
 
         # Residual connection.
         residual = hidden_states

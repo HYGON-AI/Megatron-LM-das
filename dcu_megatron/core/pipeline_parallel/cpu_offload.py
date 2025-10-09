@@ -212,6 +212,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         self.do_offload = offload
 
         self._offload_tensor_ptrs = deque()
+        self.module_release_func_map = dict()
 
     def is_first_last_layer(self):
         """whether is the last layer of first last vpp chunk ever meet for this batch"""
@@ -382,19 +383,24 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         self.d2h_stream.wait_stream(torch.cuda.current_stream())
         torch.cuda.current_stream().wait_stream(self.d2h_stream)
 
-    def bulk_offload(self, release_tensors):
+    def bulk_offload(self, release_tensors, delay_release_module=None):
         self.bulk_offload_group(self._group_index)
         if self.should_bulk_offload():
-            if len(release_tensors) > 0:
-                cur_stream = torch.cuda.current_stream()
-                for release_tensor in release_tensors:
-                    release_tensor.record_stream(cur_stream)
-                    release_tensor.untyped_storage().resize_(0)
+            def release_func():
+                if len(release_tensors) > 0:
+                    cur_stream = torch.cuda.current_stream()
+                    for release_tensor in release_tensors:
+                        release_tensor.record_stream(cur_stream)
+                        release_tensor.untyped_storage().resize_(0)
+            if delay_release_module is None:
+                release_func()
+            else:
+                self.module_release_func_map[delay_release_module] = release_func
 
-    def on_group_commit_forward(self, release_tensors):
+    def on_group_commit_forward(self, release_tensors, delay_release_module=None):
         # wait each other
         self.forward_sync()
-        self.bulk_offload(release_tensors)
+        self.bulk_offload(release_tensors, delay_release_module)
         self._group_index = self._group_index + 1
         self._tensor_count_current_group = 0
 
@@ -457,11 +463,11 @@ class GroupCommitFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
         # pylint: disable=missing-function-docstring
-
-        release_tensors = args[-1]
-        cpu_offload_handler = args[-2]
-        tensor = args[:-2]
-        cpu_offload_handler.on_group_commit_forward(release_tensors)
+        delay_release_module = args[-1]
+        release_tensors = args[-2]
+        cpu_offload_handler = args[-3]
+        tensor = args[:-3]
+        cpu_offload_handler.on_group_commit_forward(release_tensors, delay_release_module=delay_release_module)
         ctx.cpu_offload_handler = cpu_offload_handler
 
         # return the identical tensor
@@ -473,12 +479,12 @@ class GroupCommitFunction(torch.autograd.Function):
 
         cpu_offload_handler = ctx.cpu_offload_handler
         cpu_offload_handler.on_group_commit_backward()
-        return grad_output + (None, None)
+        return grad_output + (None, None, None)
 
 
-def group_prefetch_offload_commit(*tensor, release_tensors=[]):
+def group_prefetch_offload_commit(*tensor, release_tensors=[], delay_release_module=None):
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-    return GroupCommitFunction.apply(*tensor, cur_forward_chunk, release_tensors)
+    return GroupCommitFunction.apply(*tensor, cur_forward_chunk, release_tensors, delay_release_module)
 
 
 class GroupStartFunction(torch.autograd.Function):
@@ -518,8 +524,8 @@ def get_offload_context(config):
         return nullcontext()
 
 
-def offload_checker_ctx(config, offload_checker_func):
-    if config.offload_moe_mlp_input and config.overlap_moe_expert_parallel_comm:
+def offload_checker_ctx(config, offload_checker_func):s
+    if config.offload_activation:
         return (
             PipelineOffloadManager.get_instance()
             .cur_forward_chunk()

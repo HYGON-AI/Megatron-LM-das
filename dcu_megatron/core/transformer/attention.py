@@ -2,6 +2,7 @@ from typing import Optional, Tuple, Union
 from functools import wraps
 
 import torch
+import transformer_engine as te
 from torch import Tensor
 
 from megatron.core.inference.contexts import BaseInferenceContext
@@ -30,11 +31,24 @@ try:
 except:
     HAVE_FA3 = False
 
+try:
+    from megatron.core.extensions.transformer_engine import SplitAlongDim
+except ImportError:
+    SplitAlongDim = None
+
+try:
+    from transformer_engine.pytorch.utils import ActivationOffloadContextManager as TEActivationOffloadContextManager
+
+    HAVE_OFFLOAD_CONTENT_MANAGER = True
+except:
+    HAVE_OFFLOAD_CONTENT_MANAGER = False
+
 from dcu_megatron.core.pipeline_parallel.cpu_offload import (
     PipelineOffloadManager,
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
 )
+from .utils import get_delay_release_qkv_linear_tensor
 
 
 def attention_init_wrapper(attention_init_func):
@@ -75,28 +89,13 @@ def attention_init_wrapper(attention_init_func):
             and "attn_linear" in config.offload_modules
         )
 
+        if (self.offload_qkv_linear or self.offload_attn_linear) and not HAVE_OFFLOAD_CONTENT_MANAGER:
+            raise ImportError(f"fail to import ActivationOffloadContextManager")
+
     return wrapper
 
 
 class Attention():
-    def _offload_qkv_linear_forward(
-        self,
-        hidden_states,
-        key_value_states,
-    ):
-        """Forward method with qkv linear activation offloading."""
-        if not hidden_states.is_contiguous():
-            hidden_states = hidden_states.contiguous()
-
-        hidden_states = group_prefetch_offload_start(hidden_states)
-        hidden_states.offloading_activation = True
-
-        with PipelineOffloadManager.get_instance():
-            query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
-
-        query, key, value = group_prefetch_offload_commit(query, key, value, release_tensors=[hidden_states])
-        return query, key, value
-
     def _offload_core_attention_forward(
         self,
         query,
@@ -139,10 +138,6 @@ class Attention():
         handler = PipelineOffloadManager.get_instance().cur_forward_chunk()
         handler.register_offload_tensor([query, key, value])
 
-        query.offloading_activation = True
-        key.offloading_activation = True
-        value.offloading_activation = True
-
         with PipelineOffloadManager.get_instance():
             hidden_states = custom_forward(
                 query, key, value, attention_mask, rotary_pos_emb, attn_mask_type
@@ -162,7 +157,7 @@ class Attention():
         core_attn_out = group_prefetch_offload_start(core_attn_out)
         core_attn_out.offloading_activation = True
 
-        with PipelineOffloadManager.get_instance():
+        with PipelineOffloadManager.get_instance(), TEActivationOffloadContextManager(activation_offloading=True):
             output, bias = self.linear_proj(core_attn_out)
 
         output, bias = group_prefetch_offload_commit(output, bias, release_tensors=[core_attn_out])
@@ -236,10 +231,7 @@ class Attention():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         nvtx_range_push(suffix="qkv")
-        if self.offload_qkv_linear:
-            query, key, value = self._offload_qkv_linear_forward(hidden_states, key_value_states)
-        else:
-            query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
         nvtx_range_pop(suffix="qkv")
 
         # ===================================================
@@ -724,19 +716,85 @@ class Attention():
         return output, bias
 
 
-def self_attention_get_query_key_value_tensors_wrapper(get_query_key_value_tensors_func):
-    @wraps(get_query_key_value_tensors_func)
-    def wrapper(self, hidden_states, key_value_states=None):
-        query, key, value = get_query_key_value_tensors_func(self, hidden_states=hidden_states, key_value_states=key_value_states)
+class SelfAttention:
+    def _offload_qkv_linear_forward(
+        self,
+        hidden_states,
+    ):
+        """Forward method with qkv linear activation offloading."""
+        if not hidden_states.is_contiguous():
+            hidden_states = hidden_states.contiguous()
 
-        # ================================================
-        # QK_norm before RoPE
-        # ================================================
+        hidden_states = group_prefetch_offload_start(hidden_states)
+        hidden_states.offloading_activation = True
+
+        with PipelineOffloadManager.get_instance(), TEActivationOffloadContextManager(activation_offloading=True):
+            mixed_qkv, _ = self.linear_qkv(hidden_states)
+
+        delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
+        mixed_qkv = group_prefetch_offload_commit(
+            mixed_qkv,
+            release_tensors=[hidden_states],
+            delay_release_module=delay_release_module
+        )
+        return mixed_qkv[0]
+
+    def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
+        """
+        Derives `query`, `key` and `value` tensors from `hidden_states`.
+        """
+        # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
+        if self.offload_qkv_linear:
+            mixed_qkv = self._offload_qkv_linear_forward(hidden_states)
+        else:
+            mixed_qkv, _ = self.linear_qkv(hidden_states)
+
+        # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
+        new_tensor_shape = mixed_qkv.size()[:-1] + (
+            self.num_query_groups_per_partition,
+            (
+                (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
+                * self.hidden_size_per_attention_head
+            ),
+        )
+        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
+
+        split_arg_list = [
+            (
+                self.num_attention_heads_per_partition
+                // self.num_query_groups_per_partition
+                * self.hidden_size_per_attention_head
+            ),
+            self.hidden_size_per_attention_head,
+            self.hidden_size_per_attention_head,
+        ]
+
+        if SplitAlongDim is not None:
+
+            # [sq, b, ng, (np/ng + 2) * hn]
+            # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
+            (query, key, value) = SplitAlongDim(mixed_qkv, 3, split_arg_list)
+        else:
+
+            # [sq, b, ng, (np/ng + 2) * hn]
+            # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
+            (query, key, value) = torch.split(mixed_qkv, split_arg_list, dim=3)
+
+        # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
+        query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
+
+        if self.q_layernorm is not None:
+            query = self.q_layernorm(query)
+
+        if self.k_layernorm is not None:
+            key = self.k_layernorm(key)
+
+        if self.config.test_mode:
+            self.run_realtime_tests()
+
         if self.config.use_qk_norm:
-            qk_norm = torch.nn.RMSNorm(normalized_shape=query.shape[-1]).cuda()
+            qk_norm = te.pytorch.RMSNorm(normalized_shape=query.shape[-1]).cuda()
             query = qk_norm(query).type_as(query)
             key = qk_norm(key).type_as(key)
 
         return query, key, value
-
-    return wrapper

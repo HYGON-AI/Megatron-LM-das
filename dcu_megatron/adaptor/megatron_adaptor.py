@@ -211,8 +211,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
-        from ..core.transformer.attention import self_attention_get_query_key_value_tensors_wrapper
-        from ..core.transformer.attention import attention_init_wrapper
+        from ..core.transformer.attention import attention_init_wrapper, SelfAttention
         from ..core.transformer.moe.experts import te_grouped_mlp_init_wrapper
         from ..core.transformer.transformer_layer import transformer_layer_init_wrapper
         from ..core.transformer.mlp import mlp_init_wrapper
@@ -230,10 +229,26 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     moe_layer_init_wrapper)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
                                     moe_layer_forward_wrapper)
-        # query, key use the same norm
-        MegatronAdaptation.register('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
-                                    self_attention_get_query_key_value_tensors_wrapper,
+        # fused gelu and mul
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
+                                    TEGroupedMLP.forward)
+        # cpu offload.
+        MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
+                                    attention_init_wrapper,
                                     apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.__init__',
+                                    te_grouped_mlp_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.transformer_layer.TransformerLayer.__init__',
+                                    transformer_layer_init_wrapper,
+                                    apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.transformer.mlp.MLP.__init__',
+                                    mlp_init_wrapper,
+                                    apply_wrapper=True)
+
+        # (1) activation offload, (2) use_qk_norm
+        MegatronAdaptation.register('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
+                                    SelfAttention.get_query_key_value_tensors)
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)

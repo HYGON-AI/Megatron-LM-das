@@ -15,6 +15,84 @@ from dcu_megatron.core.pipeline_parallel.cpu_offload import (
 
 
 class GroupedMLP():
+    def forward(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+    ):
+        """Forward step of the GroupedMLP."""
+        if self.activation_recompute:
+            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+
+        if self.config.moe_apply_probs_on_input:
+            assert (
+                self.config.moe_router_topk == 1
+            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
+            original_dtype = permuted_local_hidden_states.dtype
+            permuted_local_hidden_states = (
+                permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
+            )
+            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
+            # Probs already applied, so reset to 1.
+            permuted_probs = torch.ones_like(permuted_probs)
+
+        if permuted_local_hidden_states.nelement() != 0:
+            # Reshape the weights for the grouped GEMMs.
+            w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
+            w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
+
+            from dcu_megatron.core.pipeline_parallel.cpu_offload import (
+                get_offload_context,
+                offload_checker_ctx,
+            )
+
+            if self.activation_recompute:
+                with get_offload_context(self.config), offload_checker_ctx(
+                    self.config, lambda x: True
+                ):
+                    fc1_output = gg.ops.gmm(
+                        permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+                    )
+            else:
+                fc1_output = gg.ops.gmm(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+                )
+
+            if self.activation_recompute:
+                with get_offload_context(self.config), offload_checker_ctx(
+                    self.config, lambda x: True
+                ):
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                    )
+                fc2_output = gg.ops.gmm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
+            else:
+                intermediate_parallel = self.activation_func_with_probs(
+                    fc1_output, permuted_probs.unsqueeze(-1)
+                )
+                fc2_output = gg.ops.gmm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+        else:
+            # No token is allocated for local experts.
+            assert torch.count_nonzero(tokens_per_expert) == 0
+
+            # Make sure params of experts still have gradients even given zero tokens.
+            w1 = self.weight1.view(self.config.hidden_size, -1)
+            w2 = self.weight2.view(-1, self.config.hidden_size)
+            h = torch.matmul(permuted_local_hidden_states, w1)
+            if self.activation_recompute:
+                h = self.activation_checkpoint.checkpoint(
+                    self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
+                )
+                fc2_output = torch.matmul(h, w2)
+                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
+            else:
+                h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
+                fc2_output = torch.matmul(h, w2)
+
+        return fc2_output, None
+
     def backward_dw(self):
         """Performs backward pass for weight gradients in Experts.
         Empty implementation for compatibility with SequentialMLP and TEGroupedMLP.
@@ -47,6 +125,11 @@ def te_grouped_mlp_init_wrapper(te_grouped_mlp_init_func):
         self.offload_router_fc2 = (
             config.offload_activation
             and "router_fc2" in config.offload_modules
+        )
+
+        self.offload_moe_act = (
+            config.offload_activation
+            and "moe_act" in config.offload_modules
         )
 
     return wrapper
@@ -96,15 +179,10 @@ class TEGroupedMLP():
                 intermediate_parallel, tokens_per_expert
             )
 
-        def call_back():
-            cur_stream = torch.cuda.current_stream()
-            intermediate_parallel.record_stream(cur_stream)
-            intermediate_parallel.untyped_storage().resize_(0)
-
         output, output_bias = group_prefetch_offload_commit(
             output,
             output_bias,
-            offloaded_call_back=call_back
+            release_tensors=[intermediate_parallel]
         )
         return output, output_bias
 
@@ -194,13 +272,35 @@ class TEGroupedMLP():
 
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         else:
-            intermediate_parallel = bias_act_func(
-                intermediate_parallel, bias_parallel, permuted_probs
-            )
-            if self.offload_router_fc2:
-                output, output_bias = self._offload_router_fc2_forward(intermediate_parallel, tokens_per_expert)
+            if self.offload_moe_act:
+                if not intermediate_parallel.is_contiguous():
+                    intermediate_parallel = intermediate_parallel.contiguous()
+
+                intermediate_parallel = group_prefetch_offload_start(intermediate_parallel)
+
+                handler = PipelineOffloadManager.get_instance().cur_forward_chunk()
+                handler.register_offload_tensor(intermediate_parallel)
+                intermediate_parallel.offloading_activation = True
+
+                with PipelineOffloadManager.get_instance():
+                    intermediate_parallel_act = bias_act_func(
+                        intermediate_parallel, bias_parallel, permuted_probs
+                    )
+
+                intermediate_parallel_act = group_prefetch_offload_commit(
+                    intermediate_parallel_act,
+                    release_tensors=[intermediate_parallel]
+                )
+                intermediate_parallel_act = intermediate_parallel_act[0]
             else:
-                output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
+                intermediate_parallel_act = bias_act_func(
+                    intermediate_parallel, bias_parallel, permuted_probs
+                )
+
+            if self.offload_router_fc2:
+                output, output_bias = self._offload_router_fc2_forward(intermediate_parallel_act, tokens_per_expert)
+            else:
+                output, output_bias = self.linear_fc2(intermediate_parallel_act, tokens_per_expert)
 
         # upad and concat the output
         if self.config.fp8:

@@ -1,32 +1,25 @@
-from dataclasses import dataclass
-from typing import Callable, Optional
+DelayReleaseQKVLinearTensor = False
+
+def get_delay_release_qkv_linear_tensor():
+    global DelayReleaseQKVLinearTensor
+    return DelayReleaseQKVLinearTensor
 
 
-@dataclass
-class SubmoduleCallables:
-    """
-    Holds references to forward, dgrad, and dw (weight-grad) callables
-    for a particular submodule.
-    """
-
-    forward: Optional[Callable] = None
-    backward: Optional[Callable] = None
-    dgrad: Optional[Callable] = None
-    dw: Optional[Callable] = None
+def set_delay_release_qkv_linear_tensor(delay_release_qkv_linear_tensor):
+    global DelayReleaseQKVLinearTensor
+    DelayReleaseQKVLinearTensor = delay_release_qkv_linear_tensor
 
 
-@dataclass
-class TransformerLayerSubmoduleCallables:
-    """
-    Collects the SubmoduleMethods for each of the submodules:
-    'attention', 'dispatch', 'mlp', 'combine'.
-    """
+class DelayReleaseQKVLinearTensorContextManager:
+    """A reusable context manager for switch DelayReleaseQKVLinearTensor"""
 
-    attention: SubmoduleCallables
-    dispatch: SubmoduleCallables
-    mlp: SubmoduleCallables
-    combine: SubmoduleCallables
-    post_combine: SubmoduleCallables
+    def __init__(self, delay_release_qkv_linear_tensor):
+        self.delay_release_qkv_linear_tensor = delay_release_qkv_linear_tensor
 
-    def as_array(self):
-        return [self.attention, self.dispatch, self.mlp, self.combine, self.post_combine]
+    def __enter__(self):
+        self.origin_delay_release_qkv_linear_tensor = get_delay_release_qkv_linear_tensor()
+        set_delay_release_qkv_linear_tensor(self.delay_release_qkv_linear_tensor)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        set_delay_release_qkv_linear_tensor(self.origin_delay_release_qkv_linear_tensor)
