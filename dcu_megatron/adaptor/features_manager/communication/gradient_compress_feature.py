@@ -33,7 +33,6 @@ class GradientCompressFeature(AbstractFeature):
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.distributed.finalize_model_grads import finalize_model_grads
-        from dcu_megatron.core.distributed.distributed_data_parallel import finish_grad_sync
         from dcu_megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup, _ParamAndGradBuffer, \
             _ParamAndGradBucket
         from dcu_megatron.training.training import save_checkpoint_and_time_wrapper
@@ -43,8 +42,6 @@ class GradientCompressFeature(AbstractFeature):
         if args.enable_dynamic_grad_comp:
             patch_manager.register_patch('megatron.core.distributed.finalize_model_grads.finalize_model_grads',
                                         finalize_model_grads)
-            patch_manager.register_patch('megatron.core.distributed.distributed_data_parallel.DistributedDataParallel.finish_grad_sync',
-                                        finish_grad_sync)
             patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup',
                                         _ParamAndGradBucketGroup)
             patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer._new_bucket',

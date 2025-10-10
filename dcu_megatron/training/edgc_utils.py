@@ -1,12 +1,10 @@
 import os
 import csv
 from datetime import datetime
-from scipy.interpolate import interp1d
-
-import torch
-
 from megatron.training.global_vars import get_args
+from scipy.interpolate import interp1d
 from megatron.core import mpu
+import torch
 
 
 def read_data_from_csv(file_path, iteration):
@@ -56,7 +54,7 @@ def append_init_error_to_csv(file_path, data):
 
 class Utils:
     data = {}
-    entropy = []
+    loss = []
     mapped_rank = []
 
     @staticmethod
@@ -79,7 +77,6 @@ class Utils:
                 else:
                     Utils.data[rank_size] = int((Utils.data[rank_size] + params_all_reduce_time) / 2)
                     time_value = Utils.data.get(0)
-                    print(Utils.data)
                     if Utils.data[rank_size] > time_value:
                         max_rank = Utils.time_predict_rank(time_value)
                         return True, max_rank
@@ -87,35 +84,35 @@ class Utils:
         return False, None
 
     @staticmethod
-    def map_entropy_change_to_rank(min_rank=8, max_rank=32, window_size=1000):
+    def map_loss_change_to_rank(min_rank=8, max_rank=32, window_size=1000):
         args = get_args()
-        step = 8
+        step = 4
         iter_sample_interval = int(1 / args.iteration_sample_ratio)
         required_points = int(2 * window_size / iter_sample_interval)
-        if len(Utils.entropy) < required_points:
+        if len(Utils.loss) < required_points:
             default_rank = max_rank
             Utils.mapped_rank.append(default_rank)
             return default_rank
         sample_window = int(window_size / iter_sample_interval)
-        curr_window = Utils.entropy[-sample_window:]
-        prev_window = Utils.entropy[-2 * sample_window:-sample_window]
+        curr_window = Utils.loss[-sample_window:]
+        prev_window = Utils.loss[-2 * sample_window:-sample_window]
         curr_mean = sum(curr_window) / sample_window
         prev_mean = sum(prev_window) / sample_window
-        entropy_change = abs(curr_mean - prev_mean)
+        loss_change = abs(curr_mean - prev_mean)
 
-        min_entropy_change = 0.0
+        min_loss_change = 0.0
         if args.is_loading_checkpoint:
-            first_save_interval = read_data_from_csv(args.entropy_path, args.save_interval)
+            first_save_interval = read_data_from_csv(args.loss_path, args.save_interval)
         else:
-            first_save_interval = Utils.entropy
+            first_save_interval = Utils.loss
         first_window = first_save_interval[:sample_window]
         second_window = first_save_interval[sample_window:2 * sample_window]
         first_mean = sum(first_window) / sample_window
         second_mean = sum(second_window) / sample_window
-        max_entropy_change = abs(first_mean - second_mean)
+        max_loss_change = abs(first_mean - second_mean)
 
-        norm_entropy_change = entropy_change / (max_entropy_change - min_entropy_change)
-        mapped_rank = min_rank + (max_rank - min_rank) * norm_entropy_change
+        norm_loss_change = loss_change / (max_loss_change - min_loss_change)
+        mapped_rank = min_rank + (max_rank - min_rank) * norm_loss_change
         mapped_rank = round(mapped_rank)
         mapped_rank = max(min_rank, min(mapped_rank, max_rank))
         mapped_rank = (mapped_rank // 2) * 2

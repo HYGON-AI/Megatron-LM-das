@@ -19,6 +19,7 @@ from megatron.core.distributed.param_and_grad_buffer import BufferType, shard_bu
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 from megatron.training.global_vars import get_args
 from ...training.edgc_utils import Utils, append_init_error_to_csv, read_error_from_csv
+from megatron.training import get_timers
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class _ParamAndGradBucketGroup:
     ):
         self.buckets = buckets
         self.ddp_config = ddp_config
-
+        self.timers = get_timers()
         if self.ddp_config.use_distributed_optimizer:
             self.intra_distributed_optimizer_instance_group = collective_group
             self.intra_distributed_optimizer_instance_size = collective_group_size
@@ -131,44 +132,9 @@ class _ParamAndGradBucketGroup:
         self.param_gather_handle = None
         self.param_gather_dispatched = False
         self.grad_reduce_handle = None
-        self.compressor = None
         self.initial_error = False
         self.max_rank_error = 0.0
         self.min_rank_error = 0.0
-
-    def _get_find_rank(self):
-        """Helper to determine rank when finding rank upper limit."""
-        if self.args.mapped_rank is not None:
-            return int(self.args.mapped_rank)
-        if self.args.is_loading_checkpoint:
-            return int(Utils.mapped_rank[-1] if Utils.mapped_rank else self.args.max_rank)
-        return int(self.args.max_rank)
-
-    def _get_adaptive_rank(self):
-        """Helper to determine rank during adaptive compression."""
-        if self.args.is_loading_checkpoint:
-            delta_iter = self.args.curr_iteration - self.args.latest_iteration
-        else:
-            delta_iter = self.args.curr_iteration
-        return 2 ** int((delta_iter - 9) / 3)
-
-    def update(self):
-        if self.args.enable_dynamic_grad_comp:
-            from .power_sgd import PowerSGDCompressor
-            if not self.args.grad_comp:
-                self.compressor = None
-                return
-            else:
-                compression_dtype = torch.float32
-
-                if self.args.find_rank_upper_limit:
-                    rank = self._get_find_rank()
-                else:
-                    rank = self._get_adaptive_rank()
-            self.compressor = PowerSGDCompressor(rank=rank, compression_dtype=compression_dtype)
-        else:
-            self.compressor = None
-            return
 
     def reset(self):
         """
@@ -301,60 +267,6 @@ class _ParamAndGradBucketGroup:
                 else:
                     self.next_param_gather_bucket_group.start_param_sync()
 
-    def _eval_error(self, tensor, rank):
-        matrix = tensor.view(tensor.shape[0], -1)
-        n, m = matrix.shape
-        r = min(n, m, rank)
-        q = torch.randn(m, r, device=tensor.device, dtype=torch.float)
-        q, _ = torch.linalg.qr(q, mode='reduced')
-        p = matrix @ q
-        p, _ = torch.linalg.qr(p, mode='reduced')
-        q = matrix.t() @ p
-        recon = (p @ q.t()).view_as(tensor)
-        error = torch.sum(torch.abs(recon - tensor)).item()
-        return error
-
-    def _handle_compression_error(self, tensor, should_sample, is_rank_0, total_entropy):
-        if self.args.find_rank_upper_limit and not self.initial_error:
-            if self.args.is_loading_checkpoint:
-                self.max_rank_error = float(read_error_from_csv(self.args.max_error_path))
-            else:
-                self.max_rank_error = self._eval_error(tensor, self.args.max_rank)
-                append_init_error_to_csv(self.args.max_error_path, self.max_rank_error)
-            self.initial_error = True
-        if self.args.curr_iteration % self.args.rank_adjust_window_size == 0 and self.args.curr_iteration != 0 and is_rank_0 and self.args.compute_end_warm_up is None:
-            self.min_rank_error = self._eval_error(tensor, int(self.args.max_rank / 4))
-            print(self.max_rank_error)
-            print(self.min_rank_error)
-            if self.min_rank_error <= self.max_rank_error:
-                self.args.compute_end_warm_up = self.args.curr_iteration
-                if torch.distributed.get_rank() == 0:
-                    print(f"self.args.compute_end_warm_up:{self.args.compute_end_warm_up}")
-        if should_sample:
-            total_entropy = self._record_entropy([tensor], total_entropy)
-        return total_entropy
-
-    def _record_entropy(self, tensors, total_entropy):
-
-        def calculate_entropy(grad, bins=1000, sample_ratio=0.25):
-            flat_grad = grad.flatten()
-            stride = max(1, int(1 / sample_ratio))
-            sampled_flat_grad = flat_grad[::stride]
-            mask = torch.isfinite(sampled_flat_grad)
-            if not mask.any():
-                return torch.tensor(0.0, device=grad.device)
-            valid_sampled_grad = sampled_flat_grad[mask]
-            min_val, max_val = torch.min(valid_sampled_grad), torch.max(valid_sampled_grad)
-            hist = torch.histc(valid_sampled_grad, bins=bins, min=min_val.item(), max=max_val.item())
-            hist = hist / hist.sum()
-            hist = hist[hist > 0]
-            return -torch.sum(hist * torch.log(hist))
-
-        for tensor in tensors:
-            entropy = calculate_entropy(tensor, sample_ratio=self.args.gradient_sample_ratio)
-            total_entropy += entropy.item()
-        return total_entropy
-
     def start_grad_sync(self):
         """
         Initiates grad sync (all-reduce or reduce-scatter) communication operations
@@ -417,21 +329,14 @@ class _ParamAndGradBucketGroup:
         else:
             communication_group = self.data_parallel_group
 
-        if self.args.enable_dynamic_grad_comp:
-            total_entropy = 0.0
-            iter_sample_interval = int(1 / self.args.iteration_sample_ratio)
-            should_sample = (self.args.curr_iteration % iter_sample_interval == 0)
-            is_rank_0 = (torch.distributed.get_rank() == 0)
-
-        # Coalesce communication kernels across buckets in the bucket group.
-        if self.compressor is not None:
-            # 压缩每个桶
+        if self.args.enable_dynamic_grad_comp and self.args.compressor is not None:
+            # Coalesce communication kernels across buckets in the bucket group.
             compressed_data_list = []
+            if self.args.overlap_grad_reduce and self.args.all_reduce_time:
+                self.timers('DP_time', log_level=0).start()
             with stream_context:
                 for bucket in self.buckets:
-                    total_entropy = self._handle_compression_error(bucket.grad_data, should_sample, is_rank_0,
-                                                                   total_entropy)
-                    for_P, for_Q, metadata = self.compressor.compress_bucket(bucket)
+                    for_P, for_Q, metadata = self.args.compressor.compress_bucket(bucket)
                     compressed_data_list.append((bucket, for_P, for_Q, metadata))
 
             with _coalescing_manager(communication_group, async_ops=async_op) as cm:
@@ -442,11 +347,14 @@ class _ParamAndGradBucketGroup:
 
             if not async_op:
                 for bucket, for_P, for_Q, metadata in compressed_data_list:
-                    self.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
+                    self.args.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
             else:
                 self._pending_compressed_data = compressed_data_list
 
         else:
+            if self.args.enable_dynamic_grad_comp:
+                if self.args.overlap_grad_reduce and self.args.all_reduce_time:
+                    self.timers('DP_time', log_level=0).start()
             with stream_context, _coalescing_manager(communication_group, async_ops=async_op) as cm:
                 for bucket in self.buckets:
                     if self.ddp_config.use_distributed_optimizer:
@@ -464,11 +372,9 @@ class _ParamAndGradBucketGroup:
                         torch.distributed.all_reduce(
                             bucket.grad_data, op=reduce_op, group=communication_group, async_op=async_op
                         )
-                    if self.args.enable_dynamic_grad_comp:
-                        self._handle_compression_error(bucket.grad_data, should_sample, is_rank_0, total_entropy)
         if self.args.enable_dynamic_grad_comp:
-            if should_sample:
-                Utils.entropy.append(total_entropy)
+            if self.args.overlap_grad_reduce and self.args.all_reduce_time:
+                self.timers('DP_time').stop()
         # With multiple DistOpt instances, we need to all-reduce across instances.
         if (
             self.ddp_config.use_distributed_optimizer
@@ -525,13 +431,17 @@ class _ParamAndGradBucketGroup:
             f'Communication call has not been issued for this bucket '
             f'({len(self.params_with_grad)}/{len(self.params)} params have grad available)'
         )
-        if (self.compressor is not None and
-                hasattr(self, '_pending_compressed_data') and
-                self._pending_compressed_data is not None):
-            self.grad_reduce_handle.wait()
-            self.grad_reduce_handle = None
-            for bucket, for_P, for_Q, metadata in self._pending_compressed_data:
-                self.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
+        if self.args.enable_dynamic_grad_comp:
+            if (self.args.compressor is not None and
+                    hasattr(self, '_pending_compressed_data') and
+                    self._pending_compressed_data is not None):
+                self.grad_reduce_handle.wait()
+                self.grad_reduce_handle = None
+                for bucket, for_P, for_Q, metadata in self._pending_compressed_data:
+                    self.args.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
+            else:
+                self.grad_reduce_handle.wait()
+                self.grad_reduce_handle = None
         else:
             self.grad_reduce_handle.wait()
             self.grad_reduce_handle = None

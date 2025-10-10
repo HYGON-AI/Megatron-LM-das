@@ -115,8 +115,10 @@ from megatron.core.optimizer import (
 )
 from megatron.training.checkpointing import load_checkpoint
 from megatron.training.theoretical_memory_usage import report_theoretical_memory
+from megatron.core.parallel_state import get_pipeline_model_parallel_group, get_pipeline_model_parallel_last_rank
 
 from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data_from_csv
+from ..core.distributed.power_sgd import EFLayoutManager
 
 
 stimer = StragglerDetector()
@@ -194,7 +196,7 @@ def pretrain(
         args.latest_iteration = 0
         log_dir = args.collect_log_path
         os.makedirs(log_dir, exist_ok=True)
-        args.entropy_path = os.path.join(log_dir, 'entropy.csv')
+        args.loss_path = os.path.join(log_dir, 'loss.csv')
         mapped_rank_filename = f"mapped_rank_{torch.distributed.get_rank()}.csv"
         args.mapped_rank_path = os.path.join(log_dir, mapped_rank_filename)
 
@@ -541,7 +543,7 @@ def setup_model_and_optimizer(
         if args.iteration != 0 and args.enable_dynamic_grad_comp:
             args.is_loading_checkpoint = True
             args.latest_iteration = args.iteration
-            Utils.entropy = read_data_from_csv(args.entropy_path, args.latest_iteration)
+            Utils.loss = read_data_from_csv(args.loss_path, args.latest_iteration)
             Utils.mapped_rank = read_data_from_csv(args.mapped_rank_path, args.latest_iteration)
 
         if is_rank0():
@@ -629,12 +631,14 @@ def train(
         args.all_reduce_time = False
         args.max_rank = None
         args.find_rank_upper_limit = False
+        args.final_rank = None
         args.mapped_rank = None
         args.begin_max_rank = True
         args.begin_warm_up = True
-        args.compute_end_warm_up = None
-        args.update_warm_up = False
         args.grad_comp_enabled = False
+        args.compressor = None
+        args.pre_rank = None
+        args.ef_manager = EFLayoutManager(ef_store_dtype=torch.bfloat16)
 
     def _initialize_log_paths(args):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -649,8 +653,6 @@ def train(
         }
         for attr, filename in paths.items():
             setattr(args, attr, os.path.join(log_dir, filename))
-        all_reduce_time_filename = f"all_reduce_time_{torch.distributed.get_rank()}.csv"
-        args.all_reduce_time_path = os.path.join(log_dir, all_reduce_time_filename)
 
 
     def _initialize_warmup_iterations(args):
@@ -662,6 +664,16 @@ def train(
         _initialize_warmup_iterations(args)
         if is_rank0():
             append_time_to_csv(args.checkpoint_date_path, args.iteration)
+
+    if args.use_distributed_optimizer:
+        collective_group = mpu.get_data_parallel_group()
+        intra_distributed_optimizer_instance_size = mpu.get_data_parallel_world_size()
+        intra_distributed_optimizer_instance_rank = torch.distributed.get_rank(group=collective_group)
+        args.ef_manager.build_ef_layout_with_distributed_optimizer(model, device=torch.device("cuda"),
+                                                                   intra_distributed_optimizer_instance_size=intra_distributed_optimizer_instance_size,
+                                                                   intra_distributed_optimizer_instance_rank=intra_distributed_optimizer_instance_rank)
+    else:
+        args.ef_manager.build_ef_layout(model, device=torch.device("cuda"))
 
     if args.run_workload_inspector_server:
         try:
@@ -1283,11 +1295,6 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     args = get_args()
     timers = get_timers()
 
-    def update_warm_up_iter(args):
-        if args.compute_end_warm_up is not None:
-            args.warm_up_train_iter = max(int(args.compute_end_warm_up), int(args.warm_up_train_iter))
-            args.update_warm_up = True
-
     def check_warm_up_done(args):
         return args.curr_iteration > args.warm_up_train_iter
 
@@ -1310,7 +1317,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 
     def update_mapped_rank(args, mapped_rank):
         if mpu.is_pipeline_first_stage():
-            mapped_rank = Utils.map_entropy_change_to_rank(
+            mapped_rank = Utils.map_loss_change_to_rank(
                 min_rank=(args.max_rank / 4),
                 max_rank=args.max_rank,
                 window_size=args.rank_adjust_window_size
@@ -1320,7 +1327,6 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
         else:
             first_stage_predict_time = torch.zeros(1, device="cuda", dtype=torch.float32)
         broadcast_predict_time(first_stage_predict_time)
-        print(first_stage_predict_time)
         if mpu.is_pipeline_first_stage():
             args.mapped_rank = mapped_rank
             Utils.mapped_rank[-1] = mapped_rank
@@ -1331,30 +1337,6 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             Utils.mapped_rank.append(args.final_rank)
 
     if args.enable_dynamic_grad_comp:
-        if not args.update_warm_up:
-            update_warm_up_iter(args)
-
-            def broadcast_warmup_params(args, src_rank=0):
-                compute_end_warm_up_val = -1 if args.compute_end_warm_up is None else int(args.compute_end_warm_up)
-                tensor_to_broadcast = torch.tensor(
-                    [int(args.update_warm_up),
-                     int(args.warm_up_train_iter),
-                     compute_end_warm_up_val],
-                    dtype=torch.int32,
-                    device="cuda"
-                )
-                torch.distributed.broadcast(
-                    tensor_to_broadcast,
-                    src=src_rank,
-                    group=torch.distributed.group.WORLD
-                )
-                args.update_warm_up = bool(tensor_to_broadcast[0].item())
-                args.warm_up_train_iter = int(tensor_to_broadcast[1].item())
-                recv_compute_end_warm_up = int(tensor_to_broadcast[2].item())
-                args.compute_end_warm_up = None if recv_compute_end_warm_up == -1 else recv_compute_end_warm_up
-
-            broadcast_warmup_params(args)
-
         if check_warm_up_done(args) and should_broadcast_current_iteration(args):
             update_mapped_rank(args, mapped_rank=None)
 
@@ -1407,8 +1389,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     if args.empty_unused_memory_level >= 1:
         torch.cuda.empty_cache()
 
-    if args.curr_iteration % args.save_interval == 100 and args.enable_dynamic_grad_comp:
-        total_time = config.timers('backward-compute', log_level=2).elapsed(reset=False) * 1000.0
+    if args.curr_iteration % args.save_interval == 10 and args.enable_dynamic_grad_comp:
+        total_time = config.timers('edgc-backward-compute', log_level=0).elapsed(reset=True) * 1000.0
         args.per_microbatch_time = total_time / get_num_microbatches()
 
     # Vision gradients.
@@ -1494,8 +1476,15 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 
         if args.enable_dynamic_grad_comp:
             loss = list(loss_reduced.values())[0]
-            if is_last_rank():
-                append_data_to_csv(args.loss_path, args.curr_iteration, loss)
+            iter_sample_interval = int(1 / args.iteration_sample_ratio)
+            if args.curr_iteration % iter_sample_interval == 0:
+                loss_tensor = torch.tensor(loss, device=torch.cuda.current_device(), dtype=torch.float32)
+                group = get_pipeline_model_parallel_group()
+                torch.distributed.broadcast(tensor=loss_tensor, src=torch.distributed.get_rank(), group=group)
+                broadcasted_loss = loss_tensor.item()
+                Utils.loss.append(broadcasted_loss)
+                if is_last_rank():
+                    append_data_to_csv(args.loss_path, args.curr_iteration, loss)
 
         results = (
             loss_reduced,
@@ -1510,10 +1499,19 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             results = results + (args.params_all_reduce_time,)
         return results
 
-    if args.enable_dynamic_grad_comp and args.all_reduce_time:
-        return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, args.params_all_reduce_time
-    else:
-        return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
+    if args.enable_dynamic_grad_comp:
+        iter_sample_interval = int(1 / args.iteration_sample_ratio)
+        if args.curr_iteration % iter_sample_interval == 0:
+            group = get_pipeline_model_parallel_group()
+            src_rank = get_pipeline_model_parallel_last_rank()
+            loss_tensor = torch.tensor(0.0, device=torch.cuda.current_device(), dtype=torch.float32)
+            torch.distributed.broadcast(tensor=loss_tensor, src=src_rank, group=group)
+            broadcasted_loss = loss_tensor.item()
+            Utils.loss.append(broadcasted_loss)
+        if args.enable_dynamic_grad_comp and args.all_reduce_time:
+            return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, args.params_all_reduce_time
+        else:
+            return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
 
 def training_log(
@@ -1702,11 +1700,6 @@ def training_log(
         elapsed_time = timers('interval-time').elapsed(barrier=True)
         elapsed_time_per_iteration = elapsed_time / total_iterations
 
-        if args.enable_dynamic_grad_comp:
-            all_reduce_time = timers('grad-sync-time').elapsed(reset=False)
-            all_reduce_time_per_iteration = (all_reduce_time / total_iterations) * 1000.0
-            append_data_to_csv(args.all_reduce_time_path, iteration, all_reduce_time_per_iteration)
-
         throughput = num_floating_point_operations(args, batch_size) / (
             elapsed_time_per_iteration * 10**12 * args.world_size
         )
@@ -1808,8 +1801,8 @@ def save_checkpoint_and_time_wrapper(fn):
             if torch.distributed.get_rank() == 0:
                 append_time_to_csv(args.checkpoint_date_path, iteration)
                 n = args.save_interval // (int(1 / args.iteration_sample_ratio))
-                recent_entropies = Utils.entropy[-n:]
-                append_data_to_csv(args.entropy_path, iteration, recent_entropies)
+                recent_loss = Utils.loss[-n:]
+                append_data_to_csv(args.loss_path, iteration, recent_loss)
             append_data_to_csv(args.mapped_rank_path, iteration, Utils.mapped_rank)
 
         fn(iteration, model, optimizer, opt_param_scheduler,

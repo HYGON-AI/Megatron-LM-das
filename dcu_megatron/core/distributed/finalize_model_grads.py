@@ -32,12 +32,9 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
     # All-reduce / reduce-scatter across DP replicas.
     if config.timers is not None:
         config.timers('all-grads-sync', log_level=1).start(barrier=config.barrier_with_L1_time)
-        if args.enable_dynamic_grad_comp:
-            config.timers('grad-sync-time', log_level=0).start()
 
         def _handle_all_reduce_time_start(args, config):
             if args.all_reduce_time:
-                torch.distributed.barrier()
                 config.timers('DP_time', log_level=0).start()
 
         def _handle_all_reduce_time_end(args, config):
@@ -53,10 +50,8 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
                     if args.curr_iteration >= 12:
                         args.grad_comp_enabled = True
             else:
-                if args.curr_iteration % args.rank_adjust_window_size == 1:
-                    print(args.compute_end_warm_up)
-                if args.compute_end_warm_up is not None and args.curr_iteration >= args.warm_up_train_iter:
-                    if args.begin_max_rank and args.update_warm_up:
+                if args.curr_iteration > args.warm_up_train_iter:
+                    if args.begin_max_rank:
                         args.grad_comp_enabled = not (args.is_loading_checkpoint and (
                                     len(Utils.mapped_rank) == 0 or Utils.mapped_rank[-1] is None))
                     elif (args.curr_iteration % args.rank_adjust_window_size == 1) and (
@@ -81,18 +76,61 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
             else:
                 args.mapped_rank = args.final_rank
 
-        if args.enable_dynamic_grad_comp:
+        def _get_find_rank(args):
+            """Helper to determine rank when finding rank upper limit."""
+            if args.mapped_rank is not None:
+                return int(args.mapped_rank)
+            if args.is_loading_checkpoint:
+                return int(Utils.mapped_rank[-1] if Utils.mapped_rank else args.max_rank)
+            return int(args.max_rank)
+
+        def _get_adaptive_rank(args):
+            """Helper to determine rank during adaptive compression."""
+            if args.is_loading_checkpoint:
+                delta_iter = args.curr_iteration - args.latest_iteration
+            else:
+                delta_iter = args.curr_iteration
+            return 2 ** int((delta_iter - 9) / 3)
+
+        def compressor_update(args):
+            if not args.enable_dynamic_grad_comp or not args.grad_comp:
+                args.compressor = None
+                return
+            if args.fp16:
+                compression_dtype = torch.float16
+            elif args.bf16:
+                compression_dtype = torch.bfloat16
+            else:
+                compression_dtype = torch.float32
+
+            rank = _get_find_rank(args) if args.find_rank_upper_limit else _get_adaptive_rank(args)
+            if args.pre_rank is not None:
+                if args.pre_rank == rank:
+                    args.compressor.begin_iteration(args.curr_iteration)
+                    return
+            args.pre_rank = rank
+            from .power_sgd import PowerSGDCompressor
+            args.compressor = PowerSGDCompressor(
+                ef_layout_manager=args.ef_manager,
+                rank=rank,
+                compression_dtype=compression_dtype
+            )
+            args.compressor.begin_iteration(args.curr_iteration)
+
+        if args.enable_dynamic_grad_comp and not args.overlap_grad_reduce:
             _handle_all_reduce_time_start(args, config)
 
         for model_chunk in model:
             if args.enable_dynamic_grad_comp:
                 _update_gradient_compression_state(args)
+                compressor_update(args)
             model_chunk.finish_grad_sync()
-
         if args.enable_dynamic_grad_comp:
-            if args.begin_max_rank and args.update_warm_up:
+            if args.begin_max_rank:
                 args.begin_max_rank = False
-            _handle_all_reduce_time_end(args, config)
+            if not args.overlap_grad_reduce:
+                _handle_all_reduce_time_end(args, config)
+
 
     if args.enable_dynamic_grad_comp:
         if args.all_reduce_time:
@@ -100,8 +138,6 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
 
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
-        if args.enable_dynamic_grad_comp:
-            config.timers('grad-sync-time').stop()
 
     # All-reduce t_embedder grads (for pp & vpp of DiT).
     if config.timers is not None:
