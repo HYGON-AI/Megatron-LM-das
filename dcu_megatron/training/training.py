@@ -665,15 +665,15 @@ def train(
         if is_rank0():
             append_time_to_csv(args.checkpoint_date_path, args.iteration)
 
-    if args.use_distributed_optimizer:
-        collective_group = mpu.get_data_parallel_group()
-        intra_distributed_optimizer_instance_size = mpu.get_data_parallel_world_size()
-        intra_distributed_optimizer_instance_rank = torch.distributed.get_rank(group=collective_group)
-        args.ef_manager.build_ef_layout_with_distributed_optimizer(model, device=torch.device("cuda"),
-                                                                   intra_distributed_optimizer_instance_size=intra_distributed_optimizer_instance_size,
-                                                                   intra_distributed_optimizer_instance_rank=intra_distributed_optimizer_instance_rank)
-    else:
-        args.ef_manager.build_ef_layout(model, device=torch.device("cuda"))
+        if args.use_distributed_optimizer:
+            collective_group = mpu.get_data_parallel_group()
+            intra_distributed_optimizer_instance_size = mpu.get_data_parallel_world_size()
+            intra_distributed_optimizer_instance_rank = torch.distributed.get_rank(group=collective_group)
+            args.ef_manager.build_ef_layout_with_distributed_optimizer(model, device=torch.device("cuda"),
+                                                                       intra_distributed_optimizer_instance_size=intra_distributed_optimizer_instance_size,
+                                                                       intra_distributed_optimizer_instance_rank=intra_distributed_optimizer_instance_rank)
+        else:
+            args.ef_manager.build_ef_layout(model, device=torch.device("cuda"))
 
     if args.run_workload_inspector_server:
         try:
@@ -1508,11 +1508,12 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             torch.distributed.broadcast(tensor=loss_tensor, src=src_rank, group=group)
             broadcasted_loss = loss_tensor.item()
             Utils.loss.append(broadcasted_loss)
-        if args.enable_dynamic_grad_comp and args.all_reduce_time:
+        if args.all_reduce_time:
             return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, args.params_all_reduce_time
         else:
             return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
-
+    else:
+        return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
 def training_log(
     loss_dict,
