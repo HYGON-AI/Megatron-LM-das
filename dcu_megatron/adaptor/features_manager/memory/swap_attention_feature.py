@@ -19,6 +19,8 @@ class SwapAttentionFeature(AbstractFeature):
                            help='Swap modules for model. Can be used together with "--swap-attention."')
         group.add_argument('--specify-layers', type=str, default=None,
                            help='Specify the swap layer. Can be used together with "--swap-attention."eg"0, 2, 4, 6"')
+        group.add_argument('--reduce-recompute-for-last-chunk', action='store_true', default=False,
+                           help='with recompute, now default False')
 
 
     def validate_args(self, args):
