@@ -834,7 +834,7 @@ def train(
             ),
             on_trace_ready=trace_handler,
             record_shapes=True,
-            with_stack=True,
+            with_stack=False,
         )
         prof.start()
     elif args.profile and torch.distributed.get_rank() in args.profile_ranks and args.use_hip_profiler:
