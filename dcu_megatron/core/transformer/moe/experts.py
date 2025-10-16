@@ -136,7 +136,7 @@ def te_grouped_mlp_init_wrapper(te_grouped_mlp_init_func):
         # This is to avoid the CPU overhead of multiple d2h copies
         if self.offload_expert_fc1:
             from dcu_megatron.core.extensions.transformer_engine import set_save_original_input
-            set_save_original_input(self.linear_fc1)
+            # set_save_original_input(self.linear_fc1)
 
     return wrapper
 

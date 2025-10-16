@@ -79,4 +79,7 @@ class CPUOffloadFeature(AbstractFeature):
         patch_manager.register_patch('transformer_engine.pytorch.module.grouped_linear.GroupedLinear.__init__',
                                      te_module_init_wrapper,
                                      apply_wrapper=True)
+        patch_manager.register_patch('transformer_engine.pytorch.module.batched_linear.BatchedLinear.__init__',
+                                     te_module_init_wrapper,
+                                     apply_wrapper=True)
         

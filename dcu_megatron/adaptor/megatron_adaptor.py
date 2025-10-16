@@ -261,7 +261,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         TEDotProductAttentionPatch.__init__)
 
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
-            TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear if is_te_min_version("2.3.0.dev0") else te.pytorch.BatchLinear,)
+            TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
 
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.mappings import all_to_all
