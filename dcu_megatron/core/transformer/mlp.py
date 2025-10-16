@@ -17,7 +17,7 @@ try:
 except ImportError:
     HAVE_TE = False
 
-from dcu_megatron.core.pipeline_parallel.cpu_offload import (
+from dcu_megatron.core.transformer.cpu_offload import (
     PipelineOffloadManager,
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
@@ -46,12 +46,12 @@ def mlp_init_wrapper(mlp_init_func):
         )
 
         self.offload_shared_fc1 = (
-            config.offload_activation
+            config.fine_grained_activation_offloading
             and "shared_fc1" in config.offload_modules
         )
 
         self.offload_shared_fc2 = (
-            config.offload_activation
+            config.fine_grained_activation_offloading
             and "shared_fc2" in config.offload_modules
         )
 

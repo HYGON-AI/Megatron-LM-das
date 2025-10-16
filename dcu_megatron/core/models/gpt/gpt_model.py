@@ -6,13 +6,12 @@ from functools import wraps
 
 from torch import Tensor
 
+from megatron.core import parallel_state
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 
-from .utils import offloading_checker
-from dcu_megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
-from dcu_megatron.core.pipeline_parallel.cpu_offload import set_layer_index
+from dcu_megatron.core.transformer.cpu_offload import PipelineOffloadManager
 
 
 def gpt_model_init_wrapper(fn):
@@ -151,14 +150,8 @@ def gpt_model_postprocess(
 def gpt_model_forward_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
-        PipelineOffloadManager.get_instance().reset_chunk_handler(
-            self.decoder.num_layers_per_pipeline_rank,
-            self.vp_stage,
-            self.config.offload_activation,
-            0,
-        )
-        PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(offloading_checker)
-        set_layer_index(0)
+        if self.config.fine_grained_activation_offloading:
+            self.initialize_model_chunk_offload_handler()
 
         return fn(self, *args, **kwargs)
 
@@ -169,6 +162,23 @@ class GPTModel:
     """
     patch megatron GPTModel
     """
+
+    def initialize_model_chunk_offload_handler(self):
+        num_layers = self.decoder.num_layers_per_pipeline_rank
+        if self.mtp_process:
+            num_layers = num_layers + self.config.mtp_num_layers
+        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+        pp_size = parallel_state.get_pipeline_model_parallel_world_size()
+        # last_stage_is_loss = (pp_rank == pp_size - 1) and self.config.last_vp_stage_is_loss
+        # TODO: will be an issue when dense layer is placed  across different pipeline stages
+        PipelineOffloadManager.get_instance().reset_chunk_handler(
+            num_layers,
+            self.vp_stage,
+            self.config.fine_grained_activation_offloading,
+            self.decoder.num_dense_layer,
+            False,
+        )
+
     def build_schedule_plan(
         self,
         input_ids: Tensor,
@@ -211,6 +221,9 @@ class GPTModel:
         Returns:
             ModelChunkSchedulePlan: The model chunk schedule plan.
         """
+        if self.config.fine_grained_activation_offloading:
+            self.initialize_model_chunk_offload_handler()
+
         from ..common.model_chunks_schedule_plan import TransformerModelChunkSchedulePlan
 
         return TransformerModelChunkSchedulePlan(

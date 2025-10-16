@@ -1,23 +1,25 @@
-import os
-import torch
 import dataclasses
-import transformer_engine as te
-
+import os
 from typing import Any, Optional
+from functools import wraps
+
+import torch
 from packaging.version import Version as PkgVersion
 
+from megatron.training import get_args
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.tensor_parallel import get_cuda_rng_tracker
-from megatron.core.utils import get_te_version, is_te_min_version
-from megatron.core.extensions.transformer_engine import TEDotProductAttention
-from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.process_groups_config import ModelCommProcessGroups
-
 from megatron.core.parallel_state import (
     get_context_parallel_group,
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
+)
+from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
+from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.utils import (
+    get_te_version,
+    is_te_min_version,
 )
 
 try:
@@ -29,6 +31,18 @@ except ImportError:
 
     te = MagicMock()
     HAVE_TE = False
+
+from megatron.core.extensions.transformer_engine import TEDotProductAttention
+
+
+def te_module_init_wrapper(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        megatron_args = get_args()
+        kwargs["fine_grained_activation_offloading"] = megatron_args.fine_grained_activation_offloading
+        fn(self, *args, **kwargs)
+
+    return wrapper
 
 
 class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
@@ -190,4 +204,24 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             tp_group=model_comm_pgs.tp,
             layer_number=layer_number,
             **extra_kwargs,
+        )
+
+
+def set_save_original_input(module):
+    """
+    Set the module to save the original input tensors.
+
+    Some transformer-engine modules would save the quantized tensors by default in fp8 training.
+    This method is used to set these modules to save the original input tensors directly.
+
+    This can save the memory usage in some FP8 training scenarios, such as the attn linear_proj and
+    the shared experts.
+    The output-discarding recompute method also relies on this.
+    """
+    if hasattr(module, 'save_original_input'):
+        module.save_original_input = True
+    else:
+        raise ValueError(
+            "set_save_original_input is only needed on transformer-engine modules that save "
+            "quantized tensors by default. It needs transformer-engine>=2.6.0dev0."
         )

@@ -1,3 +1,4 @@
+import contextlib
 from typing import Any, Optional
 from functools import wraps
 
@@ -16,8 +17,7 @@ from megatron.core.utils import (
     nvtx_range_push,
 )
 
-from dcu_megatron.core.pipeline_parallel.cpu_offload import get_layer_index, set_layer_index
-from dcu_megatron.core.pipeline_parallel.cpu_offload import (
+from dcu_megatron.core.transformer.cpu_offload import (
     PipelineOffloadManager,
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
@@ -161,33 +161,23 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
             vp_stage=vp_stage,
         )
 
-        self.offload_self_attn = (
-            config.offload_activation
-            and "self_attn" in config.offload_modules
+        self.offload_attn_norm = (
+            self.config.fine_grained_activation_offloading
+            and "attn_norm" in self.config.offload_modules
+            and not isinstance(self.input_layernorm, IdentityOp)
         )
-
-        if self.offload_self_attn and isinstance(self.input_layernorm, IdentityOp):
-            raise Exception(f"self_attn module cannot be offloaded while input_layernorm is IdentityOp")
-
+        self.offload_mlp_norm = (
+            self.config.fine_grained_activation_offloading
+            and "mlp_norm" in self.config.offload_modules
+            and not isinstance(self.pre_mlp_layernorm, IdentityOp)
+        )
         self.offload_qkv_linear = (
-            config.offload_activation
-            and "qkv_linear" in config.offload_modules
+            self.config.fine_grained_activation_offloading
+            and "qkv_linear" in self.config.offload_modules
         )
 
         # delay release input_layernorm_output
         self.delay_release_qkv_linear_tensor = self.offload_qkv_linear and isinstance(self.input_layernorm, IdentityOp)
-
-    return wrapper
-
-
-def transformer_layer_forward_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        layer_index = get_layer_index()
-        output, context = fn(self, *args, **kwargs)
-        set_layer_index(layer_index + 1)
-
-        return output, context
 
     return wrapper
 
@@ -239,27 +229,29 @@ class TransformerLayer():
         # Residual connection.
         residual = hidden_states
 
+        offload_context = contextlib.nullcontext()
+        if self.offload_attn_norm:
+            hidden_states = group_prefetch_offload_start(hidden_states, name="attn_norm")
+            offload_context = PipelineOffloadManager.get_instance()
+
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
             self.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
                 self.input_layernorm, hidden_states
             )
-        elif self.offload_self_attn:
-            if not hidden_states.is_contiguous():
-                hidden_states = hidden_states.contiguous()
-            hidden_states = group_prefetch_offload_start(hidden_states)
-            hidden_states.offloading_activation = True
-            with PipelineOffloadManager.get_instance():
-                input_layernorm_output = self.input_layernorm(hidden_states)
-            input_layernorm_output = group_prefetch_offload_commit(
-                input_layernorm_output,
-                release_tensors=[hidden_states],
-                delay_release_module="self_attn"
-            )
-            input_layernorm_output = input_layernorm_output[0]
         else:
-            input_layernorm_output = self.input_layernorm(hidden_states)
+            with offload_context:
+                input_layernorm_output = self.input_layernorm(hidden_states)
+
+        if self.offload_attn_norm:
+            hidden_states, = group_prefetch_offload_commit(
+                input_layernorm_output,
+                name="attn_norm",
+                release_tensors=[hidden_states],
+                delay_release_module="attn_norm",
+            )
+            offload_context = contextlib.nullcontext()
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
@@ -293,9 +285,9 @@ class TransformerLayer():
             )
         nvtx_range_pop(suffix="self_attn_bda")
 
-        if self.offload_self_attn:
+        if self.offload_attn_norm:
             cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-            release_func = cur_forward_chunk.module_release_func_map.pop("self_attn", None)
+            release_func = cur_forward_chunk.module_release_func_map.pop("attn_norm", None)
             if release_func is not None:
                 release_func()
                 del release_func
@@ -332,6 +324,122 @@ class TransformerLayer():
             )
 
         return hidden_states, context
+
+    def _forward_mlp(self, hidden_states, inference_context=None):
+        """
+        Perform a forward pass through the feed-forward layer.
+
+        Args:
+            hidden_states (Tensor): Transformed hidden states before the MLP layernorm.
+
+        Returns:
+            output (Tensor): Transformed hidden states of shape [s, b, h].
+        """
+
+        # Residual connection.
+        residual = hidden_states
+
+        offload_context = contextlib.nullcontext()
+        if self.offload_mlp_norm:
+            hidden_states = group_prefetch_offload_start(hidden_states, name="mlp_norm")
+            offload_context = PipelineOffloadManager.get_instance()
+
+        # Optional Layer norm post the cross-attention.
+        if self.recompute_pre_mlp_layernorm:
+            self.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
+                self.pre_mlp_layernorm, hidden_states
+            )
+        else:
+            with offload_context:
+                pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+
+        if self.offload_mlp_norm:
+            hidden_states, = group_prefetch_offload_commit(
+                input_layernorm_output,
+                name="mlp_norm",
+                release_tensors=[hidden_states],
+                delay_release_module="mlp_norm",
+            )
+            offload_context = contextlib.nullcontext()
+
+        nvtx_range_push(suffix="mlp")
+        # Potentially chunk the MLP computation during prefill to minimize the peak activation size
+        should_chunk_mlp_for_prefill = (
+            self.config.mlp_chunks_for_prefill > 1
+            and inference_context is not None
+            and not inference_context.is_decode_only()
+            and not isinstance(self.mlp, IdentityOp)
+        )
+
+        if self.recompute_mlp:
+            if self.config.fp8:
+                # import here to avoid circular import
+                from megatron.core.extensions.transformer_engine import te_checkpoint
+
+                mlp_output_with_bias = te_checkpoint(
+                    self.mlp,
+                    False,
+                    tensor_parallel.random.get_cuda_rng_tracker,
+                    parallel_state.get_tensor_model_parallel_group(),
+                    pre_mlp_layernorm_output,
+                )
+            else:
+                mlp_output_with_bias = tensor_parallel.checkpoint(
+                    self.mlp, False, pre_mlp_layernorm_output
+                )
+        elif should_chunk_mlp_for_prefill:
+            # Chunk input along sequence dimension
+            num_chunks = min(self.config.mlp_chunks_for_prefill, pre_mlp_layernorm_output.shape[0])
+            chunks = pre_mlp_layernorm_output.chunk(num_chunks, dim=0)
+
+            # Compute outputs for each chunk
+            outputs = [self.mlp(chunk) for chunk in chunks]
+
+            # Aggregate chunk outputs
+            mlp_output = torch.cat([out for out, _ in outputs], dim=0)
+            bias_chunks = [bias for _, bias in outputs if bias is not None]
+            bias_output = torch.stack(bias_chunks, dim=0).sum(dim=0) if bias_chunks else None
+            mlp_output_with_bias = (mlp_output, bias_output)
+
+        else:
+            mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
+
+        if self.recompute_pre_mlp_layernorm:
+            # discard the output of the pre-mlp layernorm and register the recompute
+            # as a gradient hook of mlp_output_with_bias[0]
+            self.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(
+                mlp_output_with_bias[0]
+            )
+        nvtx_range_pop(suffix="mlp")
+
+        # TODO: could we move `bias_dropout_add_exec_handler` itself
+        # inside the module provided in the `bias_dropout_add_spec` module?
+        nvtx_range_push(suffix="mlp_bda")
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                mlp_output_with_bias, residual, self.hidden_dropout
+            )
+        nvtx_range_pop(suffix="mlp_bda")
+
+        if self.offload_mlp_norm:
+            cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
+            release_func = cur_forward_chunk.module_release_func_map.pop("mlp_norm", None)
+            if release_func is not None:
+                release_func()
+                del release_func
+
+        # Jit compiled function creates 'view' tensor. This tensor
+        # potentially gets saved in the MPU checkpoint function context,
+        # which rejects view tensors. While making a viewless tensor here
+        # won't result in memory savings (like the data loader, or
+        # p2p_communication), it serves to document the origin of this
+        # 'view' tensor.
+        output = make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
+
+        return output
 
     def backward_dw(self):
         self.self_attention.backward_dw()

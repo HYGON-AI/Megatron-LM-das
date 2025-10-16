@@ -1,13 +1,9 @@
 import contextlib
-from functools import wraps
 from typing import Iterator, List, Union, Optional, Callable
-
-from megatron.training import print_rank_0
 
 import torch
 
 from megatron.core import parallel_state
-from megatron.core.enums import ModelType
 from megatron.training import get_args
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.utils import (
@@ -1064,7 +1060,7 @@ def forward_backward_pipelining_with_cutinhalf(
                         post_backward=pp_post_backward,
                     )
             else:
-                output_tensor, input_tensor_grad, _ = forward_backward_helper_wrapper(
+                output_tensor, input_tensor_grad, chunk_backward_dw_func = forward_backward_helper_wrapper(
                     fwd_model_chunk_id=fwd_model_chunk_id,
                     bwd_model_chunk_id=None if forward_only else bwd_model_chunk_id,
                     pre_forward=pp_pre_forward,
@@ -1072,7 +1068,12 @@ def forward_backward_pipelining_with_cutinhalf(
                     post_forward=pp_post_forward,
                     post_backward=pp_post_backward,
                     checkpoint_activations_microbatch=checkpoint_activations_microbatch,
+                    block_level_wgrad_compute=(bwd_model_chunk_id == 1 and parallel_state.is_pipeline_first_stage()),
                 )
+
+                if chunk_backward_dw_func is not None:
+                    chunk_backward_dw_func()
+                    del chunk_backward_dw_func
 
         # only run backward
         else:
@@ -1081,6 +1082,12 @@ def forward_backward_pipelining_with_cutinhalf(
                 wait_comm_handle(fwd_wait_send_handles[bwd_model_chunk_id])
                 if not forward_only:
                     deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+
+            if bwd_model_chunk_id == slave_chunk_id and cur_fwd_chunk_microbatch[slave_chunk_id] < num_chunk_max_microbatch[slave_chunk_id]:
+                fwd_recv_buffer[0], fwd_wait_handles = recv_forward(tensor_shape, config, slave_chunk_id, async_op=True)
+                fwd_wait_recv_handles[slave_chunk_id] = get_recv_handle(fwd_wait_handles, slave_chunk_id, forward=True)
+                input_tensors[slave_chunk_id].append(fwd_recv_buffer[0])
+                fwd_recv_buffer[0] = None
 
             if not forward_only:
                 if step_id == 0 and parallel_state.is_pipeline_last_stage():
@@ -1093,13 +1100,8 @@ def forward_backward_pipelining_with_cutinhalf(
                     bwd_model_chunk_id=bwd_model_chunk_id,
                     pre_backward=pp_pre_backward,
                     post_backward=pp_post_backward,
+                    block_level_wgrad_compute=False,
                 )
-
-            if bwd_model_chunk_id == slave_chunk_id and cur_fwd_chunk_microbatch[slave_chunk_id] < num_chunk_max_microbatch[slave_chunk_id]:
-                fwd_recv_buffer[0], fwd_wait_handles = recv_forward(tensor_shape, config, slave_chunk_id, async_op=True)
-                fwd_wait_recv_handles[slave_chunk_id] = get_recv_handle(fwd_wait_handles, slave_chunk_id, forward=True)
-                input_tensors[slave_chunk_id].append(fwd_recv_buffer[0])
-                fwd_recv_buffer[0] = None
 
         # swap fwd & bwd chunks
         fwd_model_chunk_id, bwd_model_chunk_id = bwd_model_chunk_id, fwd_model_chunk_id

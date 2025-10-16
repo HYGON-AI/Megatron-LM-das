@@ -61,7 +61,7 @@ class Patch:
             elif hasattr(func, '__closure__') and func.__closure__ is not None:
                 func = func.__closure__[0].cell_contents
             else:
-                return func
+                break
 
         return func
 
@@ -80,7 +80,11 @@ class Patch:
         ):
             self.wrappers.append(new_func_or_cls)
         else:
-            if self.patch_func_or_cls and not force_patch:
+            if (
+                self.patch_func_or_cls
+                and not force_patch
+                and id(new_func_or_cls) != id(self.patch_func_or_cls)
+            ):
                 raise RuntimeError('the patch of {} exist !'.format(self.orig_func_or_cls_name))
             self.patch_func_or_cls = new_func_or_cls
         self.is_applied = False

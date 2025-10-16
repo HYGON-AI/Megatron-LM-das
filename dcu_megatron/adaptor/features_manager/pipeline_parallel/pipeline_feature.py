@@ -117,7 +117,7 @@ class PipelineFeature(AbstractFeature):
             ), 'recompute_num_layers must be None when enabling overlap_moe_expert_parallel_comm'
 
         if args.schedule_method == "dualpipev":
-            if args.num_layers_per_virtual_pipeline_stage is not None:
+            if args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
                 raise AssertionError("The dualpipev and virtual_pipeline are incompatible.")
 
             layers_to_distribute = args.num_layers

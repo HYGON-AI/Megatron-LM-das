@@ -1,5 +1,3 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
-
 import contextlib
 from contextlib import nullcontext
 from typing import Optional
@@ -17,9 +15,7 @@ from dcu_megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
-from dcu_megatron.core.models.gpt.utils import offloading_checker
-from dcu_megatron.core.pipeline_parallel.cpu_offload import PipelineOffloadManager
-from dcu_megatron.core.pipeline_parallel.cpu_offload import set_layer_index
+from dcu_megatron.core.transformer.cpu_offload import PipelineOffloadManager
 
 
 class ModelChunkState:
@@ -537,15 +533,6 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._pre_process = None
         self._post_process = None
 
-        PipelineOffloadManager.get_instance().reset_chunk_handler(
-            model.decoder.num_layers_per_pipeline_rank,
-            model.vp_stage,
-            model.config.offload_activation,
-            0,
-        )
-        PipelineOffloadManager.get_instance().cur_forward_chunk().set_offloading_checker(offloading_checker)
-        set_layer_index(0)
-
         comp_stream = get_comp_stream()
         comm_stream = get_comm_stream()
 
@@ -702,6 +689,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
 
         # combined forward and backward pass for overlapped layers
         for i in range(overlapped_layers):
+            if args.fine_grained_activation_offloading:
+                PipelineOffloadManager.get_instance().set_last_layer(i == f_num_layers - 1)
             f_layer = f_schedule_plan.get_layer(i)
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
             torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
@@ -734,6 +723,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # forward pass for the remaining layers
         with f_context:
             for i in range(overlapped_layers, f_num_layers):
+                if args.fine_grained_activation_offloading:
+                    PipelineOffloadManager.get_instance().set_last_layer(i == f_num_layers - 1)
                 f_layer = f_schedule_plan.get_layer(i)
                 torch.cuda.nvtx.range_push(f"layer_{i}f")
                 f_input, _, _ = layer_schedule_plan_cls.run(f_layer, None, f_input=f_input)

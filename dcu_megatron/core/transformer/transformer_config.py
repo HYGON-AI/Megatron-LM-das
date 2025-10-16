@@ -47,7 +47,7 @@ def transformer_config_post_init_wrapper(post_init_func):
                 )
 
         # offload activations
-        if self.offload_activation:
+        if self.fine_grained_activation_offloading:
             assert (
                 not self.cpu_offloading
             ), "offload_activation can not be used with cpu_offloading"
@@ -57,7 +57,7 @@ def transformer_config_post_init_wrapper(post_init_func):
 
         if len(self.offload_modules) > 0:
             allowed_modules = {
-                "self_attn", "qkv_linear", "core_attn", "attn_linear", "router_fc1", "router_fc2",
+                "attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "expert_fc2",
                 "shared_fc1", "shared_fc2", "moe_act"
             }
             invalid_modules = set(self.offload_modules) - allowed_modules
@@ -66,20 +66,11 @@ def transformer_config_post_init_wrapper(post_init_func):
                 f'Allowed modules are: {allowed_modules}'
             )
 
-        if "self_attn" in self.offload_modules:
-            if "qkv_linear" in self.offload_modules:
-                self.offload_modules.remove("qkv_linear")
-            if "core_attn" in self.offload_modules:
-                self.offload_modules.remove("core_attn")
-            if "attn_linear" in self.offload_modules:
-                self.offload_modules.remove("attn_linear")
-
-        if "core_attn" in self.offload_modules:
-            warnings.warn(
-                "If you are using transformer_engine as the transformer implementation, "
-                "the core_attn is from transformer_engine and may be the fused version. "
-                "For fused attention, you have no need to set 'core_attn' to offload. "
-                "Please check that the core_attn offload is really needed."
-            )
+            if "attn_proj" in self.offload_modules and "core_attn" not in self.offload_modules:
+                raise ValueError(
+                    "attn_proj cannot be set to offload_modules alone without core_attn "
+                    "because the input of attn_proj is the output of core_attn, "
+                    "which is needed in core_attn.backward()."
+                )
 
     return wrapper

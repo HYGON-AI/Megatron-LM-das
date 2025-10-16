@@ -25,6 +25,21 @@ def get_layer_index():
     return _LAYER_INDEX
 
 # cpu offload for pipeline
+MIN_OFFLOADED_TENSOR_SIZE = 1024 * 1024
+
+def set_ideal_affinity_for_current_gpu():
+    import cuda.cuda
+    import cuda.cudart
+    import pynvml
+    import uuid
+    err, device_id = cuda.cudart.cudaGetDevice()
+    assert err == cuda.cudart.cudaError_t.cudaSuccess
+    err, device_uuid = cuda.cuda.cuDeviceGetUuid(device_id)
+    assert err == cuda.cuda.CUresult.CUDA_SUCCESS
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByUUID("GPU-" + str(uuid.UUID(bytes=device_uuid.bytes)))
+    pynvml.nvmlDeviceSetCpuAffinity(handle)
+
 
 class PipelineOffloadManager:
     OFFLOAD_MGR = None
@@ -58,6 +73,7 @@ class PipelineOffloadManager:
         return self._h2d_stream
 
     def reset(self):
+        # set_ideal_affinity_for_current_gpu()
         self._inside_context = False
         self._cur_forward_chunk = None
         self._cur_backward_chunk = None
@@ -80,31 +96,49 @@ class PipelineOffloadManager:
 
     def pop(self):
         assert self.size()
-        self._cur_backward_chunk = self._queue.popleft()
+        while self._queue:
+            self._cur_backward_chunk = self._queue.popleft()
+            if not isinstance(self._cur_backward_chunk, NullChunkOffloadHandler):
+                break
 
     def front(self):
         if not len(self._queue):
             return None
-        f = self._queue.popleft()
-        self._queue.appendleft(f)
-        return f
+        for chunk_handler in self._queue:
+            if not isinstance(chunk_handler, NullChunkOffloadHandler):
+                return chunk_handler
+        return None
 
     def size(self):
         return len(self._queue)
 
-    def reset_chunk_handler(self, num_layer, vp_stage, offload=True, first_layer_index=0):
-        """
-        reset state for a new micro batch, or another vpp chunk of the same micro batch
-        """
+    def reset_chunk_handler(self, num_layer, vp_stage, offload=True, num_dense_layer=0, last_stage_is_loss=False):
         if vp_stage is None:
             cur_vpp_rank = 0
         else:
             cur_vpp_rank = vp_stage
 
+        if last_stage_is_loss:
+            from megatron.core import parallel_state
+            vpp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
+            # skip the last stage
+            if cur_vpp_rank == vpp_size - 1:
+                return
+            # reduce the vpp size
+            if self._vpp == vpp_size:
+                self._vpp -= 1
+                self._stages = self._stages[:-1]
+
         first_last_vpp_rank = self._first_last_vpp_rank
-        # we do not offload last layer of the first last vpp rank chunk we ever meet, cause it comes first in backward
+        # rewind
+        if cur_vpp_rank == self._vpp - 1:
+            self.flush()
         first_last_vpp_rank = first_last_vpp_rank and (cur_vpp_rank == self._vpp - 1)
-        cur_chunk = ChunkOffloadHandler(num_layer, first_last_vpp_rank, offload, first_layer_index)
+        # If the model chunk contains only the dense layers, initialize a null chunk handler.
+        if num_layer <= num_dense_layer:
+            cur_chunk = NullChunkOffloadHandler(num_layer, first_last_vpp_rank, offload)
+        else:
+            cur_chunk = ChunkOffloadHandler(num_layer, first_last_vpp_rank, offload)
         # save for latter push
         self._stages[cur_vpp_rank].append(cur_chunk)
         if cur_vpp_rank == self._vpp - 1:
@@ -114,30 +148,31 @@ class PipelineOffloadManager:
         self._cur_forward_chunk = cur_chunk
         cur_chunk.vpp_rank = cur_vpp_rank
 
+    def set_last_layer(self, is_last_layer):
+        self._cur_forward_chunk.is_last_layer = is_last_layer
+
     def cur_forward_chunk(self):
-        """state for current forward  micro batch or vpp chunk"""
         return self._cur_forward_chunk
 
     def cur_backward_chunk(self):
-        """state for current backward  micro batch or vpp chunk"""
         return self._cur_backward_chunk
 
     def __enter__(self):
         self.OFFLOAD_MGR
         self.inside_context = True
 
-        torch._C._autograd._push_saved_tensors_default_hooks(
-            self.on_save_for_backward, self.on_get_saved_tensor
-        )
+        if not isinstance(self.cur_forward_chunk(), NullChunkOffloadHandler):
+            torch._C._autograd._push_saved_tensors_default_hooks(
+                self.on_save_for_backward, self.on_get_saved_tensor
+            )
 
     def __exit__(self, *args: Any):
         self.inside_context = False
-        torch._C._autograd._pop_saved_tensors_default_hooks()
+        if not isinstance(self.cur_forward_chunk(), NullChunkOffloadHandler):
+            torch._C._autograd._pop_saved_tensors_default_hooks()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
         assert self.inside_context
-        if self.cur_forward_chunk().is_registered_tensor(tensor.data_ptr()):
-            tensor.offloading_activation = True
         return self.cur_forward_chunk().tensor_push(tensor)
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
@@ -175,6 +210,9 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
             pin_memory=pin_memory,
         )
 
+        if not src_tensor.is_contiguous():
+            src_tensor = src_tensor.contiguous()
+
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)
         return state
@@ -188,7 +226,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
         return cpu_backup.to(dev, non_blocking=non_blocking)
 
-    def __init__(self, num_layer, is_first_last_vpp_chunk, offload=True, first_layer_index=0):
+    def __init__(self, num_layer, is_first_last_vpp_chunk, offload=True):
         self._num_layers = num_layer
         # Data Structure to maintain reference to activation tensors
         self._tensor_tag_to_state = {}
@@ -196,40 +234,37 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         self.fp8_tensor_object_map = {}
         self.float8_transpose_cache_valid = {}
         # Tracking the number of layers offloaded
-        self._offloaded_group_count = 0
+        # self._offloaded_group_count = 0
         self._is_first_last_vpp_chunk = is_first_last_vpp_chunk
 
-        self._group_index = 0
-        self.first_group_index = 0
+        self._offloaded_group_index = 0
+        self._groups_to_offload = []
+        self._groups_to_reload = []
+        self._layer_index = 0
         self._tensor_count_current_group = 0
         self.multi_input_offload_count = False
-        self.offload_count_per_layer = defaultdict(int)
+        # self.offload_count_per_layer = defaultdict(int)
 
-        self.tensor_need_offloading_checker = None
         self.torch_tensor_count = 0
         self.d2h_stream = PipelineOffloadManager.get_instance().d2h_stream
         self.h2d_stream = PipelineOffloadManager.get_instance().h2d_stream
+        self._offload_events = {}
+        self._reload_events = {}
         self.do_offload = offload
+        self.is_last_layer = False
 
-        self._offload_tensor_ptrs = deque()
         self.module_release_func_map = dict()
 
     def is_first_last_layer(self):
-        """whether is the last layer of first last vpp chunk ever meet for this batch"""
-        return self._is_first_last_vpp_chunk and self.is_last_layer()
-
-    def is_last_layer(self):
-        """is the last layer for this chunk"""
-        return get_layer_index() == self._num_layers - 1
+        """Do not offload the last layer of the last pp stage."""
+        return self._is_first_last_vpp_chunk and self.is_last_layer
 
     def tensor_push(self, tensor):
         def tensor_offloading_checker(device_tensor):
             if not self.should_bulk_offload():
                 return False
 
-            if self.tensor_need_offloading_checker is not None:
-                return self.tensor_need_offloading_checker(device_tensor)
-            return True
+            return self.tensor_need_offloading_checker(device_tensor)
 
         torch_stray_tensor = isinstance(
             tensor,
@@ -241,7 +276,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
         if not torch_stray_tensor:
             # obtain a unique tensor tag
-            tensor_tag = (self._group_index, self._tensor_count_current_group)
+            tensor_tag = (self._offloaded_group_index, self._tensor_count_current_group)
             self._tensor_count_current_group += 1
             assert tensor_tag not in self._tensor_tag_to_state
 
@@ -274,33 +309,29 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         assert not isinstance(tensor, tuple)
         return tensor
 
-    def set_offloading_checker(self, check_func):
-        """check_func is a func with signature f(tensor) -> bool, check whether the tensor need offload"""
-        self.tensor_need_offloading_checker = check_func
-
-    @contextmanager
-    def offload_checker_ctx(self, checker_func):
-        origin_checker_func = self.tensor_need_offloading_checker
-        try:
-            self.tensor_need_offloading_checker = checker_func
-            yield
-        finally:
-            self.tensor_need_offloading_checker = origin_checker_func
+    def tensor_need_offloading_checker(self, tensor):
+        """Check if the tensor needs to be offloaded."""
+        if tensor is None:
+            return False
+        if tensor.numel() < MIN_OFFLOADED_TENSOR_SIZE:
+            return False
+        if hasattr(tensor, "offloading_activation") and not tensor.offloading_activation:
+            return False
+        return True
 
     def bulk_offload_group(self, group_to_offload):
-        """Bulk offload group."""
-        if not self.should_bulk_offload():
-            self._offloaded_group_count = group_to_offload + 1
-            return
-
+        """offload a group of tensors recorded in tensor_push().
+        """
         if not self.do_offload:
             return
-        assert not self.is_first_last_layer()
 
+        assert not self.is_first_last_layer()
+        group_id_to_offload, name = group_to_offload
+        torch.cuda.nvtx.range_push(name)
         with torch.cuda.stream(self.d2h_stream):
             for tensor_tag, state in self._tensor_tag_to_state.items():
                 group_id, _ = tensor_tag
-                if group_id == group_to_offload:
+                if group_id == group_id_to_offload:
                     assert not isinstance(state, tuple)
 
                     is_quantized_tensor = isinstance(state, list)
@@ -312,30 +343,56 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
                         tensor_list = [state]
 
                     for tensor_on_device in tensor_list:
-                        to_offload_tensor = self.tensor_need_offloading_checker is not None and self.tensor_need_offloading_checker(tensor_on_device)
+                        to_offload_tensor = self.tensor_need_offloading_checker(tensor_on_device)
                         # if offload, return the reference to cpu copy
                         if to_offload_tensor:
                             state = self.offload(tensor_on_device)
+                            # TODO: check if we really need it.
+                            # Record the last offloading event for this group,
+                            # which is used to avoid reloading before offloading.
+                            event = torch.cuda.Event()
+                            event.record(self.d2h_stream)
+                            self._offload_events[name] = event
                             tensor_on_device.record_stream(self.d2h_stream)
 
                         if is_quantized_tensor:
                             self._tensor_tag_to_state[tensor_tag].append(state if to_offload_tensor else tensor_on_device)
                         else:
                             self._tensor_tag_to_state[tensor_tag] = state
+        torch.cuda.nvtx.range_pop()
 
-        self._offloaded_group_count = group_to_offload + 1
+    def get_offload_event(self, name):
+        if name in self._offload_events:
+            return self._offload_events[name]
+        else:
+            return None
+
+    def get_reload_event(self, name):
+        if name in self._reload_events:
+            return self._reload_events[name]
+        else:
+            return None
 
     def bulk_reload_group(self, group_to_reload):
         """Bulk reload group."""
         if not self.do_offload:
             return
+        found_reload_group = False
+        group_id_to_reload, name = group_to_reload
+        torch.cuda.nvtx.range_push(name)
         with torch.cuda.stream(self.h2d_stream):
             # move back tensors
             for tensor_label, state in self._tensor_tag_to_state.items():
                 group_id, _ = tensor_label
-                if group_id == group_to_reload:
+                if group_id == group_id_to_reload:
+                    found_reload_group = True
+                    event = self.get_offload_event(name)
                     if isinstance(state, tuple):
+                        # make sure the tensor is already offloaded to cpu before reloading it.
+                        torch.cuda.current_stream().wait_event(event)
                         recovered_tensor = self.reload(state)
+                        event.record(self.h2d_stream)
+                        self._reload_events[name] = event
                         self._tensor_tag_to_state[tensor_label] = recovered_tensor
                     elif isinstance(state, list):
                         tensor_list = []
@@ -353,18 +410,21 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
                                 self.float8_transpose_cache_valid.pop(tensor_label)
                             )
                         self._tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(tensor_label)
-                    else:
-                        continue
+        torch.cuda.nvtx.range_pop()
+        return found_reload_group
 
     def pre_reload_last_layer(self):
-        """pre reload activation for the next layer in the backward order"""
+        """Pre-reload the last layer of the next model chunk."""
         if not self.do_offload:
             return
         assert not self._is_first_last_vpp_chunk
 
-        self.bulk_reload_group(self._offloaded_group_count - 1)
+        if len(self._groups_to_reload) > 0:
+            if self.bulk_reload_group(self._groups_to_reload[-1]):
+                self._groups_to_reload.pop()
 
     def should_bulk_offload(self):
+        """Check if the chunk should be offloaded."""
         if not self.do_offload:
             return False
         # first backward chunk
@@ -374,18 +434,18 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         # if next backward chunk is this chunk (for last pp stage)
         next_backward_chunk = PipelineOffloadManager.get_instance().get_instance().front()
         if next_backward_chunk is not None and next_backward_chunk is self:
-            if self.is_last_layer():
+            if self.is_last_layer:
                 return False
 
         return True
 
-    def forward_sync(self):
-        self.d2h_stream.wait_stream(torch.cuda.current_stream())
-        torch.cuda.current_stream().wait_stream(self.d2h_stream)
-
     def bulk_offload(self, release_tensors, delay_release_module=None):
-        self.bulk_offload_group(self._group_index)
         if self.should_bulk_offload():
+            group_to_offload = self._groups_to_offload.pop()
+            name = group_to_offload[1]
+            self._groups_to_reload.append(group_to_offload)
+            self.bulk_offload_group(group_to_offload)
+
             def release_func():
                 if len(release_tensors) > 0:
                     cur_stream = torch.cuda.current_stream()
@@ -398,41 +458,44 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
                 self.module_release_func_map[delay_release_module] = release_func
 
     def on_group_commit_forward(self, release_tensors, delay_release_module=None):
-        # wait each other
-        self.forward_sync()
+        """Offload a group of tensors."""
+
+        # wait for the compute stream for offloading
+        self.d2h_stream.wait_stream(torch.cuda.current_stream())
         self.bulk_offload(release_tensors, delay_release_module)
-        self._group_index = self._group_index + 1
-        self._tensor_count_current_group = 0
 
     def bulk_reload(self):
-        if self.do_offload:
-            assert self._group_index == self._offloaded_group_count - 1, f"group_index should be equal to offloaded_group_count - 1"
-        if self._group_index > self.first_group_index:
-            # load group of next layer
-            self.bulk_reload_group(self._group_index - 1)
-            self._offloaded_group_count -= 1
+        if len(self._groups_to_reload) > 0:
+            # load next layer
+            if self.bulk_reload_group(self._groups_to_reload[-1]):
+                self._groups_to_reload.pop()
         else:
+            # load the last layer of one backward chunk in advance
             next_backward_chunk = PipelineOffloadManager.get_instance().front()
             if next_backward_chunk is not None:
                 next_backward_chunk.pre_reload_last_layer()
 
-    def backward_sync(self):
-        self.h2d_stream.wait_stream(torch.cuda.current_stream())
-        torch.cuda.current_stream().wait_stream(self.h2d_stream)
-
-    def on_group_commit_backward(self):
+    def on_group_commit_backward(self, name):
+        """Prepare for reloadingthe next group of tensors."""
         cur_backward_chunk = PipelineOffloadManager.get_instance().cur_backward_chunk()
         if not cur_backward_chunk is self:
             PipelineOffloadManager.get_instance().pop()
         cur_backward_chunk = PipelineOffloadManager.get_instance().cur_backward_chunk()
         assert cur_backward_chunk is self
-        self._group_index = self._group_index - 1
-        self.backward_sync()
+        # make sure the reloading jobs for current computation are done.
+        event = self.get_reload_event(name)
+        if event is not None:
+            torch.cuda.current_stream().wait_event(event)
+        self._offloaded_group_index = self._offloaded_group_index - 1
 
-    def on_group_start_forward(self):
-        pass
+    def on_group_start_forward(self, name):
+        """Prepare for offloading the next group of tensors."""
+        self._offloaded_group_index = self._offloaded_group_index + 1
+        self._tensor_count_current_group = 0
+        self._groups_to_offload.append((self._offloaded_group_index, name))
 
     def on_group_start_backward(self):
+        """Reload the next group of tensors."""
         self.h2d_stream.wait_stream(torch.cuda.current_stream())
         self.bulk_reload()
 
@@ -453,6 +516,10 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         return is_registered
 
 
+class NullChunkOffloadHandler(ChunkOffloadHandler):
+    pass
+
+
 class GroupCommitFunction(torch.autograd.Function):
     """this is a dummy op with output identical to input.
     However, it is necessary for marking a timepoint for offload handler to
@@ -465,10 +532,13 @@ class GroupCommitFunction(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         delay_release_module = args[-1]
         release_tensors = args[-2]
-        cpu_offload_handler = args[-3]
-        tensor = args[:-3]
-        cpu_offload_handler.on_group_commit_forward(release_tensors, delay_release_module=delay_release_module)
+        name = args[-3]
+        cpu_offload_handler = args[-4]
+        tensor = args[:-4]
+        if not isinstance(cpu_offload_handler, NullChunkOffloadHandler):
+            cpu_offload_handler.on_group_commit_forward(release_tensors, delay_release_module=delay_release_module)
         ctx.cpu_offload_handler = cpu_offload_handler
+        ctx.name = name
 
         # return the identical tensor
         return tensor
@@ -478,13 +548,19 @@ class GroupCommitFunction(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         cpu_offload_handler = ctx.cpu_offload_handler
-        cpu_offload_handler.on_group_commit_backward()
-        return grad_output + (None, None, None)
+        if not isinstance(cpu_offload_handler, NullChunkOffloadHandler):
+            cpu_offload_handler.on_group_commit_backward(ctx.name)
+        return grad_output + (None, None, None, None)
 
 
-def group_prefetch_offload_commit(*tensor, release_tensors=[], delay_release_module=None):
+def group_prefetch_offload_commit(*tensor, name, release_tensors=[], delay_release_module=None):
+    """Specify the tensors to be released after offloading.
+    release_tensors is a list of tensors to be released after offloading.
+    The tensors will be untyped_storage().resize_(0) after offloading.
+    Note: specify the tensors only when they are not automatically released by torch gc.
+    """
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-    return GroupCommitFunction.apply(*tensor, cur_forward_chunk, release_tensors, delay_release_module)
+    return GroupCommitFunction.apply(*tensor, cur_forward_chunk, name, release_tensors, delay_release_module)
 
 
 class GroupStartFunction(torch.autograd.Function):
@@ -495,37 +571,38 @@ class GroupStartFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, *args):
+    def forward(ctx, tensor, cpu_offload_handler, name):
         # pylint: disable=missing-function-docstring
-        cpu_offload_handler = args[-1]
-        tensor = args[:-1]
         ctx.cpu_offload_handler = cpu_offload_handler
 
+        if not isinstance(cpu_offload_handler, NullChunkOffloadHandler):
+            cpu_offload_handler.on_group_start_forward("activation offloading " + name)
         # return the identical tensor
-        return tensor if len(tensor) > 1 else tensor[0]
+        return tensor
 
     @staticmethod
-    def backward(ctx, *grad_output):
+    def backward(ctx, grad_output):
         # pylint: disable=missing-function-docstring
         cpu_offload_handler = ctx.cpu_offload_handler
-        cpu_offload_handler.on_group_start_backward()
-        return grad_output + (None, )
+        if not isinstance(cpu_offload_handler, NullChunkOffloadHandler):
+            cpu_offload_handler.on_group_start_backward()
+        return grad_output, None, None
 
 
-def group_prefetch_offload_start(*tensor):
+def group_prefetch_offload_start(tensor, name=None):
     cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-    return GroupStartFunction.apply(*tensor, cur_forward_chunk)
+    return GroupStartFunction.apply(tensor, cur_forward_chunk, name)
 
 
 def get_offload_context(config):
-    if config.offload_activation:
+    if config.fine_grained_activation_offloading:
         return PipelineOffloadManager.get_instance()
     else:
         return nullcontext()
 
 
 def offload_checker_ctx(config, offload_checker_func):
-    if config.offload_activation:
+    if config.fine_grained_activation_offloading:
         return (
             PipelineOffloadManager.get_instance()
             .cur_forward_chunk()
