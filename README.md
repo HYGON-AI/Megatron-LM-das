@@ -101,10 +101,8 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 
 
 ### 项目支持量化通信
-+ 项目支持量化通信，对all-to-all通信数据进行低精度表示，减少通信量。如果需要使用该特性，需要启动脚本中加入如下参数：
-```
---use-quantize-comm
-```
++ 项目支持量化通信，对all-to-all通信数据进行低精度表示，减少通信量。具体见[all2all量化通信](./docs/features/quantize-all2all.md)
+
 
 ### 项目支持参数副本复用
 + 项目支持参数副本复用，主要在BF16的训练场景使用，前向计算开始前，将FP32的参数保存转换为BF16并保存Residual，优化器更新前基于BF16和Residual恢复FP32参数并进行更新。如果需要使用该特性，需要启动脚本中加入如下参数:
