@@ -264,7 +264,6 @@ class CoreAdaptation(MegatronAdaptationABC):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
 
     def patch_tensor_parallel(self):
-        from ..core.tensor_parallel.mappings import all_to_all
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.parallel_state import log_timing_wrapper
 
@@ -338,10 +337,6 @@ class CoreAdaptation(MegatronAdaptationABC):
             MegatronAdaptation.register('torch.distributed.irecv',
                                         log_timing_wrapper,
                                         apply_wrapper=True)
-
-        if adaptor_args.use_quantize_comm:
-            MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.all_to_all',
-                                        all_to_all)
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer_wrapper

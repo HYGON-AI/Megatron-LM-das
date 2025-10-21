@@ -54,4 +54,3 @@ class GradientCompressFeature(AbstractFeature):
                                         apply_wrapper=True)
             patch_manager.register_patch('megatron.training.training.pretrain',
                                         pretrain)
-
