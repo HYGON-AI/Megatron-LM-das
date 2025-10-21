@@ -28,5 +28,5 @@ all2all量化通信，对all2all通信数据进行低精度表示，减少通信
 **可选参数**
 ```
 --quant-comm-bits 4          # 量化精度, 可取4/8，分别将数据量化为int4/int8，缺省值为8；
---quant-group-size 32        # 数据被分成大小为quant-group-size的组，每组应用特定的量化策略，有助于提高量化效果或保持模型性能。quant-comm-bits为4时，quant-group-size可取16或32，默认为32。quant-comm-bits为4时，quant-group-size可取64或128，默认为128。
+--quant-group-size 32        # 数据被分成大小为quant-group-size的组，每组应用特定的量化策略，有助于提高量化效果或保持模型性能。quant-comm-bits为4时，quant-group-size可取16或32，默认为32。quant-comm-bits为8时，quant-group-size可取64或128，默认为128。
 ```

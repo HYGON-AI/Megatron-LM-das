@@ -196,6 +196,9 @@ def all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None, 
         quant_comm_bits = args.quant_comm_bits
         quant_group_size = args.quant_group_size
 
+    if input_.dtype != torch.bfloat16:
+        use_quantize_comm = False
+
     if use_quantize_comm:
         if quant_comm_bits is None:
             quant_comm_bits = 8
