@@ -4,16 +4,26 @@ import triton.language as tl
 
 
 @torch.no_grad()
-def fp16_to_int8s(fp16_tensor):
-    fp16_bytes = fp16_tensor.contiguous().view(torch.int8)
-    return fp16_bytes
+def float_to_int8s(float_tensor):
+    bytes_tensor = float_tensor.contiguous().view(torch.int8)
+    return bytes_tensor
 
 
 @torch.no_grad()
-def int8s_to_fp16(scale_and_shift_int8):
-    assert scale_and_shift_int8.shape[-1] % 2 == 0
-    fp16_bytes = scale_and_shift_int8.view(torch.int16)
-    return fp16_bytes.view(torch.bfloat16)
+def int8s_to_float(scale_and_shift_int8, output_dtype=torch.bfloat16):
+    if (
+        output_dtype == torch.bfloat16
+        or output_dtype == torch.float16
+    ):
+        assert scale_and_shift_int8.shape[-1] % 2 == 0
+        float_tensor = scale_and_shift_int8.view(torch.int16)
+    elif output_dtype == torch.float32:
+        assert scale_and_shift_int8.shape[-1] % 4 == 0
+        float_tensor = scale_and_shift_int8.view(torch.int32)
+    else:
+        raise ValueError(f"{output_dtype} is not supported")
+
+    return float_tensor.view(output_dtype)
 
 
 @triton.jit

@@ -31,6 +31,10 @@ class QuantizeCommFeature(AbstractFeature):
         group.add_argument('--quant-group-size', type=int,
                            default=None,
                            help='the group size to use for quantization. If not specified, uses per-column quantization')
+        group.add_argument('--quant-scale-dtype', type=str,
+                           default="bf16",
+                           choices=["bf16", "fp16", "fp32"],
+                           help='the dtype of quantization scale')
 
     def validate_args(self, args):
         assert args.quant_comm_bits in {4, 8}, f"quant_comm_bits {args.quant_comm_bits} only accepts values from [4, 8]"
