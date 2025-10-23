@@ -91,8 +91,8 @@ def q_alltoall_int4(input, quant_group_size, quant_scale_dtype, output_split_siz
         quant_group_size,
     )
 
-    input_all = input_all.squeeze()
-    input_all[:, (s // 2):] = float_to_int8s(buffer_scales).squeeze()  # size: [t, num_quant_groups * k], (scale_high, scale_low, shift_high, shift_low)
+    input_all = input_all.squeeze(1)
+    input_all[:, (s // 2):] = float_to_int8s(buffer_scales).squeeze(1)  # size: [t, num_quant_groups * k], (scale_high, scale_low, shift_high, shift_low)
 
     if output_split_sizes is None:
         output = input.new_empty(
@@ -117,7 +117,7 @@ def q_alltoall_int4(input, quant_group_size, quant_scale_dtype, output_split_siz
     dequant_out = torch.empty((output.shape[0], 1, s), dtype=torch.bfloat16, device="cuda")
     destindex_dequantize_int4(output[:, :(s // 2)].unsqueeze(1), scales, dequant_out, quant_group_size)
 
-    return dequant_out.squeeze()
+    return dequant_out.squeeze(1)
 
 
 class _AllToAll(torch.autograd.Function):

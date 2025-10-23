@@ -112,7 +112,6 @@ def _bwd_kernel_destindex_dequantize(
     m2 = offs_d[None,:] < head_dim
     mask = m1&m2
 
-
     # Load quantized data
     q_data = tl.load(
         Quantized_Out + dest_index * stride_qo_bs + offs_h[:, None] * stride_qo_h + stride_qo_d * offs_d[None, :],
