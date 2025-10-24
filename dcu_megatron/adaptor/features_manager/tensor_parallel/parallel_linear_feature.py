@@ -17,6 +17,8 @@ class ParallelLinearFeature(AbstractFeature):
                            help='use gathered input of AGKernel for wgrad computation')
         group.add_argument('--flux-transpose-weight', action='store_true', default=False,
                            help='Whether to transpose weight when using flux kernel')
+        group.add_argument('--disable-bw-flux-gemmrs-op', action='store_false', default=True, dest='enable_bw_flux_gemmrs_op',
+                           help='Do not use flux.GemmRS in backward pass')
 
     def validate_args(self, args):
         if args.parallel_linear_impl == "flux" and args.transformer_impl != 'transformer_engine':

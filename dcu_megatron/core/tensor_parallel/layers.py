@@ -36,6 +36,7 @@ from megatron.core.tensor_parallel.layers import (
     custom_fwd,
     custom_bwd,
     dist_all_gather_func,
+    dist_reduce_scatter_func,
 )
 from megatron.training import get_args
 
@@ -85,9 +86,10 @@ class AGLinear(torch.autograd.Function):
         transpose_weight=False,
         fw_ag_gemm_op=None,
         bw_gemm_rs_op=None,
+        enable_bw_flux_gemmrs_op=True,
+        save_flux_gather_input=False
     ):
         """Forward."""
-        args = get_args()
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
         ctx.allreduce_dgrad = allreduce_dgrad
@@ -97,7 +99,8 @@ class AGLinear(torch.autograd.Function):
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
         ctx.bw_gemm_rs_op = bw_gemm_rs_op
-        ctx.save_flux_gather_input = args.save_flux_gather_input
+        ctx.enable_bw_flux_gemmrs_op = enable_bw_flux_gemmrs_op
+        ctx.save_flux_gather_input = save_flux_gather_input
 
         total_input = None
         if sequence_parallel:
@@ -129,8 +132,8 @@ class AGLinear(torch.autograd.Function):
                 fast_accum=False
             )
 
-            if args.save_flux_gather_input:
-                total_input = fw_ag_gemm_op.gather_input()
+            if ctx.save_flux_gather_input:
+                total_input = fw_ag_gemm_op.gather_input().view(-1, batch_size, input_hidden_size)
 
             output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
@@ -138,7 +141,7 @@ class AGLinear(torch.autograd.Function):
             if bias is not None:
                 output = output + bias
 
-        if sequence_parallel and args.save_flux_gather_input:
+        if sequence_parallel and ctx.save_flux_gather_input:
             ctx.save_for_backward(total_input, weight)
         else:
             ctx.save_for_backward(input, weight)
@@ -184,7 +187,7 @@ class AGLinear(torch.autograd.Function):
             else:
                 total_input = input
 
-        if ctx.sequence_parallel:
+        if ctx.sequence_parallel and ctx.enable_bw_flux_gemmrs_op:
             sequence_len, batch_size, _ = grad_output.size()
 
             if bw_gemm_rs_op is None:
@@ -222,19 +225,23 @@ class AGLinear(torch.autograd.Function):
         ):
             handle.wait()
 
+        if ctx.sequence_parallel and not ctx.enable_bw_flux_gemmrs_op:
+            assert not ctx.allreduce_dgrad
+            dim_size = list(input.size())
+            if ctx.save_flux_gather_input:
+                dim_size[0] = dim_size[0] // tp_group.size()
+            sub_grad_input = torch.empty(
+                dim_size, dtype=input.dtype, device=torch.cuda.current_device(), requires_grad=False
+            )
+            # reduce_scatter
+            handle = dist_reduce_scatter_func(
+                sub_grad_input, grad_input, group=tp_group, async_op=True
+            )
+
         if wgrad_compute:
-            if ctx.sequence_parallel and ctx.save_flux_gather_input:
-                grad_output = grad_output.contiguous()
-                total_input = total_input.contiguous()
-                # Convert the tensor shapes to 2D for execution compatibility
-                if grad_output.dim() == 3:
-                    grad_output = grad_output.view(
-                        grad_output.shape[0] * grad_output.shape[1], grad_output.shape[2]
-                    )
-            else:
-                grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                    grad_output, total_input
-                )
+            grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
+                grad_output, total_input
+            )
 
         if not ctx.sequence_parallel and ctx.allreduce_dgrad:
             if weight.requires_grad:
@@ -244,7 +251,7 @@ class AGLinear(torch.autograd.Function):
                 )
             else:
                 grad_input = _reduce(grad_input)
-                return grad_input, None, None, None, None, None, None, None, None, None, None, None
+                return grad_input, None, None, None, None, None, None, None, None, None, None, None, None
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -285,10 +292,27 @@ class AGLinear(torch.autograd.Function):
             grad_weight = grad_output.t().matmul(total_input)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
+        bw_output = (
+            None,              # gradient_accumulation_fusion
+            None,              # allreduce_dgrad
+            None,              # sequence_parallel
+            None,              # grad_output_buffer
+            None,              # wgrad_deferral_limit
+            None,              # tp_group
+            None,              # transpose_weight
+            None,              # fw_ag_gemm_op
+            None,              # bw_gemm_rs_op
+            None,              # enable_bw_flux_gemmrs_op
+            None,              # save_flux_gather_input
+        )
+        if ctx.sequence_parallel and not ctx.enable_bw_flux_gemmrs_op:
+            handle.wait()
+            return (sub_grad_input, grad_weight, grad_bias,) + bw_output
+
         if not ctx.sequence_parallel and ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None, None
+        return (grad_input, grad_weight, grad_bias,) + bw_output
 
 
 def ag_linear(
@@ -303,7 +327,10 @@ def ag_linear(
     tp_group: Optional[torch.distributed.ProcessGroup] = None,
     transpose_weight: Optional[bool] = False,
     fw_ag_gemm_op=None,
-    bw_gemm_rs_op=None
+    bw_gemm_rs_op=None,
+    enable_bw_flux_gemmrs_op=True,
+    save_flux_gather_input=False,
+
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -390,6 +417,8 @@ def ag_linear(
         transpose_weight,
         fw_ag_gemm_op,
         bw_gemm_rs_op,
+        enable_bw_flux_gemmrs_op,
+        save_flux_gather_input,
     ]
 
     if not ag_linear.warned:
@@ -793,11 +822,14 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         )
 
         # flux params
+        args = get_args()
         self._forward_impl = ag_linear
         self.flux_transpose_weight = getattr(self.config, "flux_transpose_weight", False)
         self.previous_flux_params = (None,) * 5
         self.fw_ag_gemm_op = None
         self.bw_gemm_rs_op = None
+        self.enable_bw_flux_gemmrs_op = getattr(args, "enable_bw_flux_gemmrs_op", True)
+        self.save_flux_gather_input = getattr(args, "save_flux_gather_input", False)
 
     def forward(
         self,
@@ -923,6 +955,8 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
             transpose_weight=self.flux_transpose_weight,
             fw_ag_gemm_op=self.fw_ag_gemm_op,
             bw_gemm_rs_op=self.bw_gemm_rs_op,
+            enable_bw_flux_gemmrs_op=self.enable_bw_flux_gemmrs_op,
+            save_flux_gather_input=self.save_flux_gather_input,
         )
 
         gather_output = self.gather_output

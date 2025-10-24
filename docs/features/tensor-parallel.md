@@ -27,3 +27,17 @@
 ```
 --save-flux-gather-input
 ```
+
+对于图3红框内的计算通信，可以不使用flux kernel进行融合。此时反向计算时RS与QKW_WGRAD/FC1_WGRAD进行overlap；如果不使用save-flux-gather-input，QKV_DGRAD/FC1_DGRAD与AG进行overlap。
+
+<figure style="text-align:center;">
+  <img src=../source/images/tp-comp-comm-overlap-3.png alt="示例图" width="450"/>
+  <figcaption>
+  图3. 对于红框内计算通信，可以不替换为flux kernel
+  </figcaption>
+</figure>
+如果不使用flux kernel进行融合图3红框内的计算通信，需要在启动脚本中额外添加以下参数：
+
+```
+--disable-bw-flux-gemmrs-op
+```
