@@ -87,9 +87,9 @@ class AdaptiveRecomputeSwap(AdaptiveRecompute):
             "swap_modules": swap_modules,
         }
         prefetch_recompute_group, interval, num_prefetch, swap_noop_layers = self.solve_prefetch_policy()
-        print(f"[DEBUG] swap_list： {prefetch_recompute_group[0]},"
-              f" prefetch_list： {prefetch_recompute_group[1]},"
-              f" recompute_list： {prefetch_recompute_group[2]}")
+        print(f"[DEBUG] swap_list: {prefetch_recompute_group[0]},"
+              f" prefetch_list: {prefetch_recompute_group[1]},"
+              f" recompute_list: {prefetch_recompute_group[2]}")
 
         for i in prefetch_recompute_group[0]:
             if not any(filter(None, i)):
