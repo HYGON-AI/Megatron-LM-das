@@ -8,6 +8,8 @@ do
         data_path=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
+    elif [[ $para == --launch_with_binding* ]];then
+        launch_with_binding=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
