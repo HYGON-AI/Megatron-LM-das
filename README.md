@@ -1,5 +1,51 @@
 # Dcu Megatron
 
+## 使用方式
+
+### 项目下载
+
+分为2种，git方式或离线方式
+
+1、git方式下载
+
+```shell
+git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/dcu_megatron.git 或
+git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoolkit/deeplearing/dcu_megatron.git
+```
+
+2、离线下载
+
+2.1 离线下载该仓库的离线代码包
+
+2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
+
+2.3 将Megatron-LM离线代码包解压到dcu_megatron目录下的Megatron-LM目录
+
+
+
+### 项目使用
+在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
+```
+examples/
+├── deepseek_v3
+├── gpt3
+├── llama
+├── mixtral
+└── qwen
+```
+
+### 节点筛查(此次检查是基于GPT-MOE 567B模型单机参数)
+
+```shell
+1、到check_nodes目录下，将要筛查的节点写入clushnode文件
+2、bash clush.sh，检查环境基本情况，如显存、内存等是否已释放
+3、打开check_nodes.sh，将基本环境变量补齐或做相应修改
+4、bash run_check.sh 1/4，进行单机或者四机的节点筛查 # 当前只支持单机和四机筛查
+```
+
+### 版本依赖
+torch >= 2.6.0
+
 ## 项目介绍
 本项目通过替换megatron的函数或类，引入新的特性或者实现更好的性能。替换的函数或类注册在dcu_megatron/adaptor/megatron_adaptor.py。
 
@@ -146,48 +192,4 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 2. offload-modules支持self_attn、qkv_linear、core_attn、attn_linear、router_fc1、router_fc2、shared_fc1、shared_fc2、moe_act，可同时offload多个module。
 
 
-## 使用方式
 
-### 项目下载
-
-分为2种，git方式或离线方式
-
-1、git方式下载
-
-```shell
-git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/dcu_megatron.git 或
-git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoolkit/deeplearing/dcu_megatron.git
-```
-
-2、离线下载
-
-2.1 离线下载该仓库的离线代码包
-
-2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
-
-2.3 将Megatron-LM离线代码包解压到dcu_megatron目录下的Megatron-LM目录
-
-
-
-### 项目使用
-在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
-```
-examples/
-├── deepseek_v3
-├── gpt3
-├── llama
-├── mixtral
-└── qwen
-```
-
-### 节点筛查(此次检查是基于GPT-MOE 567B模型单机参数)
-
-```shell
-1、到check_nodes目录下，将要筛查的节点写入clushnode文件
-2、bash clush.sh，检查环境基本情况，如显存、内存等是否已释放
-3、打开check_nodes.sh，将基本环境变量补齐或做相应修改
-4、bash run_check.sh 1/4，进行单机或者四机的节点筛查 # 当前只支持单机和四机筛查
-```
-
-### 版本依赖
-torch >= 2.6.0
