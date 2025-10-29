@@ -42,12 +42,10 @@ from megatron.training import get_args
 
 from dcu_megatron.core.utils import is_flux_min_version
 
-
-_grad_accum_fusion_available = True
 try:
     import fused_weight_gradient_mlp_cuda
-except ImportError:
-    _grad_accum_fusion_available = False
+except ImportError as e:
+    raise warnings.warn(f"Failed to import fused_weight_gradient_mlp_cuda. {e}")
 
 try:
     import transformer_engine  # pylint: disable=unused-import
@@ -98,9 +96,10 @@ class AGLinear(torch.autograd.Function):
         ctx.tp_group = tp_group
         ctx.grad_output_buffer = grad_output_buffer
         ctx.transpose_weight = transpose_weight
-        ctx.bw_gemm_rs_op = bw_gemm_rs_op
         ctx.enable_bw_flux_gemmrs_op = enable_bw_flux_gemmrs_op
         ctx.save_flux_gather_input = save_flux_gather_input
+        if enable_bw_flux_gemmrs_op:
+            ctx.bw_gemm_rs_op = bw_gemm_rs_op
 
         total_input = None
         if sequence_parallel:
@@ -129,11 +128,12 @@ class AGLinear(torch.autograd.Function):
                 input_scale=None,
                 weight_scale=None,
                 output_scale=None,
-                fast_accum=False
+                fast_accum=False,
             )
+            output = output.clone()
 
             if ctx.save_flux_gather_input:
-                total_input = fw_ag_gemm_op.gather_input().view(-1, batch_size, input_hidden_size)
+                total_input = fw_ag_gemm_op.gather_input().clone().view(-1, batch_size, input_hidden_size)
 
             output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
@@ -158,7 +158,8 @@ class AGLinear(torch.autograd.Function):
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         tp_group = ctx.tp_group
         transpose_weight = not ctx.transpose_weight
-        bw_gemm_rs_op = ctx.bw_gemm_rs_op
+        if ctx.enable_bw_flux_gemmrs_op:
+            bw_gemm_rs_op = ctx.bw_gemm_rs_op
 
         wgrad_compute = weight.requires_grad
         if grad_output_buffer is not None:
@@ -251,7 +252,7 @@ class AGLinear(torch.autograd.Function):
                 )
             else:
                 grad_input = _reduce(grad_input)
-                return grad_input, None, None, None, None, None, None, None, None, None, None, None, None
+                return grad_input, None, None, None, None, None, None, None, None, None, None, None, None, None
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -330,7 +331,6 @@ def ag_linear(
     bw_gemm_rs_op=None,
     enable_bw_flux_gemmrs_op=True,
     save_flux_gather_input=False,
-
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -732,6 +732,164 @@ def linear_rs(
 
 linear_rs.warned = False
 
+_FW_AG_GEMM_KERNELS = None
+_FW_GEMM_RS_KERNELS = None
+_BW_AG_GEMM_KERNELS = None
+_BW_GEMM_RS_KERNELS = None
+
+SHARE_AG_GEMM_OP = int(os.environ.get("SHARE_FLUX_AG_GEMM_OP", 1))
+SHARE_GEMM_RS_OP = int(os.environ.get("SHARE_FLUX_GEMM_RS_OP", 1))
+
+def get_fw_ag_gemm_kernel(flux_params: tuple):
+    def _get_fw_ag_gemm_kernel():
+        (
+            sequence_len,
+            batch_size,
+            input_hidden_size,
+            output_hidden_size,
+            input_dtype,
+            transpose_weight,
+        ) = flux_params
+
+        fw_ag_gemm_op = flux.AGKernel(
+            get_tensor_model_parallel_group(),
+            get_tensor_model_parallel_node_size(),
+            sequence_len * batch_size * get_tensor_model_parallel_world_size(),
+            output_hidden_size,
+            input_hidden_size,
+            input_dtype,
+            output_dtype=input_dtype,
+            transpose_weight=transpose_weight,
+            local_copy=False,
+            ring_mode=flux.AgRingMode.Auto,
+        )
+        return fw_ag_gemm_op
+
+    if SHARE_AG_GEMM_OP:
+        global _FW_AG_GEMM_KERNELS
+
+        if _FW_AG_GEMM_KERNELS is None:
+            _FW_AG_GEMM_KERNELS = {}
+
+        if flux_params not in _FW_AG_GEMM_KERNELS:
+            _FW_AG_GEMM_KERNELS[flux_params] = _get_fw_ag_gemm_kernel()
+
+        return _FW_AG_GEMM_KERNELS[flux_params]
+
+    return _get_fw_ag_gemm_kernel()
+
+
+def get_fw_gemm_rs_kernel(flux_params: tuple):
+    def _get_fw_gemm_rs_kernel():
+        (
+            sequence_len,
+            batch_size,
+            _,
+            output_hidden_size,
+            input_dtype,
+            transpose_weight,
+        ) = flux_params
+        fw_gemm_rs_op = flux.GemmRS(
+            get_tensor_model_parallel_group(),
+            get_tensor_model_parallel_node_size(),
+            sequence_len * batch_size,
+            output_hidden_size,
+            input_dtype,
+            input_dtype,
+            transpose_weight=transpose_weight,
+            fuse_reduction=False
+        )
+        return fw_gemm_rs_op
+
+    if SHARE_GEMM_RS_OP:
+        global _FW_GEMM_RS_KERNELS
+
+        if _FW_GEMM_RS_KERNELS is None:
+            _FW_GEMM_RS_KERNELS = {}
+
+        if flux_params not in _FW_GEMM_RS_KERNELS:
+            _FW_GEMM_RS_KERNELS[flux_params] = _get_fw_gemm_rs_kernel()
+
+        return _FW_GEMM_RS_KERNELS[flux_params]
+
+    return _get_fw_gemm_rs_kernel()
+
+
+def get_bw_ag_gemm_kernel(flux_params: tuple):
+    def _get_bw_ag_gemm_kernel():
+        (
+            sequence_len,
+            batch_size,
+            input_hidden_size,
+            output_hidden_size,
+            input_dtype,
+            transpose_weight,
+        ) = flux_params
+
+        bw_ag_gemm_op = flux.AGKernel(
+            get_tensor_model_parallel_group(),
+            get_tensor_model_parallel_node_size(),
+            sequence_len * batch_size,
+            input_hidden_size,
+            output_hidden_size,
+            input_dtype,
+            output_dtype=input_dtype,
+            transpose_weight=not transpose_weight,
+            local_copy=False,
+            ring_mode=flux.AgRingMode.Auto,
+        )
+        return bw_ag_gemm_op
+
+    if SHARE_AG_GEMM_OP:
+        global _BW_AG_GEMM_KERNELS
+
+        if _BW_AG_GEMM_KERNELS is None:
+            _BW_AG_GEMM_KERNELS = {}
+
+        if flux_params not in _BW_AG_GEMM_KERNELS:
+            _BW_AG_GEMM_KERNELS[flux_params] = _get_bw_ag_gemm_kernel()
+
+        return _BW_AG_GEMM_KERNELS[flux_params]
+
+    return _get_bw_ag_gemm_kernel()
+
+
+def get_bw_gemm_rs_kernel(flux_params: tuple):
+    def _get_bw_gemm_rs_kernel():
+        (
+            sequence_len,
+            batch_size,
+            input_hidden_size,
+            _,
+            input_dtype,
+            transpose_weight,
+        ) = flux_params
+
+        bw_gemm_rs_op = flux.GemmRS(
+            get_tensor_model_parallel_group(),
+            get_tensor_model_parallel_node_size(),
+            sequence_len * batch_size * get_tensor_model_parallel_world_size(),
+            input_hidden_size,
+            input_dtype,
+            input_dtype,
+            transpose_weight=not transpose_weight,
+            fuse_reduction=False
+        )
+        return bw_gemm_rs_op
+
+    if SHARE_GEMM_RS_OP:
+        global _BW_GEMM_RS_KERNELS
+
+        if _BW_GEMM_RS_KERNELS is None:
+            _BW_GEMM_RS_KERNELS = {}
+
+        if flux_params not in _BW_GEMM_RS_KERNELS:
+            _BW_GEMM_RS_KERNELS[flux_params] = _get_bw_gemm_rs_kernel()
+
+        return _BW_GEMM_RS_KERNELS[flux_params]
+
+    return _get_bw_gemm_rs_kernel()
+
 
 class FluxColumnParallelLinear(ColumnParallelLinear):
     """Linear layer with column parallelism.
@@ -825,7 +983,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         args = get_args()
         self._forward_impl = ag_linear
         self.flux_transpose_weight = getattr(self.config, "flux_transpose_weight", False)
-        self.previous_flux_params = (None,) * 5
+        self.previous_flux_params = (None,) * 6
         self.fw_ag_gemm_op = None
         self.bw_gemm_rs_op = None
         self.enable_bw_flux_gemmrs_op = getattr(args, "enable_bw_flux_gemmrs_op", True)
@@ -891,13 +1049,13 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         if self.sequence_parallel:
             sequence_len, batch_size, input_hidden_size = input_parallel.size()
             output_hidden_size = weight.size(0)
-            world_size = get_tensor_model_parallel_world_size()
             current_flux_params = (
                 sequence_len,
                 batch_size,
                 input_hidden_size,
                 output_hidden_size,
-                input_parallel.dtype
+                input_parallel.dtype,
+                self.flux_transpose_weight,
             )
 
             if (
@@ -905,29 +1063,8 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
                 or current_flux_params != self.previous_flux_params
             ):
                 if not is_flux_min_version("1.1.0"):
-                    self.fw_ag_gemm_op = flux.AGKernel(
-                        get_tensor_model_parallel_group(),
-                        get_tensor_model_parallel_node_size(),
-                        sequence_len * batch_size * world_size,
-                        output_hidden_size,
-                        input_hidden_size,
-                        input_parallel.dtype,
-                        output_dtype=input_parallel.dtype,
-                        transpose_weight=self.flux_transpose_weight,
-                        local_copy=False,
-                        ring_mode=flux.AgRingMode.Auto,
-                    )
-
-                    self.bw_gemm_rs_op = flux.GemmRS(
-                        get_tensor_model_parallel_group(),
-                        get_tensor_model_parallel_node_size(),
-                        sequence_len * batch_size * world_size,
-                        input_hidden_size,
-                        input_parallel.dtype,
-                        input_parallel.dtype,
-                        transpose_weight=not self.flux_transpose_weight,
-                        fuse_reduction=False
-                    )
+                    self.fw_ag_gemm_op = get_fw_ag_gemm_kernel(current_flux_params)
+                    self.bw_gemm_rs_op = get_bw_gemm_rs_kernel(current_flux_params)
 
             self.previous_flux_params = current_flux_params
 
@@ -1052,7 +1189,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         # flux params
         self._forward_impl = linear_rs
         self.flux_transpose_weight = getattr(self.config, "flux_transpose_weight", False)
-        self.previous_flux_params = (None,) * 5
+        self.previous_flux_params = (None,) * 6
         self.fw_gemm_rs_op = None
         self.bw_ag_gemm_op = None
 
@@ -1080,14 +1217,14 @@ class FluxRowParallelLinear(RowParallelLinear):
         if self.sequence_parallel:
             sequence_len, batch_size, input_hidden_size = input_parallel.size()
             output_hidden_size = self.weight.size(0)
-            world_size = get_tensor_model_parallel_world_size()
 
             current_flux_params = (
                 sequence_len,
                 batch_size,
                 input_hidden_size,
                 output_hidden_size,
-                input_parallel.dtype
+                input_parallel.dtype,
+                self.flux_transpose_weight,
             )
 
             if (
@@ -1095,29 +1232,8 @@ class FluxRowParallelLinear(RowParallelLinear):
                 or current_flux_params != self.previous_flux_params
             ):
                 if not is_flux_min_version("1.1.0"):
-                    self.fw_gemm_rs_op = flux.GemmRS(
-                        get_tensor_model_parallel_group(),
-                        get_tensor_model_parallel_node_size(),
-                        sequence_len * batch_size,
-                        output_hidden_size,
-                        input_parallel.dtype,
-                        input_parallel.dtype,
-                        transpose_weight=self.flux_transpose_weight,
-                        fuse_reduction=False
-                    )
-
-                    self.bw_ag_gemm_op = flux.AGKernel(
-                        get_tensor_model_parallel_group(),
-                        get_tensor_model_parallel_node_size(),
-                        sequence_len * batch_size,
-                        input_hidden_size,
-                        output_hidden_size,
-                        input_parallel.dtype,
-                        output_dtype=input_parallel.dtype,
-                        transpose_weight=not self.flux_transpose_weight,
-                        local_copy=False,
-                        ring_mode=flux.AgRingMode.Auto,
-                    )
+                    self.fw_gemm_rs_op = get_fw_gemm_rs_kernel(current_flux_params)
+                    self.bw_ag_gemm_op = get_bw_ag_gemm_kernel(current_flux_params)
 
             self.previous_flux_params = current_flux_params
 
