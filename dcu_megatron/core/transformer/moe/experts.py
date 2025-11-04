@@ -8,7 +8,7 @@ from megatron.core import tensor_parallel
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
 from megatron.core.transformer.moe import grouped_gemm_util as gg
 
-from dcu_megatron.core.transformer.cpu_offload import (
+from dcu_megatron.core.transformer import (
     PipelineOffloadManager,
     group_prefetch_offload_start,
     group_prefetch_offload_commit,

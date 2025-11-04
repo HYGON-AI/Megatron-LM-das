@@ -24,7 +24,7 @@ from megatron.core.pipeline_parallel.schedules import (
 from ..combined_1f1b import forward_backward_step
 from ..utils import set_streams
 from dcu_megatron.core.parallel_state import set_dualpipe_chunk
-from dcu_megatron.training.utils import print_rank_message
+from dcu_megatron.core.transformer import PipelineOffloadManager
 
 
 # Types
@@ -539,6 +539,9 @@ def forward_backward_pipelining_with_cutinhalf(
     ):
         set_streams()
 
+    if not forward_only and config.fine_grained_activation_offloading:
+        PipelineOffloadManager.get_instance().reset()
+
     # Needed only when gradients are finalized in M-Core
     if config.finalize_model_grads_func is not None and not forward_only:
         embedding_module = clear_embedding_activation_buffer(config, model)
@@ -628,11 +631,12 @@ def forward_backward_pipelining_with_cutinhalf(
         else:
             input_tensor = input_tensors[model_chunk_id][0]
 
+        first_microbatch_id = 0 if model_chunk_id == master_chunk_id else num_microbatches
         is_first_microbatch = check_first_val_step(
             first_val_step,
             forward_only,
-            cur_fwd_chunk_microbatch[model_chunk_id],
-        ),
+            cur_microbatch == first_microbatch_id,
+        )
         output_tensor, num_tokens = forward_step_no_model_graph(
             forward_step_func,
             model_chunk_id,

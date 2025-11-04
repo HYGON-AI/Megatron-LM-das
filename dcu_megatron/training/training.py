@@ -44,13 +44,6 @@ from megatron.core.rerun_state_machine import (
     RerunMode,
 )
 
-try:
-    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
-
-    HAVE_FSDP2 = True
-except ImportError:
-    HAVE_FSDP2 = False
-
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.training.initialize import write_args_to_tensorboard
 from megatron.training.initialize import initialize_megatron, set_jit_fusion_options
@@ -294,6 +287,15 @@ def pretrain(
             train_data_iterator.append(iterators[0])
             valid_data_iterator.append(iterators[1])
             test_data_iterator.append(iterators[2])
+    elif args.schedule_method == 'dualpipev':
+        train_data_iterator = []
+        valid_data_iterator = []
+        test_data_iterator = []
+        for _ in range(2):
+            iterators = build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+            train_data_iterator.append(iterators[0])
+            valid_data_iterator.append(iterators[1])
+            test_data_iterator.append(iterators[2])
     else:
         train_data_iterator, valid_data_iterator, test_data_iterator = (
             build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
@@ -411,29 +413,6 @@ def pretrain(
 
     ft_integration.shutdown()
     one_logger_utils.finish()
-
-
-def build_train_valid_test_data_iterators_wrapper(build_train_valid_test_data_iterators_func):
-    @wraps(build_train_valid_test_data_iterators_func)
-    def wrapper(train_valid_test_dataset_provider):
-        args = get_args()
-        if args.schedule_method == 'dualpipev':
-            train_data_iterator = []
-            valid_data_iterator = []
-            test_data_iterator = []
-            for _ in range(2):
-                iterators = build_train_valid_test_data_iterators_func(train_valid_test_dataset_provider)
-                train_data_iterator.append(iterators[0])
-                valid_data_iterator.append(iterators[1])
-                test_data_iterator.append(iterators[2])
-        else:
-            train_data_iterator, valid_data_iterator, test_data_iterator \
-                = build_train_valid_test_data_iterators_func(
-                    train_valid_test_dataset_provider)
-
-        return train_data_iterator, valid_data_iterator, test_data_iterator
-
-    return wrapper
 
 
 def setup_model_and_optimizer(

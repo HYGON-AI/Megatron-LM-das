@@ -32,7 +32,7 @@ from megatron.core.utils import (
 from .combined_1f1b import forward_backward_step
 from .utils import VppContextManager, set_streams
 from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
-from ..transformer.cpu_offload import PipelineOffloadManager
+from ..transformer import PipelineOffloadManager
 
 
 def get_forward_backward_func_wrapper(fn):

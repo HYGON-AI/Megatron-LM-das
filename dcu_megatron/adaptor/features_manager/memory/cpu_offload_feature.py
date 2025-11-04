@@ -1,3 +1,4 @@
+import os
 from argparse import ArgumentParser
 
 from ..feature import AbstractFeature
@@ -29,7 +30,13 @@ class CPUOffloadFeature(AbstractFeature):
                            '"moe_act": offload the activation function part of the moe layer.')
 
     def validate_args(self, args):
-        pass
+        if args.fine_grained_activation_offloading:
+            if args.schedule_method == "dualpipev":
+                assert os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 1"
+            elif args.schedule_method == "interleaved_1f1b":
+                assert not os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 0"
+            else:
+                raise ValueError(f"schedule_method should be dualpipev or interleaved_1f1b")
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.models.gpt.gpt_model import gpt_model_forward_wrapper, GPTModel

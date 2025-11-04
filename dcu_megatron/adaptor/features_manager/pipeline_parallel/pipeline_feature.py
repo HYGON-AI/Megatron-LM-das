@@ -92,9 +92,6 @@ class PipelineFeature(AbstractFeature):
                 assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
                     "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"
 
-        if args.schedule_method == "interleaved_1f1b":
-            assert args.overlap_moe_expert_parallel_comm, "overlap_moe_expert_parallel_comm should be true when using interleaved_1f1b provided by dcu-megatron."
-
         if args.overlap_moe_expert_parallel_comm:
             assert is_torch_min_version("2.6.0"), "A2A Overlap encounters hang issue with torch version < 2.6.0"
             # Expert model parallelism requirements
@@ -182,10 +179,11 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.training.training import evaluate
             from dcu_megatron.core.transformer.transformer_layer import get_transformer_layer_offset
             from dcu_megatron.training.utils import get_batch_on_this_tp_rank
-            from dcu_megatron.training.training import build_train_valid_test_data_iterators_wrapper
+            from dcu_megatron.training.training import pretrain
+            from dcu_megatron.core.models.gpt.gpt_model import gpt_model_init_wrapper
+            from dcu_megatron.training.global_vars import _set_tensorboard_writer, _set_wandb_writer, _set_one_logger
 
-            patch_manager.register_patch(
-                'megatron.training.training.get_model', get_model)
+            patch_manager.register_patch('megatron.training.training.get_model', get_model)
             patch_manager.register_patch(
                 'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
             patch_manager.register_patch(
@@ -196,22 +194,29 @@ class PipelineFeature(AbstractFeature):
                 'megatron.core.distributed.finalize_model_grads._allreduce_embedding_grads', _allreduce_embedding_grads_wrapper)
 
             # use first rank
-            patch_manager.register_patch(
-                'megatron.training.training.evaluate', evaluate)
+            patch_manager.register_patch('megatron.training.training.evaluate', evaluate)
 
             patch_manager.register_patch(
                 'megatron.core.transformer.transformer_layer.get_transformer_layer_offset', get_transformer_layer_offset)
 
             # support dualpipev, two data iterators
-            patch_manager.register_patch(
-                'megatron.training.training.build_train_valid_test_data_iterators',
-                build_train_valid_test_data_iterators_wrapper,
-                apply_wrapper=True)
+            patch_manager.register_patch('megatron.training.training.pretrain', pretrain)
 
             # support dualpipev, broadcast loss_mask and labels
             patch_manager.register_patch(
                 'megatron.training.utils.get_batch_on_this_tp_rank',
                 get_batch_on_this_tp_rank)
+
+            # set dualpipev_first_chunk
+            patch_manager.register_patch(
+                'megatron.core.models.gpt.gpt_model.GPTModel.__init__',
+                gpt_model_init_wrapper,
+                apply_wrapper=True)
+
+            # set _GLOBAL_TENSORBOARD_WRITER, _GLOBAL_WANDB_WRITER, _GLOBAL_ONE_LOGGER
+            patch_manager.register_patch('megatron.training.global_vars._set_tensorboard_writer', _set_tensorboard_writer)
+            patch_manager.register_patch('megatron.training.global_vars._set_wandb_writer', _set_wandb_writer)
+            patch_manager.register_patch('megatron.training.global_vars._set_one_logger', _set_one_logger)
 
         if args.schedule_method == "interleaved_1f1b":
             from dcu_megatron.core.pipeline_parallel.schedules import get_pp_rank_microbatches

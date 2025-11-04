@@ -1,5 +1,5 @@
 import copy
-from collections import deque, defaultdict
+from collections import deque
 from contextlib import contextmanager, nullcontext
 from typing import Any
 
@@ -10,19 +10,8 @@ from transformer_engine.pytorch.cpu_offload import AsyncDoubleBufferGroupOffload
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase
 
 from megatron.core import parallel_state
+from megatron.core.num_microbatches_calculator import get_num_microbatches
 
-
-_LAYER_INDEX = None
-
-def set_layer_index(layer_index):
-    global _LAYER_INDEX
-    _LAYER_INDEX = layer_index
-
-
-def get_layer_index():
-    global _LAYER_INDEX
-    assert _LAYER_INDEX is not None
-    return _LAYER_INDEX
 
 # cpu offload for pipeline
 MIN_OFFLOADED_TENSOR_SIZE = 1024 * 1024
@@ -41,6 +30,31 @@ def set_ideal_affinity_for_current_gpu():
     pynvml.nvmlDeviceSetCpuAffinity(handle)
 
 
+def get_backward_chunk_order(num_microbatches):
+    pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+    pp_size = parallel_state.get_pipeline_model_parallel_world_size()
+
+    order = deque() # 0: first chunk; 1: second chunk
+    for _ in range(pp_size - pp_rank - 1):   # 1b1w1f
+        order.append(1)
+    num_second_chunks = pp_size - pp_rank - 1
+
+    num_remain_backward = 2 * num_microbatches - (pp_size - pp_rank - 1)
+    next_backward_chunk = 1
+    for _ in range(num_remain_backward):
+        order.append(next_backward_chunk)
+        num_second_chunks += next_backward_chunk
+
+        next_backward_chunk = 1 - next_backward_chunk
+        if (
+            next_backward_chunk == 1
+            and num_second_chunks == num_microbatches
+        ):
+            next_backward_chunk = 0
+
+    return order
+
+
 class PipelineOffloadManager:
     OFFLOAD_MGR = None
 
@@ -51,14 +65,8 @@ class PipelineOffloadManager:
         return cls.OFFLOAD_MGR
 
     def __init__(self):
-        self._queue = deque()
-        if parallel_state.get_virtual_pipeline_model_parallel_world_size() is None:
-            self._vpp = 1
-        else:
-            self._vpp = parallel_state.get_virtual_pipeline_model_parallel_world_size()
+        self._queue = [deque(), deque()]
 
-        # cache vpp - 1 stages
-        self._stages = [[] for _ in range(self._vpp)]
         # allocate streams and events for synchronization
         self._d2h_stream = torch.cuda.Stream()
         self._h2d_stream = torch.cuda.Stream()
@@ -77,76 +85,64 @@ class PipelineOffloadManager:
         self._inside_context = False
         self._cur_forward_chunk = None
         self._cur_backward_chunk = None
-        self._first_last_vpp_rank = True
+        self._first_second_chunk = True
+        self._backward_chunk_order = get_backward_chunk_order(get_num_microbatches())
 
-    def flush(self):
-        # put into the queue in the backward order
-        if len(self._stages[0]) == len(self._stages[-1]):
-            lens = [len(e) for e in self._stages]
-            assert min(lens) == max(lens)
-            self._stages[-1] = []
-            for chunks in reversed(self._stages):
-                for chunk in chunks:
-                    self.push(chunk)
-            for i in range(self._vpp):
-                self._stages[i] = []
-
-    def push(self, handler):
-        self._queue.append(handler)
+    def push(self, handler, is_first_chunk=True):
+        index = 0 if is_first_chunk else 1
+        self._queue[index].append(handler)
 
     def pop(self):
         assert self.size()
-        while self._queue:
-            self._cur_backward_chunk = self._queue.popleft()
+        while self._backward_chunk_order:
+            backward_chunk = self._backward_chunk_order.popleft()
+            self._cur_backward_chunk = self._queue[backward_chunk].popleft()
             if not isinstance(self._cur_backward_chunk, NullChunkOffloadHandler):
                 break
 
     def front(self):
-        if not len(self._queue):
+        from dcu_megatron.training.utils import print_rank_message
+
+        if not len(self._backward_chunk_order):
             return None
-        for chunk_handler in self._queue:
+
+        backward_chunk_index = [0, 0]
+        for backward_chunk in self._backward_chunk_order:
+            if not len(self._queue[backward_chunk]):
+                return None
+
+            chunk_handler = self._queue[backward_chunk][backward_chunk_index[backward_chunk]]
             if not isinstance(chunk_handler, NullChunkOffloadHandler):
                 return chunk_handler
+
+            backward_chunk_index[backward_chunk] += 1
+
         return None
 
     def size(self):
-        return len(self._queue)
+        return len(self._backward_chunk_order)
 
-    def reset_chunk_handler(self, num_layer, vp_stage, offload=True, num_dense_layer=0, last_stage_is_loss=False):
-        if vp_stage is None:
-            cur_vpp_rank = 0
-        else:
-            cur_vpp_rank = vp_stage
+    def reset_chunk_handler(
+            self,
+            num_layer,
+            is_first_chunk,
+            offload=True,
+            num_dense_layer=0,
+            last_stage_is_loss=False,
+        ):
+        first_second_chunk = self._first_second_chunk
 
-        if last_stage_is_loss:
-            from megatron.core import parallel_state
-            vpp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
-            # skip the last stage
-            if cur_vpp_rank == vpp_size - 1:
-                return
-            # reduce the vpp size
-            if self._vpp == vpp_size:
-                self._vpp -= 1
-                self._stages = self._stages[:-1]
-
-        first_last_vpp_rank = self._first_last_vpp_rank
-        # rewind
-        if cur_vpp_rank == self._vpp - 1:
-            self.flush()
-        first_last_vpp_rank = first_last_vpp_rank and (cur_vpp_rank == self._vpp - 1)
+        first_second_chunk = first_second_chunk and (not is_first_chunk)
         # If the model chunk contains only the dense layers, initialize a null chunk handler.
         if num_layer <= num_dense_layer:
-            cur_chunk = NullChunkOffloadHandler(num_layer, first_last_vpp_rank, offload)
+            cur_chunk = NullChunkOffloadHandler(num_layer, first_second_chunk, offload, is_first_chunk=is_first_chunk)
         else:
-            cur_chunk = ChunkOffloadHandler(num_layer, first_last_vpp_rank, offload)
+            cur_chunk = ChunkOffloadHandler(num_layer, first_second_chunk, offload, is_first_chunk=is_first_chunk)
         # save for latter push
-        self._stages[cur_vpp_rank].append(cur_chunk)
-        if cur_vpp_rank == self._vpp - 1:
-            self._first_last_vpp_rank = False
-            self.push(cur_chunk)
-            self.flush()
+        if first_second_chunk:
+            self._first_second_chunk = False
+        self.push(cur_chunk, is_first_chunk=is_first_chunk)
         self._cur_forward_chunk = cur_chunk
-        cur_chunk.vpp_rank = cur_vpp_rank
 
     def set_last_layer(self, is_last_layer):
         self._cur_forward_chunk.is_last_layer = is_last_layer
@@ -159,7 +155,7 @@ class PipelineOffloadManager:
 
     def __enter__(self):
         self.OFFLOAD_MGR
-        self._inside_context = True
+        self.inside_context = True
 
         if not isinstance(self.cur_forward_chunk(), NullChunkOffloadHandler):
             torch._C._autograd._push_saved_tensors_default_hooks(
@@ -167,32 +163,17 @@ class PipelineOffloadManager:
             )
 
     def __exit__(self, *args: Any):
-        self._inside_context = False
+        self.inside_context = False
         if not isinstance(self.cur_forward_chunk(), NullChunkOffloadHandler):
             torch._C._autograd._pop_saved_tensors_default_hooks()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        assert self._inside_context
+        assert self.inside_context
         return self.cur_forward_chunk().tensor_push(tensor)
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
         """get hook"""
         return self.cur_backward_chunk().tensor_pop(saved_state)
-
-
-class TECpuOffloadContextManager:
-    """A reusable context manager for switch vpp stage"""
-
-    def __init__(self, cpu_offloading):
-        self.cpu_offloading = cpu_offloading
-
-    def __enter__(self):
-        self.origin_cpu_offloading = te.pytorch.cpu_offload.get_cpu_offloading()
-        te.pytorch.cpu_offload.set_cpu_offloading(self.cpu_offloading)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        te.pytorch.cpu_offload.set_cpu_offloading(self.origin_cpu_offloading)
 
 
 class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
@@ -226,7 +207,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
         return cpu_backup.to(dev, non_blocking=non_blocking)
 
-    def __init__(self, num_layer, is_first_last_vpp_chunk, offload=True):
+    def __init__(self, num_layer, is_first_second_chunk, offload=True, is_first_chunk=True):
         self._num_layers = num_layer
         # Data Structure to maintain reference to activation tensors
         self._tensor_tag_to_state = {}
@@ -235,7 +216,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         self.float8_transpose_cache_valid = {}
         # Tracking the number of layers offloaded
         # self._offloaded_group_count = 0
-        self._is_first_last_vpp_chunk = is_first_last_vpp_chunk
+        self._is_first_second_chunk = is_first_second_chunk
 
         self._offloaded_group_index = 0
         self._groups_to_offload = []
@@ -257,7 +238,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
 
     def is_first_last_layer(self):
         """Do not offload the last layer of the last pp stage."""
-        return self._is_first_last_vpp_chunk and self.is_last_layer
+        return self._is_first_second_chunk and self.is_last_layer
 
     def tensor_push(self, tensor):
         def tensor_offloading_checker(device_tensor):
@@ -417,7 +398,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         """Pre-reload the last layer of the next model chunk."""
         if not self.do_offload:
             return
-        assert not self._is_first_last_vpp_chunk
+        assert not self._is_first_second_chunk
 
         if len(self._groups_to_reload) > 0:
             if self.bulk_reload_group(self._groups_to_reload[-1]):
@@ -431,7 +412,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
         if self.is_first_last_layer():
             return False
 
-        # if next backward chunk is this chunk (for last pp stage)
+        # if next backward chunk is this chunk
         next_backward_chunk = PipelineOffloadManager.get_instance().get_instance().front()
         if next_backward_chunk is not None and next_backward_chunk is self:
             if self.is_last_layer:
@@ -476,7 +457,7 @@ class ChunkOffloadHandler(AsyncDoubleBufferGroupOffloadHandler):
                 next_backward_chunk.pre_reload_last_layer()
 
     def on_group_commit_backward(self, name):
-        """Prepare for reloadingthe next group of tensors."""
+        """Prepare for reloading the next group of tensors."""
         cur_backward_chunk = PipelineOffloadManager.get_instance().cur_backward_chunk()
         if not cur_backward_chunk is self:
             PipelineOffloadManager.get_instance().pop()

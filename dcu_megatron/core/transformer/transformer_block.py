@@ -14,7 +14,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
 from megatron.core.transformer.moe.moe_layer import MoELayer
 
-from dcu_megatron.core.transformer.cpu_offload import PipelineOffloadManager
+from dcu_megatron.core.transformer import PipelineOffloadManager
 
 
 def transformer_block_init_wrapper(fn):

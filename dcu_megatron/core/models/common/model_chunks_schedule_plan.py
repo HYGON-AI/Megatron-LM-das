@@ -15,7 +15,7 @@ from dcu_megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
-from dcu_megatron.core.transformer.cpu_offload import PipelineOffloadManager
+from dcu_megatron.core.transformer import PipelineOffloadManager
 
 
 class ModelChunkState:

@@ -2,7 +2,7 @@ import contextlib
 
 from megatron.core.utils import deprecate_inference_params
 
-from dcu_megatron.core.transformer.cpu_offload import (
+from dcu_megatron.core.transformer import (
     PipelineOffloadManager,
     group_prefetch_offload_start,
     group_prefetch_offload_commit,
