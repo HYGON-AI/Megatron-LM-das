@@ -5,7 +5,7 @@ if sys.version_info < (3,):
     raise Exception("Python 2 is not supported by dcu-megatron.")
 
 __description__ = 'dcu-megatron of Sugon'
-__version__ = '0.12.0'
+__version__ = 'core_v0.13.0+das.opt1.dtk25042'
 __author__ = 'Sugon'
 __long_description__ = 'MindSpeed for LLMs of Ascend'
 __keywords__ = 'dcu-megatron, language, deep learning, NLP'
