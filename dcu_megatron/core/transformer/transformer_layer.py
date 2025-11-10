@@ -16,6 +16,7 @@ from megatron.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
+from megatron.core.transformer.transformer_layer import make_viewless_tensor
 
 from dcu_megatron.core.transformer import (
     PipelineOffloadManager,
@@ -356,7 +357,7 @@ class TransformerLayer():
 
         if self.offload_mlp_norm:
             hidden_states, = group_prefetch_offload_commit(
-                input_layernorm_output,
+                pre_mlp_layernorm_output,
                 name="mlp_norm",
                 release_tensors=[hidden_states],
                 delay_release_module="mlp_norm",

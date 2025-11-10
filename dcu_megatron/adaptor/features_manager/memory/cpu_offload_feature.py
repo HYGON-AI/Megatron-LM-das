@@ -39,7 +39,7 @@ class CPUOffloadFeature(AbstractFeature):
                 raise ValueError(f"schedule_method should be dualpipev or interleaved_1f1b")
 
     def register_patches(self, patch_manager, args):
-        from dcu_megatron.core.models.gpt.gpt_model import gpt_model_forward_wrapper, GPTModel
+        from dcu_megatron.core.models.gpt.gpt_model import GPTModel
         from dcu_megatron.core.transformer.attention import Attention
         from dcu_megatron.core.transformer.multi_latent_attention import MultiLatentAttention
         from dcu_megatron.core.transformer.moe.experts import TEGroupedMLP
@@ -48,9 +48,6 @@ class CPUOffloadFeature(AbstractFeature):
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
         from dcu_megatron.core.extensions.transformer_engine import te_module_init_wrapper
 
-        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.forward',
-                                     gpt_model_forward_wrapper,
-                                     apply_wrapper=True)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.initialize_model_chunk_offload_handler',
                                      GPTModel.initialize_model_chunk_offload_handler,
                                      create_dummy=True)

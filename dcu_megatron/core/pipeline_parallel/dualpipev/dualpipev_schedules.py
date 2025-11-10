@@ -6,6 +6,7 @@ import torch
 from megatron.core import parallel_state
 from megatron.training import get_args
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
+from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.utils import (
     get_attr_wrapped_model,
     get_model_config,
@@ -25,6 +26,7 @@ from ..combined_1f1b import forward_backward_step
 from ..utils import set_streams
 from dcu_megatron.core.parallel_state import set_dualpipe_chunk
 from dcu_megatron.core.transformer import PipelineOffloadManager
+from dcu_megatron.core.models.common.language_module.language_module import set_shared_embedding_from_dual_chunk
 
 
 # Types
@@ -485,24 +487,6 @@ def forward_step_no_model_graph(
     return [output_tensor], num_tokens
 
 
-shared_embedding = None
-
-
-def get_shared_embedding_from_dual_chunk():
-    assert shared_embedding is not None
-    return shared_embedding
-
-
-def set_shared_embedding_from_dual_chunk(model1, model2):
-    global shared_embedding
-    if shared_embedding is not None:
-        return
-    if model1.module.module.pre_process:
-        shared_embedding = model1.module.module.embedding.word_embeddings.weight
-    elif model2.module.module.pre_process:
-        shared_embedding = model2.module.module.embedding.word_embeddings.weight
-
-
 def forward_backward_pipelining_with_cutinhalf(
     *,
     forward_step_func,
@@ -517,11 +501,9 @@ def forward_backward_pipelining_with_cutinhalf(
     first_val_step: bool = None,
     adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
 ):
-    args = get_args()
-    args.moe_fb_overlap = True
-    args.dualpipe_no_dw_detach = True
+    if parallel_state.get_pipeline_model_parallel_rank() == 0:
+        set_shared_embedding_from_dual_chunk(model[0], model[1])
 
-    set_shared_embedding_from_dual_chunk(model[0], model[1])
     assert (
         isinstance(model, list) and len(model) == 2
     ), 'Dualpipe Schedule expects two model chunks'
@@ -822,6 +804,7 @@ def forward_backward_pipelining_with_cutinhalf(
     input_tensor, _ = recv_forward(tensor_shape, config, master_chunk_id)
     input_tensors[master_chunk_id].append(input_tensor)
     is_slave_only = False
+
     for _ in range(schedule['warmup'][rank]):
         wait_comm_handle(fwd_wait_recv_handles[master_chunk_id])
 
@@ -960,7 +943,6 @@ def forward_backward_pipelining_with_cutinhalf(
     if not forward_only:
         num_overlap_steps += schedule['interleaved_backward'][rank]
     for step_id in range(num_overlap_steps):
-        # print_rank_0(f"num_overlap_steps: {step_id}")
         only_bwd = False
         if cur_fwd_chunk_microbatch[fwd_model_chunk_id] == num_chunk_max_microbatch[fwd_model_chunk_id]:
             only_bwd = True

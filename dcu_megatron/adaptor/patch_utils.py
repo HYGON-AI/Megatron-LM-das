@@ -78,6 +78,9 @@ class Patch:
             apply_wrapper
             or (hasattr(new_func_or_cls, '__name__') and new_func_or_cls.__name__.endswith(('wrapper', 'decorator')))
         ):
+            for wrapper in self.wrappers:
+                if id(wrapper) == id(new_func_or_cls):
+                    raise RuntimeError(f"wrapper {getattr(new_func_or_cls, '__name__')} has already been applied")
             self.wrappers.append(new_func_or_cls)
         else:
             if (

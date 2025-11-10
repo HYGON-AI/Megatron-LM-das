@@ -352,12 +352,12 @@ class Attention():
         nvtx_range_push(suffix="linear_proj")
 
         offload_context = contextlib.nullcontext()
-        if self.offload_attn_proj:
+        if self.offload_attn_proj and self.training:
             core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
             offload_context = PipelineOffloadManager.get_instance()
         with offload_context:
             output, bias = self.linear_proj(core_attn_out)
-        if self.offload_attn_proj:
+        if self.offload_attn_proj and self.training:
             output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
             offload_context = contextlib.nullcontext()
 
@@ -646,12 +646,12 @@ class Attention():
 
         nvtx_range_push(suffix="linear_proj")
         offload_context = contextlib.nullcontext()
-        if self.offload_attn_proj:
+        if self.offload_attn_proj and self.training:
             core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
             offload_context = PipelineOffloadManager.get_instance()
         with offload_context:
             output, bias = self.linear_proj(core_attn_out)
-        if self.offload_attn_proj:
+        if self.offload_attn_proj and self.training:
             output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
             offload_context = contextlib.nullcontext()
         nvtx_range_pop(suffix="linear_proj")
@@ -666,12 +666,12 @@ class SelfAttention:
         """
         # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
         offload_context = contextlib.nullcontext()
-        if self.offload_qkv_linear:
+        if self.offload_qkv_linear and self.training:
             hidden_states = group_prefetch_offload_start(hidden_states, name="qkv_linear")
             offload_context = PipelineOffloadManager.get_instance()
         with offload_context:
             mixed_qkv, _ = self.linear_qkv(hidden_states)
-        if self.offload_qkv_linear:
+        if self.offload_qkv_linear and self.training:
             delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
             mixed_qkv, = group_prefetch_offload_commit(
                 mixed_qkv,

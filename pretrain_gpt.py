@@ -2,7 +2,6 @@
 
 """Pretrain and SFT GPT."""
 
-import os
 import torch
 
 from functools import partial
@@ -10,7 +9,6 @@ from typing import List, Optional, Tuple, Union
 from megatron.core import parallel_state
 from megatron.training import get_args
 from megatron.training import inprocess_restart
-from megatron.training import print_rank_0
 from megatron.training import get_timers
 from megatron.training import get_tokenizer
 from megatron.core.enums import ModelType
@@ -55,6 +53,8 @@ except ImportError:
     has_nvidia_modelopt = False
 
 from dcu_megatron import megatron_adaptor
+from dcu_megatron.training.utils import print_rank_message
+from dcu_megatron.core.parallel_state import get_parallel_group_ranks
 
 stimer = StragglerDetector()
 
@@ -113,7 +113,7 @@ def model_provider(
     if has_nvidia_modelopt and modelopt_args_enabled(args):  # [ModelOpt]
         return model_provider_modelopt(pre_process, post_process)
 
-    if bool(int(os.getenv("USE_FLUX_OVERLAP", "0"))):
+    if getattr(args, "parallel_linear_impl", None) == "flux":
         assert args.transformer_impl == "transformer_engine"
     use_te = args.transformer_impl == "transformer_engine"
 
@@ -197,7 +197,8 @@ def model_provider(
             mtp_block_spec=mtp_block_spec,
             vp_stage=vp_stage,
         )
-        print_rank_0(model)
+
+        print_rank_message(model, rank_id=get_parallel_group_ranks()["PIPELINE_MODEL_PARALLEL_GROUP"][0])
 
     return model
 
@@ -208,6 +209,12 @@ def get_batch(data_iterator):
     # TODO: this is pretty hacky, find a better way
     if (not parallel_state.is_pipeline_first_stage(ignore_virtual=True)) and (
         not parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+    ):
+        return None, None, None, None, None
+
+    if (
+        get_args().schedule_method == "dualpipev"
+        and parallel_state.is_pipeline_last_stage(ignore_virtual=True)
     ):
         return None, None, None, None, None
 

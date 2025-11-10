@@ -9,6 +9,7 @@ except ImportError:
     raise ImportError("flux is NOT installed")
 
 import torch
+from torch.nn.parameter import Parameter
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
@@ -17,6 +18,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from megatron.core.utils import (
+    get_pg_rank,
     get_pg_size,
     prepare_input_tensors_for_wgrad_compute,
     get_tensor_model_parallel_group_if_none,
@@ -37,7 +39,11 @@ from megatron.core.tensor_parallel.layers import (
     custom_bwd,
     dist_all_gather_func,
     dist_reduce_scatter_func,
+    _initialize_affine_weight_cpu,
+    _initialize_affine_weight_gpu,
 )
+from megatron.core.tensor_parallel import VocabParallelEmbedding as MegatronCoreVocabParallelEmbedding
+from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.training import get_args
 
 from dcu_megatron.core.utils import is_flux_min_version
@@ -53,6 +59,70 @@ try:
     HAVE_TE = True
 except ImportError:
     HAVE_TE = False
+
+
+class VocabParallelEmbedding:
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
+        init_method: Callable,
+        reduce_scatter_embeddings: bool = False,
+        config: ModelParallelConfig,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ):
+        super(MegatronCoreVocabParallelEmbedding, self).__init__()
+        # Keep the input dimensions.
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.reduce_scatter_embeddings = reduce_scatter_embeddings
+        self.tp_group = tp_group
+
+        self.tp_group = get_tensor_model_parallel_group_if_none(self.tp_group)
+
+        (self.vocab_start_index, self.vocab_end_index) = (
+            VocabUtility.vocab_range_from_global_vocab_size(
+                self.num_embeddings, get_pg_rank(self.tp_group), get_pg_size(self.tp_group)
+            )
+        )
+        self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
+        self.deterministic_mode = config.deterministic_mode
+
+        # Allocate weights and initialize.
+        args = get_args()
+        if getattr(args, "mtp_process", False) and args.schedule_method == "dualpipev":
+            self.weight = None
+        else:
+            if config.use_cpu_initialization:
+                self.weight = Parameter(
+                    torch.empty(
+                        self.num_embeddings_per_partition, self.embedding_dim, dtype=config.params_dtype
+                    )
+                )
+                if config.perform_initialization:
+                    _initialize_affine_weight_cpu(
+                        self.weight,
+                        self.num_embeddings,
+                        self.embedding_dim,
+                        self.num_embeddings_per_partition,
+                        0,
+                        init_method,
+                        params_dtype=config.params_dtype,
+                        rank=get_pg_rank(self.tp_group),
+                        world_size=get_pg_size(self.tp_group),
+                    )
+            else:
+                self.weight = Parameter(
+                    torch.empty(
+                        self.num_embeddings_per_partition,
+                        self.embedding_dim,
+                        device=torch.cuda.current_device(),
+                        dtype=config.params_dtype,
+                    )
+                )
+                if config.perform_initialization:
+                    _initialize_affine_weight_gpu(self.weight, init_method, partition_dim=0, stride=1)
 
 
 def get_tensor_model_parallel_node_size(group=None):

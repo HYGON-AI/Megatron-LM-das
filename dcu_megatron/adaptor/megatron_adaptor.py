@@ -197,11 +197,13 @@ class CoreAdaptation(MegatronAdaptationABC):
         pass
 
     def patch_core_models(self):
-        from ..core.models.gpt.gpt_model import gpt_model_init_wrapper, gpt_model_postprocess
+        from ..core.models.gpt.gpt_model import gpt_model_postprocess, gpt_model_forward_wrapper, GPTModel
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
-                                    gpt_model_init_wrapper,
+                                    GPTModel.__init__)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
+                                    gpt_model_forward_wrapper,
                                     apply_wrapper=True)
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',

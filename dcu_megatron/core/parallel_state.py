@@ -82,6 +82,11 @@ def create_group(
     return group
 
 
+def get_parallel_group_ranks():
+    global PARALLEL_GROUP_RANKS_MAP
+    return PARALLEL_GROUP_RANKS_MAP
+
+
 def initialize_model_parallel_wrapper(fn):
 
     @wraps(fn)

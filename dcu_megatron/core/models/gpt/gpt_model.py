@@ -1,7 +1,6 @@
-import os
-
+from copy import deepcopy
 from collections import OrderedDict
-from typing import Optional
+from typing import Literal, Optional
 from functools import wraps
 
 from torch import Tensor
@@ -10,43 +9,22 @@ from megatron.training import get_args
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core import tensor_parallel
+from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
+from megatron.core.models.common.embeddings.rotary_pos_embedding import (
+    MultimodalRotaryEmbedding,
+    RotaryEmbedding,
+)
+from megatron.core.quantization.utils import get_quant_config_or_none
+from megatron.core.transformer.enums import ModelType
+from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
+from megatron.core.transformer.spec_utils import ModuleSpec
+from megatron.core.transformer.transformer_block import TransformerBlock
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.models.gpt.gpt_model import GPTModel as MegatronCoreGPTModel
 
 from dcu_megatron.core.transformer import PipelineOffloadManager
-
-
-def gpt_model_init_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        fn(self, *args, **kwargs)
-
-        megatron_args = get_args()
-        self.dualpipev_first_chunk = getattr(megatron_args, 'dualpipev_first_chunk', True)
-
-        # Output
-        if (
-            (self.post_process or self.mtp_process)
-            and int(os.getenv("USE_FLUX_OVERLAP", "0"))
-        ):
-            from dcu_megatron.core.tensor_parallel.layers import FluxColumnParallelLinear
-
-            self.output_layer = FluxColumnParallelLinear(
-                self.config.hidden_size,
-                self.vocab_size,
-                config=self.config,
-                init_method=self.config.init_method,
-                bias=False,
-                skip_bias_add=False,
-                gather_output=not self.parallel_output,
-                skip_weight_param_allocation=self.pre_process
-                and self.share_embeddings_and_output_weights,
-                embedding_activation_buffer=self.embedding_activation_buffer,
-                grad_output_buffer=self.grad_output_buffer,
-            )
-
-            if self.pre_process or self.post_process:
-                self.setup_embeddings_and_output_layer()
-
-    return wrapper
+from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
 
 
 def gpt_model_postprocess(
@@ -153,8 +131,15 @@ def gpt_model_postprocess(
 def gpt_model_forward_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
-        if self.config.fine_grained_activation_offloading:
+        if self.training and self.config.fine_grained_activation_offloading:
             self.initialize_model_chunk_offload_handler()
+
+        if (
+            self.config.schedule_method == "dualpipev"
+            and not self.dualpipev_first_chunk
+            and self.mtp_process
+        ):
+            self.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
         return fn(self, *args, **kwargs)
 
@@ -165,6 +150,195 @@ class GPTModel:
     """
     patch megatron GPTModel
     """
+    # (1) introduce an attribute dualpipev_first_chunk. (2) support flux. (3) remove embedding when using dualpipev
+    def __init__(
+        self,
+        config: TransformerConfig,
+        transformer_layer_spec: ModuleSpec,
+        vocab_size: int,
+        max_sequence_length: int,
+        pre_process: bool = True,
+        post_process: bool = True,
+        fp16_lm_cross_entropy: bool = False,
+        parallel_output: bool = True,
+        share_embeddings_and_output_weights: bool = False,
+        position_embedding_type: Literal[
+            'learned_absolute', 'rope', 'mrope', 'none'
+        ] = 'learned_absolute',
+        rotary_percent: float = 1.0,
+        rotary_base: int = 10000,
+        rope_scaling: bool = False,
+        rope_scaling_factor: float = 8.0,
+        scatter_embedding_sequence_parallel: bool = True,
+        seq_len_interpolation_factor: Optional[float] = None,
+        mtp_block_spec: Optional[ModuleSpec] = None,
+        vp_stage: Optional[int] = None,
+    ) -> None:
+        super(MegatronCoreGPTModel, self).__init__(config=config)
+
+        if has_config_logger_enabled(config):
+            log_config_to_disk(config, locals(), prefix=type(self).__name__)
+
+        self.transformer_layer_spec = transformer_layer_spec
+        self.vocab_size = vocab_size
+        self.max_sequence_length = max_sequence_length
+        self.pre_process = pre_process
+        self.post_process = post_process
+        self.fp16_lm_cross_entropy = fp16_lm_cross_entropy
+        self.parallel_output = parallel_output
+        self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
+        self.vp_stage = vp_stage
+
+        args = get_args()
+        self.dualpipev_first_chunk = getattr(args, 'dualpipev_first_chunk', True)
+
+        if hasattr(self.config, 'position_embedding_type'):
+            self.position_embedding_type = self.config.position_embedding_type
+        else:
+            self.position_embedding_type = position_embedding_type
+
+        # megatron core pipelining currently depends on model type
+        # TODO: remove this dependency ?
+        self.model_type = ModelType.encoder_or_decoder
+
+        # These 4 attributes are needed for TensorRT-LLM export.
+        self.max_position_embeddings = max_sequence_length
+        self.rotary_percent = rotary_percent
+
+        if hasattr(self.config, 'rotary_base'):
+            self.rotary_base = self.config.rotary_base
+        else:
+            self.rotary_base = rotary_base
+        self.rotary_scaling = rope_scaling
+        self.mtp_block_spec = mtp_block_spec
+        self.mtp_process = mtp_block_spec is not None
+
+        if self.pre_process or self.mtp_process:
+            args.mtp_process = self.mtp_process
+            self.embedding = LanguageModelEmbedding(
+                config=self.config,
+                vocab_size=self.vocab_size,
+                max_sequence_length=self.max_sequence_length,
+                position_embedding_type=position_embedding_type,
+                scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
+            )
+
+        # dualpipev use shared embedding weight
+        skip_embedding_allocation = self.mtp_process and args.schedule_method == 'dualpipev'
+        if skip_embedding_allocation:
+            def remove_shared_embedding_check(self, incompatible_keys):
+                """
+                Remove embedding weight from unexpected keys.
+                """
+                keys = deepcopy(incompatible_keys.unexpected_keys)
+                for key in keys:
+                    if 'embedding.word_embeddings.weight' in key:
+                        incompatible_keys.unexpected_keys.remove(key)
+
+            self.register_load_state_dict_post_hook(remove_shared_embedding_check)
+
+        if self.position_embedding_type == 'rope' and not self.config.multi_latent_attention:
+            self.rotary_pos_emb = RotaryEmbedding(
+                kv_channels=self.config.kv_channels,
+                rotary_percent=rotary_percent,
+                rotary_interleaved=self.config.rotary_interleaved,
+                seq_len_interpolation_factor=seq_len_interpolation_factor,
+                rotary_base=rotary_base,
+                rope_scaling=rope_scaling,
+                rope_scaling_factor=rope_scaling_factor,
+                use_cpu_initialization=self.config.use_cpu_initialization,
+            )
+
+        elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
+            self.rotary_pos_emb = MultimodalRotaryEmbedding(
+                kv_channels=self.config.kv_channels,
+                rotary_percent=rotary_percent,
+                rotary_interleaved=self.config.rotary_interleaved,
+                seq_len_interpolation_factor=seq_len_interpolation_factor,
+                rotary_base=rotary_base,
+            )
+            self.mrope_section = self.config.mrope_section
+            assert (
+                self.mrope_section is not None
+            ), "mrope require mrope_section setting, but we got None from TransformerConfig"
+
+        # Cache for RoPE tensors which do not change between iterations.
+        self.rotary_pos_emb_cache = {}
+
+        # Transformer.
+        self.decoder = TransformerBlock(
+            config=self.config,
+            spec=transformer_layer_spec,
+            pre_process=self.pre_process,
+            post_process=self.post_process,
+            vp_stage=vp_stage,
+        )
+
+        if self.mtp_process:
+            self.mtp = MultiTokenPredictionBlock(
+                config=self.config, spec=self.mtp_block_spec, vp_stage=vp_stage
+            )
+
+        # Output
+        if self.post_process or self.mtp_process:
+
+            if self.config.defer_embedding_wgrad_compute:
+                # The embedding activation buffer preserves a reference to the input activations
+                # of the final embedding projection layer GEMM. It will hold the activations for
+                # all the micro-batches of a global batch for the last pipeline stage. Once we are
+                # done with all the back props for all the microbatches for the last pipeline stage,
+                # it will be in the pipeline flush stage. During this pipeline flush we use the
+                # input activations stored in embedding activation buffer and gradient outputs
+                # stored in gradient buffer to calculate the weight gradients for the embedding
+                # final linear layer.
+                self.embedding_activation_buffer = []
+                self.grad_output_buffer = []
+            else:
+                self.embedding_activation_buffer = None
+                self.grad_output_buffer = None
+
+            if args.parallel_linear_impl == "flux":
+                from dcu_megatron.core.tensor_parallel.layers import FluxColumnParallelLinear
+
+                self.output_layer = FluxColumnParallelLinear(
+                    self.config.hidden_size,
+                    self.vocab_size,
+                    config=self.config,
+                    init_method=self.config.init_method,
+                    bias=False,
+                    skip_bias_add=False,
+                    gather_output=not self.parallel_output,
+                    skip_weight_param_allocation=self.pre_process
+                    and self.share_embeddings_and_output_weights,
+                    embedding_activation_buffer=self.embedding_activation_buffer,
+                    grad_output_buffer=self.grad_output_buffer,
+                )
+            else:
+                self.output_layer = tensor_parallel.ColumnParallelLinear(
+                    config.hidden_size,
+                    self.vocab_size,
+                    config=config,
+                    init_method=config.init_method,
+                    bias=False,
+                    skip_bias_add=False,
+                    gather_output=not self.parallel_output,
+                    skip_weight_param_allocation=self.pre_process
+                    and self.share_embeddings_and_output_weights,
+                    embedding_activation_buffer=self.embedding_activation_buffer,
+                    grad_output_buffer=self.grad_output_buffer,
+                )
+
+        if self.pre_process or self.post_process:
+            self.setup_embeddings_and_output_layer()
+
+        if has_config_logger_enabled(self.config):
+            log_config_to_disk(
+                self.config, self.state_dict(), prefix=f'{type(self).__name__}_init_ckpt'
+            )
+        for name, module in self.named_modules():
+            if hasattr(module, 'finish_init'):
+                quant_config = get_quant_config_or_none(name, self.config.quant_recipe)
+                module.finish_init(quant_config)
 
     def initialize_model_chunk_offload_handler(self):
         args = get_args()
@@ -234,7 +408,7 @@ class GPTModel:
         Returns:
             ModelChunkSchedulePlan: The model chunk schedule plan.
         """
-        if self.config.fine_grained_activation_offloading:
+        if self.training and self.config.fine_grained_activation_offloading:
             self.initialize_model_chunk_offload_handler()
 
         from ..common.model_chunks_schedule_plan import TransformerModelChunkSchedulePlan
@@ -252,5 +426,31 @@ class GPTModel:
             loss_mask,
         )
 
+    def shared_embedding_or_output_weight(self) -> Tensor:
+        """Gets the embedding weight or output logit weights when share input embedding and
+        output weights set to True or when use Multi-Token Prediction (MTP) feature.
+
+        Returns:
+            Tensor: When dualpipe is enabled, return the weights from dual_chunk, otherwise follow the original logic.
+        """
+        if not self.pre_process and self.post_process and get_args().schedules_method == 'dualpipev':
+            return get_shared_embedding_from_dual_chunk()
+
+        if self.pre_process or self.mtp_process:
+            # Multi-Token Prediction (MTP) need both embedding layer and output layer.
+            # So there will be both embedding layer and output layer in the mtp process stage.
+            # In this case, if share_embeddings_and_output_weights is True, the shared weights
+            # will be stored in embedding layer, and output layer will not have any weight.
+            assert hasattr(
+                self, 'embedding'
+            ), f"embedding is needed in this pipeline stage, but it is not initialized."
+            return self.embedding.word_embeddings.weight
+        elif self.post_process:
+            return self.output_layer.weight
+        return None
+
     def backward_dw(self):
         self.decoder.backward_dw()
+
+        if self.mtp_process:
+            self.mtp.backward_dw()

@@ -49,7 +49,7 @@ torch >= 2.6.0
 ## 项目介绍
 本项目通过替换megatron的函数或类，引入新的特性或者实现更好的性能。替换的函数或类注册在dcu_megatron/adaptor/megatron_adaptor.py。
 
-+ 支持函数替换  
++ 支持函数替换
 
 ```
 from ..core.distributed.finalize_model_grads import _allreduce_word_embedding_grads
@@ -67,7 +67,7 @@ from ..core.transformer.transformer_config import TransformerConfig, MLATransfor
 MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
                             TransformerConfig)
 MegatronAdaptation.register('megatron.core.transformer.transformer_config.MLATransformerConfig',
-                            MLATransformerConfig)                   
+                            MLATransformerConfig)
 ```
 以上代码将megatron的TransformerConfig和MLATransformerConfig替换为自定义类型。
 

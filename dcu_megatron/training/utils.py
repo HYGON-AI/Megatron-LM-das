@@ -1,16 +1,22 @@
+from typing import Union
+
 import torch
 
 from megatron.training import get_args
 from megatron.core import mpu
 
 
-def print_rank_message(message, rank_id=0):
+def print_rank_message(message, rank_id: Union[int, set, list]):
     """If distributed is initialized, print only on rank specified by rank_id."""
+    if isinstance(rank_id, int):
+        rank_id = {rank_id}
+    rank_id = set(rank_id)
     if torch.distributed.is_initialized():
-        if torch.distributed.get_rank() == rank_id:
-            print(f"[rank {rank_id}] {message}", flush=True)
+        current_rank = torch.distributed.get_rank()
+        if not rank_id or current_rank in rank_id:
+            print(f"[rank {current_rank}] {message}", flush=True)
     else:
-        print(f"[rank {rank_id}] {message}", flush=True)
+        print(message, flush=True)
 
 
 def get_batch_on_this_tp_rank(data_iterator):
