@@ -8,6 +8,8 @@ do
         data_path=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
+    elif [[ $para == --launch_with_binding* ]];then
+        launch_with_binding=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
@@ -38,19 +40,17 @@ LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-
 # default env
 export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10
-export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
-export NVTE_NO_PIPELINE_OVERLAP=1
+export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
-#增加编译缓存
-export cache_size_limit=64
+export GROUPED_GEMM_BatchLinear=1
+export NVTE_MOE_BATCHCOUNT=16 #num_experts/ep
+export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -63,7 +63,8 @@ GPT_MODEL_ARGS=(
     --seq-length 4096
     --num-layers 94
     --hidden-size 4096
-    --ffn-hidden-size 22016 
+    --ffn-hidden-size 12288 
+    --moe-ffn-hidden-size 1536
     --num-attention-heads 64
     --max-position-embeddings 262144
     --num-query-groups 4
@@ -71,13 +72,14 @@ GPT_MODEL_ARGS=(
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
+    --kv-channels 128
 )
 
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 256
+    --global-batch-size 128
     --train-iters 50
     --weight-decay 0.1 
     --adam-beta1 0.9 
@@ -89,16 +91,20 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --use-qk-norm
+    --qk-layernorm
     --rotary-base 5000000
-    --lr 3.0e-5 
+    --lr 1.0e-6 
     --lr-decay-style cosine 
-    --min-lr 3.0e-6
+    --min-lr 1.0e-8
     --lr-warmup-iters 1
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
-    --use-flash-attn
+    --overlap-param-gather
+    --use-precision-aware-optimizer
+    --main-grads-dtype bf16
+    --main-params-dtype fp16
+    --enable-cuda-graph
 )
 
 MOE_ARGS=(
@@ -107,16 +113,23 @@ MOE_ARGS=(
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-3
     --moe-token-dispatcher-type alltoall
+    --moe-expert-capacity-factor 1
+    --moe-pad-expert-input-to-capacity
     --moe-permute-fusion
     --moe-grouped-gemm
 )
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 4
-    --pipeline-model-parallel-size 2
-    --context-parallel-size 1
+    --pipeline-model-parallel-size 16
+    --expert-model-parallel-size 8
+    --expert-tensor-parallel-size 1
+    --context-parallel-size 2
     --use-distributed-optimizer 
     --sequence-parallel
+    --decoder-first-pipeline-num-layers 5
+    --decoder-last-pipeline-num-layers 5
+    
 )
 
 DATA_ARGS=(
@@ -139,10 +152,10 @@ EVAL_AND_LOGGING_ARGS=(
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp4-pp2-cp1
+    --profile-dir torch_prof_qwen3_235b_tp4_pp16
     --use-pytorch-profiler
 )
 
@@ -156,6 +169,7 @@ HIP_PROFIE_ARGS=(
 
 APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
+    ${MOE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${DATA_ARGS[@]} \
