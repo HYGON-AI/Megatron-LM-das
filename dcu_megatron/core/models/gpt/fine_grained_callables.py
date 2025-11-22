@@ -14,6 +14,7 @@ from megatron.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
+from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -623,9 +624,26 @@ def build_transformer_layer_callables(layer: TransformerLayer):
     forward_funcs = [attn_qkv_func, core_attn_func, attn_proj_func, dispatch_func, mlp_func, combine_func, None]
     attn_proj_dw_funcs = [layer.self_attention.linear_proj]
     if is_moe and layer.mlp.use_shared_expert and not layer.mlp.shared_expert_overlap:
-        attn_proj_dw_funcs.append(layer.mlp.experts.shared_experts)
+        attn_proj_dw_funcs.append(layer.mlp.shared_experts)
+
+    if isinstance(layer.self_attention, MLASelfAttention):
+        attn_qkv_dw_funcs = [
+            layer.self_attention.linear_kv_up_proj,
+            layer.self_attention.linear_kv_down_proj,
+        ]
+        if layer.config.q_lora_rank is None:
+            attn_qkv_dw_funcs.append(
+                layer.self_attention.linear_q_proj
+            )
+        else:
+            attn_qkv_dw_funcs.extend([
+                layer.self_attention.linear_q_down_proj,
+                layer.self_attention.linear_q_up_proj
+            ])
+    else:
+        attn_qkv_dw_funcs = layer.self_attention.linear_qkv
     backward_dw = {
-        "attn_qkv": layer.self_attention.linear_qkv,
+        "attn_qkv": attn_qkv_dw_funcs,
         "attn_proj": attn_proj_dw_funcs,
         "mlp": layer.mlp.experts if is_moe else None
     }

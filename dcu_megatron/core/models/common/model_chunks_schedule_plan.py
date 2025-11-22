@@ -774,8 +774,11 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 with b_context:
                     for i in range(b_num_layers):
                         b_layer = b_schedule_plan.get_layer(i)
-                        b_layer.attn_qkv.backward_dw()
-                        b_layer.attn_proj.backward_dw()
+                        if get_args().overlap_moe_expert_parallel_comm_impl == "megatron":
+                            b_layer.attn.backward_dw()
+                        else:
+                            b_layer.attn_qkv.backward_dw()
+                            b_layer.attn_proj.backward_dw()
                         b_layer.mlp.backward_dw()
             return f_input, chunk_backward_dw
 

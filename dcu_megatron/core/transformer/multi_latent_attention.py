@@ -191,7 +191,7 @@ class MLASelfAttention():
         # Adjust key, value for inference
         # ===================================================
         # rotary_pos_emb = None
-        query, key, value, _, attn_mask_type = self._adjust_key_value_for_inference(
+        query, key, value, _, attn_mask_type, _ = self._adjust_key_value_for_inference(
             inference_context, query, key, value, rotary_pos_emb=None
         )
 
