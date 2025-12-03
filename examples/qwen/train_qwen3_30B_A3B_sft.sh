@@ -86,7 +86,7 @@ TRAINING_ARGS=(
     --hidden-dropout 0
     --swiglu
     --qk-layernorm
-    --rotary-base 10000000
+    --rotary-base 1000000
     --lr 1.0e-5
     --lr-decay-style cosine 
     --min-lr 1.0e-6
@@ -114,7 +114,6 @@ MOE_ARGS=(
     --moe-pad-expert-input-to-capacity
     --moe-permute-fusion
     --moe-grouped-gemm
-    --moe-router-force-load-balancing
     --moe-layer-freq '([1]*48)'
 )
 
