@@ -158,7 +158,8 @@ def _add_extra_tokenizer_args(parser):
                                 'TikTokenizer',
                                 'MultimodalTokenizer',
                                 'NullTokenizer',
-                                'DeepSeekV2Tokenizer'],
+                                'DeepSeekV2Tokenizer',
+                                'SFTTokenizer'],
                        help='What type of tokenizer to use.')
     return parser
 

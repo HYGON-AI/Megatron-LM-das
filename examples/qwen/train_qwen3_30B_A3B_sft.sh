@@ -44,9 +44,6 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-
-export GROUPED_GEMM_BatchLinear=1
-export NVTE_MOE_BATCHCOUNT=16
 export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
@@ -77,11 +74,11 @@ TRAINING_ARGS=(
     --use-mcore-models 
     --micro-batch-size 1
     --global-batch-size 128
-    --train-iters 10
-    --weight-decay 0.1 
+    --train-iters 100000
+    --weight-decay 0.01 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
-    --init-method-std 0.006 
+    --init-method-std 0.008 
     --clip-grad 1.0 
     --bf16
     --disable-bias-linear
@@ -90,11 +87,12 @@ TRAINING_ARGS=(
     --swiglu
     --qk-layernorm
     --rotary-base 10000000
-    --lr 1.0e-6 
+    --lr 1.0e-5
     --lr-decay-style cosine 
-    --min-lr 1.0e-8
-    --lr-warmup-iters 1
-    --ckpt-format torch
+    --min-lr 1.0e-6
+    --lr-warmup-iters 100
+    --lr-decay-iters 99900
+    --ckpt-format torch_dist
     --ddp-average-in-collective
     --overlap-grad-reduce
     --overlap-param-gather
@@ -103,6 +101,7 @@ TRAINING_ARGS=(
     --main-params-dtype fp16
     --enable-cuda-graph
     --te-rng-tracker
+    --disable-msc
 )
 
 MOE_ARGS=(
@@ -115,34 +114,41 @@ MOE_ARGS=(
     --moe-pad-expert-input-to-capacity
     --moe-permute-fusion
     --moe-grouped-gemm
+    --moe-router-force-load-balancing
+    --moe-layer-freq '([1]*48)'
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 4
+    --tensor-model-parallel-size 4
+    --pipeline-model-parallel-size 2
     --expert-model-parallel-size 8
     --expert-tensor-parallel-size 1
-    --context-parallel-size 2
+    --context-parallel-size 1
     --use-distributed-optimizer 
     --sequence-parallel
 )
 
 DATA_ARGS=(
-    --tokenizer-type HuggingFaceTokenizer
+    --tokenizer-type SFTTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    --data-path ${DATA_PATH} 
+    --data-path ${DATA_PATH}
     --split 949,50,1
+    --sft
 )
 
 EVAL_AND_LOGGING_ARGS=(
     --log-throughput
-    --eval-iters 5
+    --eval-iters 10
     --log-interval 1
-    --save-interval 1000 
-    --eval-interval 1000 
-    # --save $CHECKPOINT_PATH
-    # --load $CHECKPOINT_PATH
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
+    --save-interval 1000000 
+    --eval-interval 10000
+    --save Qwen3_30B_A3B_sft
+    --load $CHECKPOINT_PATH
+    --ckpt-fully-parallel-load
+    --no-load-optim
+    --no-load-rng
+    --no-save-optim
+    --tensorboard-dir ./tensorboard
 )
 
 TORCH_PROFIE_ARGS=(
@@ -150,7 +156,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 5
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_qwen3_30B_A3B_4nodes_tp1-pp4-ep8-etp1-cp2
+    --profile-dir torch_prof_qwen3_30B_A3B_tp4-pp2-ep8-etp1-cp1_sft
     --use-pytorch-profiler
 )
 

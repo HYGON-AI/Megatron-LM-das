@@ -2,6 +2,8 @@ for para in $*
 do
     if [[ $para == --profiling* ]];then
         profiling=${para#*=}
+    elif [[ $para == --train_type* ]];then
+        train_type=${para#*=}
     fi
 done
 
@@ -22,6 +24,12 @@ GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
 HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
 PORT="25900"
 
+if [ ${train_type} = "pretrain" ]; then
+    shell=train_qwen3_30B_A3B_pretrain.sh
+elif [ ${train_type} = "sft" ]; then
+    shell=train_qwen3_30B_A3B_sft.sh
+fi
+
 # Runs Qwen3 30B A3B model
 source ${NCCL_ENV}
 mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
@@ -31,7 +39,7 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_qwen3_30B_A3B_$((${GPUS} / 8))nodes.sh \
+                    ${shell} \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \
