@@ -17,12 +17,12 @@ def transformer_config_post_init_wrapper(post_init_func):
         recompute_router  = "router"  in self.recompute_modules
         self.recompute_modules.discard("experts")
         self.recompute_modules.discard("router")
+        self.recompute_modules = list(self.recompute_modules)
         post_init_func(self)
         if recompute_experts:
-            self.recompute_modules.add("experts")
+            self.recompute_modules.append("experts")
         if recompute_router:
-            self.recompute_modules.add("router")
-        self.recompute_modules = list(self.recompute_modules)
+            self.recompute_modules.append("router")
 
         args = get_args()
         fields = []
