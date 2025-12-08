@@ -128,7 +128,6 @@ class _ParamAndGradBucketGroup:
             self.communication_stream = None
 
         self.reset()
-        self.args = get_args()
         self.param_gather_handle = None
         self.param_gather_dispatched = False
         self.grad_reduce_handle = None
@@ -276,6 +275,7 @@ class _ParamAndGradBucketGroup:
         communication call. When ddp_config.overlap_grad_reduce is set to False, makes
         synchronous call.
         """
+        args = get_args()
         assert (
             self.grad_reduce_handle is None
         ), 'Should not have multiple communication calls outstanding at once'
@@ -329,14 +329,14 @@ class _ParamAndGradBucketGroup:
         else:
             communication_group = self.data_parallel_group
 
-        if self.args.enable_dynamic_grad_comp and self.args.compressor is not None:
+        if args.enable_dynamic_grad_comp and args.compressor is not None:
             # Coalesce communication kernels across buckets in the bucket group.
             compressed_data_list = []
-            if self.args.overlap_grad_reduce and self.args.all_reduce_time:
+            if args.overlap_grad_reduce and args.all_reduce_time:
                 self.timers('DP_time', log_level=0).start()
             with stream_context:
                 for bucket in self.buckets:
-                    for_P, for_Q, metadata = self.args.compressor.compress_bucket(bucket)
+                    for_P, for_Q, metadata = args.compressor.compress_bucket(bucket)
                     compressed_data_list.append((bucket, for_P, for_Q, metadata))
 
             with _coalescing_manager(communication_group, async_ops=async_op) as cm:
@@ -347,13 +347,13 @@ class _ParamAndGradBucketGroup:
 
             if not async_op:
                 for bucket, for_P, for_Q, metadata in compressed_data_list:
-                    self.args.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
+                    args.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
             else:
                 self._pending_compressed_data = compressed_data_list
 
         else:
-            if self.args.enable_dynamic_grad_comp:
-                if self.args.overlap_grad_reduce and self.args.all_reduce_time:
+            if args.enable_dynamic_grad_comp:
+                if args.overlap_grad_reduce and args.all_reduce_time:
                     self.timers('DP_time', log_level=0).start()
             with stream_context, _coalescing_manager(communication_group, async_ops=async_op) as cm:
                 for bucket in self.buckets:
@@ -372,8 +372,8 @@ class _ParamAndGradBucketGroup:
                         torch.distributed.all_reduce(
                             bucket.grad_data, op=reduce_op, group=communication_group, async_op=async_op
                         )
-        if self.args.enable_dynamic_grad_comp:
-            if self.args.overlap_grad_reduce and self.args.all_reduce_time:
+        if args.enable_dynamic_grad_comp:
+            if args.overlap_grad_reduce and args.all_reduce_time:
                 self.timers('DP_time').stop()
         # With multiple DistOpt instances, we need to all-reduce across instances.
         if (
@@ -417,6 +417,10 @@ class _ParamAndGradBucketGroup:
         communication call to complete. When ddp_config.overlap_grad_reduce is set to False,
         makes synchronous call.
         """
+        args = get_args()
+        if self.grad_reduce_handle is None:
+            return  # skip empty bucket
+
         self.param_gather_dispatched = False
         # If overlap_grad_reduce is False, start (and finish) synchronous communication call here.
         if not self.ddp_config.overlap_grad_reduce:
@@ -431,14 +435,14 @@ class _ParamAndGradBucketGroup:
             f'Communication call has not been issued for this bucket '
             f'({len(self.params_with_grad)}/{len(self.params)} params have grad available)'
         )
-        if self.args.enable_dynamic_grad_comp:
-            if (self.args.compressor is not None and
+        if args.enable_dynamic_grad_comp:
+            if (args.compressor is not None and
                     hasattr(self, '_pending_compressed_data') and
                     self._pending_compressed_data is not None):
                 self.grad_reduce_handle.wait()
                 self.grad_reduce_handle = None
                 for bucket, for_P, for_Q, metadata in self._pending_compressed_data:
-                    self.args.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
+                    args.compressor.decompress_bucket(bucket, for_P, for_Q, metadata)
             else:
                 self.grad_reduce_handle.wait()
                 self.grad_reduce_handle = None

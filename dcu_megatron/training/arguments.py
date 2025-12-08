@@ -28,6 +28,7 @@ def process_adaptor_args(parser):
     parser = _add_extra_distributed_args(parser)
     parser = _add_extra_tokenizer_args(parser)
     parser = _add_extra_checkpointing_args(parser)
+    parser = _add_extra_vision_args(parser)
 
     for feature in ADAPTOR_FEATURES:
         feature.register_args(parser)
@@ -159,8 +160,36 @@ def _add_extra_tokenizer_args(parser):
                                 'MultimodalTokenizer',
                                 'NullTokenizer',
                                 'DeepSeekV2Tokenizer',
-                                'SFTTokenizer'],
+                                'SFTTokenizer',
+                                'Qwen2VLTokenizer'],
                        help='What type of tokenizer to use.')
+    return parser
+
+
+def _add_extra_vision_args(parser):
+    group = parser.add_argument_group(title='extra vision args')
+    group.add_argument('--freeze-LM', type=bool, default=False,
+                       help='freeze Language Model in VL model')
+    group.add_argument('--freeze-ViT', type=bool, default=False,
+                       help='freeze Vision Model in VL model')
+    group.add_argument("--disable-vision-class-token", action="store_true", default=False,
+                       help="disable_vision_class_token")
+    group.add_argument("--max-padding-length", type=int, default=None,
+                       help="max-padding-length")
+    group.add_argument('--async-tensor-model-parallel-allreduce', action='store_true',
+                       help='Enable async tensor model parallel allreduce (default: False)')
+    group.add_argument("--temporal_patch_size", type=int, default=2,
+                       help="Number of video frames that compose one temporal patch. "
+                     "E.g., 2 means every 2 consecutive frames are merged into one patch.")
+
+    group.add_argument("--spatial_merge_size", type=int, default=2,
+                       help="Merge factor for spatial patches. "
+                     "E.g., 2 means 2x2 image patches are merged into one.")
+
+    group.add_argument("--patch_size", type=int, default=14,
+                       help="Image patch size for Vision Transformer (ViT). "
+                            "Typically 14, 16 or 32.")
+
     return parser
 
 

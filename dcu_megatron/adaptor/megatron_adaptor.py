@@ -194,7 +194,10 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         determine_main_replica_uniform_distribution)
 
     def patch_core_distributed(self):
-        pass
+        from ..core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup
+        MegatronAdaptation.register(
+            'megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup.finish_grad_sync',
+            _ParamAndGradBucketGroup.finish_grad_sync)
 
     def patch_core_models(self):
         from ..core.models.gpt.gpt_model import gpt_model_postprocess, gpt_model_forward_wrapper, GPTModel
