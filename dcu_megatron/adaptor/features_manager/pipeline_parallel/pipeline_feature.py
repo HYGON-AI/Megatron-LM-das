@@ -66,10 +66,6 @@ class PipelineFeature(AbstractFeature):
                            help='number of layers to build: '
                                 '- An integer N: meaning n layers for each model block '
                                 '- A string containing a Python list expression that defines a custom pattern')
-        group.add_argument('--offload-moe-mlp-input',
-                           action='store_true',
-                           default=None,
-                           help='Enable moe mlp input offload, must be used with overlap-moe-expert-parallel-comm and with moe or moe_act recompute.')
 
     def pre_validate_args(self, args):
         if args.schedule_method != "dualpipev":
