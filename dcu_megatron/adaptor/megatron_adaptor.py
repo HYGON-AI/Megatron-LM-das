@@ -373,12 +373,12 @@ class CoreAdaptation(MegatronAdaptationABC):
         # (1) edgc, (2) ckpt add save/load iter info to ckpt
         MegatronAdaptation.register('megatron.training.training.setup_model_and_optimizer',
                                     setup_model_and_optimizer)
-        
+
         # support sft
         MegatronAdaptation.register('megatron.training.tokenizer.sft_tokenizer.SFTTokenizer.pad',
                                     pad)
         MegatronAdaptation.register('megatron.training.datasets.sft_dataset.SFTDataset._get_ltor_masks_and_position_ids',
-                                    _get_ltor_masks_and_position_ids)                                                        
+                                    _get_ltor_masks_and_position_ids)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args, validate_args_func_decorator, _print_args_wrapper

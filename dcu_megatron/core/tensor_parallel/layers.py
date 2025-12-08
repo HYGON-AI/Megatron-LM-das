@@ -189,8 +189,12 @@ class AGLinear(torch.autograd.Function):
                         transpose_weight=transpose_weight,
                         local_copy=False,
                         ring_mode=flux.AgRingMode.Auto,
+                        allocate_output_on_init=False,
                     )
 
+            output = torch.empty((sequence_len * tp_group.size(), weight.shape[0]),
+                                 dtype=input.dtype,
+                                 device=torch.cuda.current_device())
             output = fw_ag_gemm_op.forward(
                 input.view(sequence_len * batch_size, -1),
                 weight.t().contiguous() if transpose_weight else weight,
@@ -199,8 +203,8 @@ class AGLinear(torch.autograd.Function):
                 weight_scale=None,
                 output_scale=None,
                 fast_accum=False,
+                output=output,
             )
-            output = output.clone()
 
             if ctx.save_flux_gather_input:
                 total_input = fw_ag_gemm_op.gather_input().clone().view(-1, batch_size, input_hidden_size)
@@ -832,6 +836,7 @@ def get_fw_ag_gemm_kernel(flux_params: tuple):
             transpose_weight=transpose_weight,
             local_copy=False,
             ring_mode=flux.AgRingMode.Auto,
+            allocate_output_on_init=False,
         )
         return fw_ag_gemm_op
 
