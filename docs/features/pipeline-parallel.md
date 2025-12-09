@@ -56,6 +56,10 @@ dcu megatron支持基于interleaved 1f1b的moe a2a overlap，如需使用该特�
 ```
 --delay-wgrad-compute
 ```
+在开启--delay-wgrad-compute时，如果同时开启--overlap-grad-reduce，需要在启动脚本中增加以下环境变量：
+```
+export NVTE_OVERLAP_GRAD_REDUCE=1
+```
 
 ### 拆分attn，缓解tp与ep竞争
 针对图2中的调度排布，如果训练时同时开启tp和ep，ep会与attn部分的tp重叠，为了解决该问题，dcu megatron将attn部分拆分为三部分：（1）qkv计算，（2）core attn计算和（3）proj计算，并重新组织调度排布，如下图所示。

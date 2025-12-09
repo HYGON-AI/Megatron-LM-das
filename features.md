@@ -123,27 +123,11 @@ def unpermute(
 3. 启动hyckptd 进程 mpirun -pernode -hostfile 主机名文件 hyckptd可执行程序 --log 日志文件路径
 
 ### 交错式1f1b流水线支持[moe a2a通信计算overlap](https://mp.weixin.qq.com/s?__biz=MzU2NzkyMzUxMw==&mid=2247550702&idx=2&sn=9f6bb8ea72475aa833bfd73718f03530&chksm=fdb928e884341e81762eeaffbc3d00a3023e4543001b5448f259977b8bf0e4603448db75360e&mpshare=1&scene=1&srcid=0306blxvLHplbcAOqnznmXiQ&sharer_shareinfo=962faa39bc50b5544c96cf846186f076&sharer_shareinfo_first=962faa39bc50b5544c96cf846186f076&version=4.1.20.70286&platform=mac#rd)
-+ 项目支持moe a2a 通算overlap。如果需要使用该特性，需要启动脚本中加入如下两个参数:
-```
---schedule-method interleaved_1f1b
---overlap-moe-expert-parallel-comm
-```
-+ 项目支持通过--delay-wgrad-compute进行dw拆分，用于实现更好的overlap。当前从测试结果看，开启--delay-wgrad-compute，收益甚微，待进一步优化。
-+ 在开启--delay-wgrad-compute时，如果同时开启--overlap-grad-reduce，需要在启动脚本中增加以下环境变量：
-```
-export NVTE_OVERLAP_GRAD_REDUCE=1
-```
++ 项目支持moe a2a 通算overlap，实现计算掩盖全部或部分a2a通信。具体见[流水线并行](./docs/features/pipeline-parallel.md)
+
 
 ### 项目支持dualpipev
-+ 项目支持dualpipev。如果需要使用该特性，需要启动脚本中加入如下参数:
-```
---schedule-method dualpipev
---delay-wgrad-compute
-```
-+ dualpipev支持moe a2a overlap，如果需要overlap，额外增加两个参数
-```
---overlap-moe-expert-parallel-comm
-```
++ 项目支持dualpipev。具体使用说明见[流水线并行](./docs/features/pipeline-parallel.md)
 
 
 ### 项目支持量化通信
@@ -170,7 +154,8 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 
 + 注意事项：
 1. te需满足te>=2.7；torch需满足torch>=2.7;
-2. offload-modules支持self_attn、qkv_linear、core_attn、attn_linear、router_fc1、router_fc2、shared_fc1、shared_fc2、moe_act，可同时offload多个module。
+2. offload-modules支持self_attn、qkv_linear、core_attn、attn_linear、router_fc1、router_fc2、shared_fc1、shared_fc2、moe_act，可同时offload多个module；
+3. 当前支持interleaved 1f1b和dualpipev两种流水线调度。
 
 
 
