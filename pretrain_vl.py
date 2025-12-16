@@ -32,6 +32,7 @@ from megatron.core.transformer.spec_utils import import_module
 from megatron.core.utils import StragglerDetector
 from megatron.training import get_args, get_timers, get_tokenizer, pretrain, print_rank_0
 from megatron.training.arguments import core_transformer_config_from_args
+from megatron.training.checkpointing import get_checkpoint_name
 from megatron.training.utils import (
     unwrap_model,
     get_batch_on_this_cp_rank,
@@ -544,64 +545,6 @@ def loss_func(
 
     return loss[0] * args.context_parallel_size, {"lm loss": averaged_loss}
 
-# def loss_func(
-#     loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None
-# ):
-#     """Loss function.
-
-#     Args:
-#         loss_mask (torch.Tensor): Used to mask out some portions of the loss
-#         output_tensor (torch.Tensor): The tensor with the losses
-#         model (GPTModel, optional): The model (can be wrapped)
-
-#     Returns:
-#         the loss scalar for this micro-batch
-#         the number of non-padded tokens in this microbatch
-#         a dict containing reporting metrics on the loss and number of tokens across
-#             the data parallel ranks
-#     """
-#     args = get_args()
-
-#     losses = output_tensor.view(-1).float()
-#     loss_mask = loss_mask.view(-1).float()
-#     loss = torch.sum(losses * loss_mask)
-
-#     # Check individual rank losses are not NaN prior to DP all-reduce.
-#     rerun_state_machine = get_rerun_state_machine()
-#     if args.check_for_nan_in_loss_and_grad:
-#         rerun_state_machine.validate_result(
-#             result=loss,
-#             rejection_func=torch.isnan,
-#             message="found NaN in local forward loss calculation",
-#             tolerance=0.0,  # forward pass calculations are determinisic
-#             fatal=True,
-#         )
-#         rerun_state_machine.validate_result(
-#             result=loss,
-#             rejection_func=torch.isinf,
-#             message="found Inf in local forward loss calculation",
-#             tolerance=0.0,  # forward pass calculations are determinisic
-#             fatal=True,
-#         )
-#     # Check for spiky loss
-#     if args.check_for_spiky_loss:
-#         rerun_state_machine.validate_result(
-#             result=loss,
-#             rejection_func=partial(
-#                 rerun_state_machine.is_unexpectedly_large,
-#                 threshold=SPIKY_LOSS_FACTOR,
-#                 context="loss",
-#             ),
-#             message="Spiky loss",
-#             tolerance=0.0,  # forward pass calculations are determinisic
-#             fatal=False,
-#         )
-
-#     num_tokens = loss_mask.sum().clone().detach().to(torch.int)
-#     reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
-
-#     return (loss, num_tokens, {'lm loss': reporting_loss})
-
 
 def forward_step(data_iterator, model: Qwen2_5VLModel, return_schedule_plan: bool = False):
     """Forward training step.
@@ -776,6 +719,23 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
     print_rank_0("> finished creating VL datasets ...")
 
     train_dataloader = EnergonDataloader(get_savable_loader(train_ds, worker_config=worker_config))
+
+    if args.load is not None:
+        if getattr(args, "dataloader_save", None):
+            dp_rank = parallel_state.get_data_parallel_rank()
+            data_save_name = get_checkpoint_name(
+                args.dataloader_save,
+                args.iteration,
+                basename=f"train_dataloader_dprank{dp_rank:03d}.pt",
+            )
+            if os.path.exists(data_save_name):
+                try:
+                    dataset_state_dict = torch.load(data_save_name, map_location="cpu")
+                    train_dataloader.restore_state_rank(dataset_state_dict["dataloader_state_dict"])
+                    print_rank_0(f"restored dataset state from {data_save_name}")
+                except Exception as e:
+                    print_rank_0("loading dataloader checkpoint failed. Skipping. " + str(e))
+
     valid_dataloader = [
         EnergonDataloader(get_loader(valid_ds, worker_config=worker_config))
         for valid_ds in valid_ds
