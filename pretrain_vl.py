@@ -76,9 +76,7 @@ from dcu_megatron.core.datasets.VL_helpers import TaskEncoder,print_error_handle
 from dcu_megatron.core.models.qwen_vl.vl_model import Qwen2_5VLModel
 from dcu_megatron.core.models.qwen_vl.vision_config import Qwen2VLTransformerConfig, get_vision_model_config, get_vision_projection_config
 from dcu_megatron.core.models.qwen_vl.vision_layer_specs import get_mlp_module_spec,get_qwen2vl_vision_layer_spec
-# from dcu_megatron.core.models.qwen_vl.auguments import get_patch_args
 from dcu_megatron.core.tensor_parallel.vl_data import broadcast_data
-# from dcu_megatron.training.tokenizer import build_tokenizer, get_tokenizer
 from megatron.training.tokenizer import build_tokenizer
 
 stimer = StragglerDetector()
@@ -406,6 +404,7 @@ def get_rope_index(
 
         return position_ids, mrope_position_deltas
 
+
 def get_ltor_masks_and_position_ids(
         input_ids, 
         image_thw_grids,
@@ -436,6 +435,7 @@ def get_ltor_masks_and_position_ids(
    
 
     return attention_mask, loss_mask, position_ids
+
 
 def get_batch(data_iterator):
     """Generate a batch"""
@@ -629,6 +629,7 @@ def core_gpt_dataset_config_from_args(args):
         mid_level_dataset_surplus=args.mid_level_dataset_surplus,
     )
 
+
 def datasets_provider(worker_config=None):
     """Create multimodal train, validation and test datasets."""
     args = get_args()
@@ -669,6 +670,7 @@ def datasets_provider(worker_config=None):
 
     return train_dataset, val_datasets_without_source_datasets, None
 
+
 class EnergonDataloader:
     """A wrapper to use Megatron Energon dataloader with the Megatron-LM training loop."""
     def __init__(self, dataloader):
@@ -684,10 +686,12 @@ class EnergonDataloader:
     def save_state(self):
         return self._dataloader.save_state_rank()
 
+
 def cyclic_iter(iter):
     while True:
         for x in iter:
             yield x
+
 
 def train_valid_test_datasets_provider(train_val_test_num_samples):
     """Build the train test and validation datasets.
@@ -742,9 +746,6 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
     ]
 
     print_rank_0("> finished creating VL dataloader ...")
-    
-    if args.load is not None:
-        raise NotImplementedError("The Qwen VL does not support loading ckpt !")
 
     return train_dataloader, valid_dataloader, None
 
