@@ -43,7 +43,7 @@ def get_vision_model_config(args, config):
     with open(os.path.join(args.tokenizer_model, 'config.json'), 'r', encoding='utf-8') as f:
         hf_config = json.load(f)
 
-    config.ffn_hidden_size = hf_config['vision_config']['hidden_size']
+    config.ffn_hidden_size = hf_config['vision_config']['intermediate_size']
 
     if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
         config.num_layers = hf_config['vision_config']['depth'] * parallel_state.get_virtual_pipeline_model_parallel_world_size() # depth

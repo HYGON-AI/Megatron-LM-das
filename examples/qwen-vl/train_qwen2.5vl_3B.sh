@@ -63,7 +63,7 @@ DISTRIBUTED_ARGS=(
 )
 
 GPT_MODEL_ARGS=(
-    --seq-length 2048 # 4096, 8192, 16384, 32768
+    --seq-length 2048
     --num-layers 36
     --hidden-size 2048
     --ffn-hidden-size 11008 
@@ -78,8 +78,7 @@ GPT_MODEL_ARGS=(
     --norm-epsilon 1e-6
     --position-embedding-type rope
     --rotary-base 1000000 
-    --rotary-seq-len-interpolation-factor 1 
-    --untie-embeddings-and-output-weights
+    --rotary-seq-len-interpolation-factor 1
 
 )
 
@@ -103,7 +102,7 @@ TRAINING_ARGS=(
     --lr-decay-style cosine 
     --min-lr 3.0e-6
     --lr-warmup-iters 1
-    --ckpt-format torch
+    --ckpt-format torch_dist
     --ddp-average-in-collective
     --overlap-grad-reduce
     --use-flash-attn
@@ -125,7 +124,6 @@ DATA_ARGS=(
     --train-data-path $DATA_PATH
     --valid-data-path $DATA_PATH
 
-    # --disable-vision-class-token 
     --dataloader-type external 
 )
 
@@ -135,10 +133,10 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-#    --save $CHECKPOINT_PATH
-#    --load $CHECKPOINT_PATH
-#    --no-load-optim #use checkpoint nhb
-#    --no-load-rng
+    --save $CHECKPOINT_PATH
+    --load $CHECKPOINT_PATH
+    --no-load-optim
+    --no-load-rng
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
