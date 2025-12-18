@@ -575,6 +575,616 @@ def setup_model_and_optimizer(
     return model, optimizer, opt_param_scheduler
 
 
+def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
+    """Single training step."""
+    args = get_args()
+    timers = get_timers()
+
+    def check_warm_up_done(args):
+        return args.curr_iteration > args.warm_up_train_iter
+
+    def should_broadcast_current_iteration(args):
+        return (args.curr_iteration % args.rank_adjust_window_size == 1 and
+                args.curr_iteration != 1 and
+                args.curr_iteration != (args.latest_iteration + 1) and
+                args.curr_iteration != (args.warm_up_train_iter + 1))
+
+    def broadcast_predict_time(first_stage_predict_time):
+        torch.distributed.broadcast(first_stage_predict_time,
+                                    src=mpu.get_pipeline_model_parallel_first_rank(),
+                                    group=mpu.get_pipeline_model_parallel_group())
+
+    def adjust_and_predict_rank(first_stage_predict_time, ):
+        if first_stage_predict_time is not None:
+            predict_comp_rank = Utils.use_time_predict_rank(first_stage_predict_time)
+            return Utils.adjust_rank(predict_comp_rank)
+        return None, None
+
+    def update_mapped_rank(args, mapped_rank):
+        if mpu.is_pipeline_first_stage():
+            mapped_rank = Utils.map_loss_change_to_rank(
+                min_rank=(args.max_rank / 4),
+                max_rank=args.max_rank,
+                window_size=args.rank_adjust_window_size
+            )
+            mapped_rank, first_stage_predict_time = Utils.adjust_rank(mapped_rank)
+            first_stage_predict_time = torch.tensor(first_stage_predict_time, device="cuda", dtype=torch.float32)
+        else:
+            first_stage_predict_time = torch.zeros(1, device="cuda", dtype=torch.float32)
+        broadcast_predict_time(first_stage_predict_time)
+        if mpu.is_pipeline_first_stage():
+            args.mapped_rank = mapped_rank
+            Utils.mapped_rank[-1] = mapped_rank
+        else:
+            args.predict_comp_rank, args.predict_time = adjust_and_predict_rank(first_stage_predict_time)
+            value = Utils.second_syn_data_parallel_group(args.predict_comp_rank)
+            args.final_rank = value if value is not None else args.predict_comp_rank
+            Utils.mapped_rank.append(args.final_rank)
+
+    if args.enable_dynamic_grad_comp:
+        if check_warm_up_done(args) and should_broadcast_current_iteration(args):
+            update_mapped_rank(args, mapped_rank=None)
+
+    # CUDA Graph capturing only executes once, when it's the first training iteration.
+    if args.curr_iteration == args.iteration and args.external_cuda_graph:
+        cuda_graph_capture(model, config, args)
+
+        # Set grad to zero.
+        for model_chunk in model:
+            model_chunk.zero_grad_buffer()
+        optimizer.zero_grad()
+
+        # Collect garbage and empty unused memory.
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    rerun_state_machine = get_rerun_state_machine()
+    while rerun_state_machine.should_run_forward_backward(data_iterator):
+        # Set grad to zero.
+        for model_chunk in model:
+            model_chunk.zero_grad_buffer()
+        optimizer.zero_grad()
+
+        if has_nvidia_modelopt:
+            # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
+            adjust_tensor_shapes_fn = get_tensor_shapes_adjust_fn_for_distillation(
+                model, args.seq_length, args.micro_batch_size, args.decoder_seq_length
+            )
+        else:
+            adjust_tensor_shapes_fn = None
+
+        # Forward pass.
+        forward_backward_func = get_forward_backward_func()
+        losses_reduced = forward_backward_func(
+            forward_step_func=forward_step_func,
+            data_iterator=data_iterator,
+            model=model,
+            num_microbatches=get_num_microbatches(),
+            seq_length=args.seq_length,
+            micro_batch_size=args.micro_batch_size,
+            decoder_seq_length=args.decoder_seq_length,
+            forward_only=False,
+            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
+        )
+    should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
+    if should_exit:
+        return {}, True, should_checkpoint, should_exit, exit_code, None, None
+
+    # Empty unused memory.
+    if args.empty_unused_memory_level >= 1:
+        torch.cuda.empty_cache()
+
+    if args.curr_iteration % args.save_interval == 10 and args.enable_dynamic_grad_comp:
+        total_time = config.timers('edgc-backward-compute', log_level=0).elapsed(reset=True) * 1000.0
+        args.per_microbatch_time = total_time / get_num_microbatches()
+
+    # Vision gradients.
+    if args.vision_pretraining and args.vision_pretraining_type == "dino":
+        unwrapped_model = unwrap_model(model[0])
+        unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
+
+    # Update parameters.
+
+    timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+    timers('optimizer').stop()
+
+    # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
+    # so we must gather across mp ranks
+    update_successful = logical_and_across_model_parallel_group(update_successful)
+    # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
+    # so we must gather across mp ranks
+    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+    if args.log_num_zeros_in_grad:
+        num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
+
+    # Vision momentum.
+    if args.vision_pretraining and args.vision_pretraining_type == "dino":
+        unwrapped_model = unwrap_model(model[0])
+        unwrapped_model.update_momentum(args.curr_iteration)
+
+    # Update learning rate.
+    if update_successful:
+        increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
+        opt_param_scheduler.step(increment=increment)
+        skipped_iter = 0
+    else:
+        skipped_iter = 1
+
+    # Empty unused memory.
+    if args.empty_unused_memory_level >= 2:
+        torch.cuda.empty_cache()
+
+    # Set the manual hooks when CUDA Graphs are enabled.
+    if args.curr_iteration == args.iteration and args.external_cuda_graph:
+        if args.use_distributed_optimizer and args.overlap_param_gather:
+            cuda_graph_set_manual_hooks(model)
+
+    is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
+    if args.schedule_method == "dualpipev":
+        is_last_stage = mpu.is_pipeline_first_stage(ignore_virtual=True)
+    if is_last_stage:
+        # Average loss across microbatches.
+        loss_reduced = {}
+
+        for key in losses_reduced[0].keys():
+            val = [x[key].view(-1) for x in losses_reduced]
+            if val[0].numel() == 2:
+                if args.sft:
+                    # in mcore the normalization happens on micro batch instead of global
+                    val = torch.vstack(val)
+                    val = val[:, 0] / val[:, 1]
+                    val = val.mean()
+                    torch.distributed.all_reduce(
+                        val,
+                        group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    val /= torch.distributed.get_world_size(
+                        group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    loss_reduced[key] = val
+                else:
+                    # there is one dict per microbatch. in new reporting, we average
+                    # over the total number of tokens across the global batch.
+                    val = torch.vstack(val).sum(dim=0)
+                    torch.distributed.all_reduce(
+                        val,
+                        group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    loss_reduced[key] = val[0] / val[1]
+            elif val[0].numel() == 1:
+                # legacy behavior, we average over the number of microbatches
+                val = torch.cat(val).mean()
+                loss_reduced[key] = val
+            else:
+                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+
+        if args.enable_dynamic_grad_comp:
+            loss = list(loss_reduced.values())[0]
+            iter_sample_interval = int(1 / args.iteration_sample_ratio)
+            if args.curr_iteration % iter_sample_interval == 0:
+                loss_tensor = torch.tensor(loss, device=torch.cuda.current_device(), dtype=torch.float32)
+                group = get_pipeline_model_parallel_group()
+                torch.distributed.broadcast(tensor=loss_tensor, src=torch.distributed.get_rank(), group=group)
+                broadcasted_loss = loss_tensor.item()
+                Utils.loss.append(broadcasted_loss)
+                if is_last_rank():
+                    append_data_to_csv(args.loss_path, args.curr_iteration, loss)
+
+        results = (
+            loss_reduced,
+            skipped_iter,
+            should_checkpoint,
+            should_exit,
+            exit_code,
+            grad_norm,
+            num_zeros_in_grad,
+        )
+        if args.enable_dynamic_grad_comp and args.all_reduce_time:
+            results = results + (args.params_all_reduce_time,)
+        return results
+
+    if args.enable_dynamic_grad_comp:
+        iter_sample_interval = int(1 / args.iteration_sample_ratio)
+        if args.curr_iteration % iter_sample_interval == 0:
+            group = get_pipeline_model_parallel_group()
+            src_rank = get_pipeline_model_parallel_last_rank()
+            loss_tensor = torch.tensor(0.0, device=torch.cuda.current_device(), dtype=torch.float32)
+            torch.distributed.broadcast(tensor=loss_tensor, src=src_rank, group=group)
+            broadcasted_loss = loss_tensor.item()
+            Utils.loss.append(broadcasted_loss)
+        if args.all_reduce_time:
+            return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, args.params_all_reduce_time
+        else:
+            return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
+    else:
+        return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
+
+
+def training_log(
+    loss_dict,
+    total_loss_dict,
+    learning_rate,
+    decoupled_learning_rate,
+    iteration,
+    loss_scale,
+    report_memory_flag,
+    skipped_iter,
+    grad_norm,
+    params_norm,
+    num_zeros_in_grad,
+):
+    """Log training information such as losses, timing, ...."""
+    args = get_args()
+    timers = get_timers()
+    writer = get_tensorboard_writer()
+    wandb_writer = get_wandb_writer()
+    one_logger = get_one_logger()
+    energy_monitor = get_energy_monitor()
+
+    # Advanced, skipped, and Nan iterations.
+    advanced_iters_key = 'advanced iterations'
+    skipped_iters_key = 'skipped iterations'
+    nan_iters_key = 'nan iterations'
+    # Advanced iterations.
+    if not skipped_iter:
+        total_loss_dict[advanced_iters_key] = total_loss_dict.get(advanced_iters_key, 0) + 1
+    else:
+        if advanced_iters_key not in total_loss_dict:
+            total_loss_dict[advanced_iters_key] = 0
+    # Skipped iterations.
+    total_loss_dict[skipped_iters_key] = total_loss_dict.get(skipped_iters_key, 0) + skipped_iter
+    # Update losses and set nan iterations
+    got_nan = False
+    for key in loss_dict:
+        if not skipped_iter:
+            total_loss_dict[key] = (
+                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device='cuda'))
+                + loss_dict[key]
+            )
+        else:
+            value = loss_dict[key].float().sum().item()
+            is_nan = value == float('inf') or value == -float('inf') or value != value
+            got_nan = got_nan or is_nan
+    total_loss_dict[nan_iters_key] = total_loss_dict.get(nan_iters_key, 0) + int(got_nan)
+
+    # Logging.
+    timers_to_log = [
+        'forward-backward',
+        'forward-compute',
+        'backward-compute',
+        'batch-generator',
+        'forward-recv',
+        'forward-send',
+        'backward-recv',
+        'backward-send',
+        'forward-send-forward-recv',
+        'forward-send-backward-recv',
+        'backward-send-forward-recv',
+        'backward-send-backward-recv',
+        'forward-backward-send-forward-backward-recv',
+        'layernorm-grads-all-reduce',
+        'embedding-grads-all-reduce',
+        'all-grads-sync',
+        'params-all-gather',
+        'optimizer-copy-to-main-grad',
+        'optimizer-unscale-and-check-inf',
+        'optimizer-clip-main-grad',
+        'optimizer-count-zeros',
+        'optimizer-inner-step',
+        'optimizer-copy-main-to-model-params',
+        'optimizer',
+    ]
+
+    # Calculate batch size.
+    batch_size = args.micro_batch_size * args.data_parallel_size * get_num_microbatches()
+
+    # Track app tag & app tag ID
+    one_logger_utils.track_app_tag(batch_size, args.world_size, args.seq_length)
+
+    total_iterations = total_loss_dict[advanced_iters_key] + total_loss_dict[skipped_iters_key]
+
+    # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
+    learning_rate = reduce_max_stat_across_model_parallel_group(learning_rate)
+    # Tensorboard values.
+    # Timer requires all the ranks to call.
+    if args.log_timers_to_tensorboard and (iteration % args.tensorboard_log_interval == 0):
+        timers.write(timers_to_log, writer, iteration, normalizer=total_iterations)
+    if writer and (iteration % args.tensorboard_log_interval == 0):
+        if wandb_writer:
+            wandb_writer.log({'samples vs steps': args.consumed_train_samples}, iteration)
+        writer.add_scalar('learning-rate', learning_rate, iteration)
+        writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
+        if wandb_writer:
+            wandb_writer.log({'learning-rate': learning_rate}, iteration)
+        if args.decoupled_lr is not None:
+            writer.add_scalar('decoupled-learning-rate', decoupled_learning_rate, iteration)
+        if args.skipped_train_samples > 0:
+            writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
+            if wandb_writer:
+                wandb_writer.log({'skipped-train-samples': args.skipped_train_samples}, iteration)
+        writer.add_scalar('batch-size', batch_size, iteration)
+        writer.add_scalar('batch-size vs samples', batch_size, args.consumed_train_samples)
+        if wandb_writer:
+            wandb_writer.log({'batch-size': batch_size}, iteration)
+        for key in loss_dict:
+            writer.add_scalar(key, loss_dict[key], iteration)
+            writer.add_scalar(key + ' vs samples', loss_dict[key], args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({key: loss_dict[key]}, iteration)
+        if args.log_loss_scale_to_tensorboard:
+            writer.add_scalar('loss-scale', loss_scale, iteration)
+            writer.add_scalar('loss-scale vs samples', loss_scale, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'loss-scale': loss_scale}, iteration)
+        if args.log_world_size_to_tensorboard:
+            writer.add_scalar('world-size', args.world_size, iteration)
+            writer.add_scalar('world-size vs samples', args.world_size, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'world-size': args.world_size}, iteration)
+        if grad_norm is not None:
+            writer.add_scalar('grad-norm', grad_norm, iteration)
+            writer.add_scalar('grad-norm vs samples', grad_norm, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'grad-norm': grad_norm}, iteration)
+        if num_zeros_in_grad is not None:
+            writer.add_scalar('num-zeros', num_zeros_in_grad, iteration)
+            writer.add_scalar(
+                'num-zeros vs samples', num_zeros_in_grad, args.consumed_train_samples
+            )
+            if wandb_writer:
+                wandb_writer.log({'num-zeros': num_zeros_in_grad}, iteration)
+        if params_norm is not None:
+            writer.add_scalar('params-norm', params_norm, iteration)
+            writer.add_scalar('params-norm vs samples', params_norm, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'params-norm': params_norm}, iteration)
+        if args.log_memory_to_tensorboard:
+            mem_stats = torch.cuda.memory_stats()
+            writer.add_scalar(
+                "mem-reserved-bytes", mem_stats["reserved_bytes.all.current"], iteration
+            )
+            writer.add_scalar(
+                "mem-allocated-bytes", mem_stats["allocated_bytes.all.current"], iteration
+            )
+            writer.add_scalar(
+                "mem-max-allocated-bytes", mem_stats["allocated_bytes.all.peak"], iteration
+            )
+            writer.add_scalar("mem-allocated-count", mem_stats["allocation.all.current"], iteration)
+    if args.num_experts is not None:
+        moe_loss_scale = 1 / get_num_microbatches()
+        track_names = []
+        if args.moe_router_load_balancing_type in ["aux_loss", "seq_aux_loss"]:
+            track_names.append("load_balancing_loss")
+        if args.moe_z_loss_coeff is not None:
+            track_names.append("z_loss")
+        track_moe_metrics(
+            loss_scale=moe_loss_scale,
+            iteration=iteration,
+            writer=writer,
+            wandb_writer=wandb_writer,
+            total_loss_dict=total_loss_dict,
+            per_layer_logging=args.moe_per_layer_logging,
+            force_initialize=True,
+            track_names=track_names,
+            num_layers=args.num_layers,
+            moe_layer_freq=args.moe_layer_freq,
+            mtp_num_layers=args.mtp_num_layers,
+        )
+    if args.mtp_num_layers is not None:
+        mtp_loss_scale = 1 / get_num_microbatches()
+        MTPLossLoggingHelper.track_mtp_metrics(
+            mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict
+        )
+    if iteration % args.log_interval == 0:
+        if args.record_memory_history and is_last_rank():
+            snapshot = torch.cuda.memory._snapshot()
+            from pickle import dump
+
+            with open(args.memory_snapshot_path, 'wb') as f:
+                dump(snapshot, f)
+
+        elapsed_time = timers('interval-time').elapsed(barrier=True)
+        elapsed_time_per_iteration = elapsed_time / total_iterations
+
+        throughput = num_floating_point_operations(args, batch_size) / (
+            elapsed_time_per_iteration * 10**12 * args.world_size
+        )
+
+        one_logger_utils.track_e2e_metrics(args.log_throughput, throughput)
+
+        if args.log_timers_to_tensorboard:
+            if writer:
+                writer.add_scalar('iteration-time', elapsed_time_per_iteration, iteration)
+            if wandb_writer:
+                wandb_writer.log({'iteration-time': elapsed_time_per_iteration}, iteration)
+        log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
+        log_string += ' iteration {:8d}/{:8d} |'.format(iteration, args.train_iters)
+        log_string += ' consumed samples: {:12d} |'.format(args.consumed_train_samples)
+        if args.skipped_train_samples > 0:
+            log_string += ' skipped samples: {:12d} |'.format(args.skipped_train_samples)
+        log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
+            elapsed_time_per_iteration * 1000.0
+        )
+        if args.log_throughput:
+            log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
+            if args.log_timers_to_tensorboard:
+                if writer:
+                    writer.add_scalar('throughput', throughput, iteration)
+                if wandb_writer:
+                    wandb_writer.log({'throughput': throughput}, iteration)
+        if args.log_energy:
+            energy = (energy_monitor.lap() / total_iterations) / args.world_size
+            power = energy / elapsed_time_per_iteration
+            log_string += f' energy per GPU (J/iter/GPU): {energy:.1f} |'
+            log_string += f' power per GPU (W/GPU): {power:.1f} |'
+            if writer:
+                writer.add_scalar('iter-energy/gpu', energy, iteration)
+                writer.add_scalar('power/gpu', power, iteration)
+            if wandb_writer:
+                wandb_writer.log({'iter-energy/gpu': energy}, iteration)
+                wandb_writer.log({'power/gpu': power}, iteration)
+        # Decoupled_learning_rate should be not None only on first and last pipeline stage.
+        log_string += f' learning rate: {learning_rate:.6E} |'
+        if args.decoupled_lr is not None and (
+            mpu.is_pipeline_first_stage(ignore_virtual=True)
+            or mpu.is_pipeline_last_stage(ignore_virtual=True)
+        ):
+            assert decoupled_learning_rate is not None
+            log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
+        else:
+            assert decoupled_learning_rate is None
+        log_string += f' global batch size: {batch_size:5d} |'
+        for key in total_loss_dict:
+            if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:
+                avg = total_loss_dict[key].item() / float(
+                    max(1, total_loss_dict[advanced_iters_key])
+                )
+                if avg > 0.0:
+                    log_string += ' {}: {:.6E} |'.format(key, avg)
+                total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
+        log_string += f' loss scale: {loss_scale:.1f} |'
+        if grad_norm is not None:
+            log_string += f' grad norm: {grad_norm:.3f} |'
+        if num_zeros_in_grad is not None:
+            log_string += f' num zeros: {num_zeros_in_grad} |'
+        if params_norm is not None:
+            log_string += f' params norm: {params_norm:.3f} |'
+        log_string += ' number of skipped iterations: {:3d} |'.format(
+            total_loss_dict[skipped_iters_key]
+        )
+        log_string += ' number of nan iterations: {:3d} |'.format(total_loss_dict[nan_iters_key])
+        total_loss_dict[advanced_iters_key] = 0
+        total_loss_dict[skipped_iters_key] = 0
+        total_loss_dict[nan_iters_key] = 0
+        print_rank_last(log_string)
+        if report_memory_flag:
+            # Report memory after optimizer state has been initialized.
+            if torch.distributed.get_rank() == 0:
+                num_microbatches = get_num_microbatches()
+                report_theoretical_memory(args, num_microbatches=num_microbatches, verbose=True)
+            report_memory(f'(after {iteration} iterations)')
+            report_memory_flag = False
+        timers.log(timers_to_log, normalizer=args.log_interval)
+
+    return report_memory_flag, log_string
+
+
+def checkpoint_and_decide_exit(
+    model,
+    optimizer,
+    opt_param_scheduler,
+    iteration,
+    num_floating_point_operations_so_far,
+    checkpointing_context,
+    train_data_iterator,
+    iter_log
+):
+    """Save checkpoint and decide whether to exit based on arguments (e.g., if
+    --exit-duration-in-mins is set). Actual exit happens in main training loop
+    based on the return value of this function."""
+    args = get_args()
+    timers = get_timers()
+
+    # Exit based on signal handler.
+    saved_checkpoint = False
+    if args.exit_signal_handler:
+        signal_handler = get_signal_handler()
+        if any(signal_handler.signals_received()):
+            if args.save:
+                save_checkpoint_and_time(
+                    iteration,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    num_floating_point_operations_so_far,
+                    checkpointing_context,
+                    train_data_iterator=train_data_iterator,
+                )
+            print_datetime('exiting program after receiving SIGTERM.')
+
+            return True
+
+    # Regular save (persistent and non-persistent).
+    if args.save and args.save_interval and iteration % args.save_interval == 0:
+        save_checkpoint_and_time(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far,
+            checkpointing_context,
+            train_data_iterator=train_data_iterator,
+        )
+        saved_checkpoint = True
+
+    elif (
+        args.save
+        and args.non_persistent_save_interval
+        and iteration % args.non_persistent_save_interval == 0
+    ):
+        save_checkpoint_and_time(
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far,
+            checkpointing_context,
+            non_persistent_ckpt=True,
+            train_data_iterator=train_data_iterator,
+        )
+        saved_checkpoint = True
+
+    if is_rank0() and saved_checkpoint:
+        #iter——log写文件
+        iter_log_path = os.path.join(args.save, 'last_ckpt_iter_log.txt')
+        os.makedirs(args.save, exist_ok=True)
+        with open(iter_log_path, 'w') as f:
+            f.write(str(iter_log))
+
+    # Exit based on duration.
+    if args.exit_duration_in_mins:
+        train_time = (time.time() - _TRAIN_START_TIME) / 60.0
+        done_cuda = torch.tensor(
+            [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+        )
+        torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
+        done = done_cuda.item()
+        if done:
+            if args.save and not saved_checkpoint:
+                save_checkpoint_and_time(
+                    iteration,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    num_floating_point_operations_so_far,
+                    checkpointing_context,
+                    train_data_iterator=train_data_iterator,
+                )
+            print_datetime(f'exiting program after {train_time} minutes')
+
+            return True
+
+    # Exit based on iterations.
+    if args.exit_interval and iteration % args.exit_interval == 0:
+        if args.save and not saved_checkpoint:
+            save_checkpoint_and_time(
+                iteration,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                num_floating_point_operations_so_far,
+                checkpointing_context,
+                train_data_iterator=train_data_iterator,
+            )
+        torch.distributed.barrier()
+        print_datetime(f'exiting program at iteration {iteration}')
+
+        return True
+
+    return False
+
+
 def train(
     forward_step_func,
     model,
@@ -1269,501 +1879,6 @@ def evaluate(
     return total_loss_dict, collected_non_loss_data, False
 
 
-def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config):
-    """Single training step."""
-    args = get_args()
-    timers = get_timers()
-
-    def check_warm_up_done(args):
-        return args.curr_iteration > args.warm_up_train_iter
-
-    def should_broadcast_current_iteration(args):
-        return (args.curr_iteration % args.rank_adjust_window_size == 1 and
-                args.curr_iteration != 1 and
-                args.curr_iteration != (args.latest_iteration + 1) and
-                args.curr_iteration != (args.warm_up_train_iter + 1))
-
-    def broadcast_predict_time(first_stage_predict_time):
-        torch.distributed.broadcast(first_stage_predict_time,
-                                    src=mpu.get_pipeline_model_parallel_first_rank(),
-                                    group=mpu.get_pipeline_model_parallel_group())
-
-    def adjust_and_predict_rank(first_stage_predict_time, ):
-        if first_stage_predict_time is not None:
-            predict_comp_rank = Utils.use_time_predict_rank(first_stage_predict_time)
-            return Utils.adjust_rank(predict_comp_rank)
-        return None, None
-
-    def update_mapped_rank(args, mapped_rank):
-        if mpu.is_pipeline_first_stage():
-            mapped_rank = Utils.map_loss_change_to_rank(
-                min_rank=(args.max_rank / 4),
-                max_rank=args.max_rank,
-                window_size=args.rank_adjust_window_size
-            )
-            mapped_rank, first_stage_predict_time = Utils.adjust_rank(mapped_rank)
-            first_stage_predict_time = torch.tensor(first_stage_predict_time, device="cuda", dtype=torch.float32)
-        else:
-            first_stage_predict_time = torch.zeros(1, device="cuda", dtype=torch.float32)
-        broadcast_predict_time(first_stage_predict_time)
-        if mpu.is_pipeline_first_stage():
-            args.mapped_rank = mapped_rank
-            Utils.mapped_rank[-1] = mapped_rank
-        else:
-            args.predict_comp_rank, args.predict_time = adjust_and_predict_rank(first_stage_predict_time)
-            value = Utils.second_syn_data_parallel_group(args.predict_comp_rank)
-            args.final_rank = value if value is not None else args.predict_comp_rank
-            Utils.mapped_rank.append(args.final_rank)
-
-    if args.enable_dynamic_grad_comp:
-        if check_warm_up_done(args) and should_broadcast_current_iteration(args):
-            update_mapped_rank(args, mapped_rank=None)
-
-    # CUDA Graph capturing only executes once, when it's the first training iteration.
-    if args.curr_iteration == args.iteration and args.external_cuda_graph:
-        cuda_graph_capture(model, config, args)
-
-        # Set grad to zero.
-        for model_chunk in model:
-            model_chunk.zero_grad_buffer()
-        optimizer.zero_grad()
-
-        # Collect garbage and empty unused memory.
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    rerun_state_machine = get_rerun_state_machine()
-    while rerun_state_machine.should_run_forward_backward(data_iterator):
-        # Set grad to zero.
-        for model_chunk in model:
-            model_chunk.zero_grad_buffer()
-        optimizer.zero_grad()
-
-        if has_nvidia_modelopt:
-            # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
-            adjust_tensor_shapes_fn = get_tensor_shapes_adjust_fn_for_distillation(
-                model, args.seq_length, args.micro_batch_size, args.decoder_seq_length
-            )
-        else:
-            adjust_tensor_shapes_fn = None
-
-        # Forward pass.
-        forward_backward_func = get_forward_backward_func()
-        losses_reduced = forward_backward_func(
-            forward_step_func=forward_step_func,
-            data_iterator=data_iterator,
-            model=model,
-            num_microbatches=get_num_microbatches(),
-            seq_length=args.seq_length,
-            micro_batch_size=args.micro_batch_size,
-            decoder_seq_length=args.decoder_seq_length,
-            forward_only=False,
-            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
-        )
-    should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
-    if should_exit:
-        return {}, True, should_checkpoint, should_exit, exit_code, None, None
-
-    # Empty unused memory.
-    if args.empty_unused_memory_level >= 1:
-        torch.cuda.empty_cache()
-
-    if args.curr_iteration % args.save_interval == 10 and args.enable_dynamic_grad_comp:
-        total_time = config.timers('edgc-backward-compute', log_level=0).elapsed(reset=True) * 1000.0
-        args.per_microbatch_time = total_time / get_num_microbatches()
-
-    # Vision gradients.
-    if args.vision_pretraining and args.vision_pretraining_type == "dino":
-        unwrapped_model = unwrap_model(model[0])
-        unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
-
-    # Update parameters.
-
-    timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    timers('optimizer').stop()
-
-    # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
-    # so we must gather across mp ranks
-    update_successful = logical_and_across_model_parallel_group(update_successful)
-    # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
-    # so we must gather across mp ranks
-    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
-    if args.log_num_zeros_in_grad:
-        num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
-
-    # Vision momentum.
-    if args.vision_pretraining and args.vision_pretraining_type == "dino":
-        unwrapped_model = unwrap_model(model[0])
-        unwrapped_model.update_momentum(args.curr_iteration)
-
-    # Update learning rate.
-    if update_successful:
-        increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
-        opt_param_scheduler.step(increment=increment)
-        skipped_iter = 0
-    else:
-        skipped_iter = 1
-
-    # Empty unused memory.
-    if args.empty_unused_memory_level >= 2:
-        torch.cuda.empty_cache()
-
-    # Set the manual hooks when CUDA Graphs are enabled.
-    if args.curr_iteration == args.iteration and args.external_cuda_graph:
-        if args.use_distributed_optimizer and args.overlap_param_gather:
-            cuda_graph_set_manual_hooks(model)
-
-    is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
-    if args.schedule_method == "dualpipev":
-        is_last_stage = mpu.is_pipeline_first_stage(ignore_virtual=True)
-    if is_last_stage:
-        # Average loss across microbatches.
-        loss_reduced = {}
-
-        for key in losses_reduced[0].keys():
-            val = [x[key].view(-1) for x in losses_reduced]
-            if val[0].numel() == 2:
-                if args.sft:
-                    # in mcore the normalization happens on micro batch instead of global
-                    val = torch.vstack(val)
-                    val = val[:, 0] / val[:, 1]
-                    val = val.mean()
-                    torch.distributed.all_reduce(
-                        val,
-                        group=mpu.get_data_parallel_group(with_context_parallel=True)
-                    )
-                    val /= torch.distributed.get_world_size(
-                        group=mpu.get_data_parallel_group(with_context_parallel=True)
-                    )
-                    loss_reduced[key] = val
-                else:
-                    # there is one dict per microbatch. in new reporting, we average
-                    # over the total number of tokens across the global batch.
-                    val = torch.vstack(val).sum(dim=0)
-                    torch.distributed.all_reduce(
-                        val,
-                        group=mpu.get_data_parallel_group(with_context_parallel=True)
-                    )
-                    loss_reduced[key] = val[0] / val[1]
-            elif val[0].numel() == 1:
-                # legacy behavior, we average over the number of microbatches
-                val = torch.cat(val).mean()
-                loss_reduced[key] = val
-            else:
-                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
-
-        if args.enable_dynamic_grad_comp:
-            loss = list(loss_reduced.values())[0]
-            iter_sample_interval = int(1 / args.iteration_sample_ratio)
-            if args.curr_iteration % iter_sample_interval == 0:
-                loss_tensor = torch.tensor(loss, device=torch.cuda.current_device(), dtype=torch.float32)
-                group = get_pipeline_model_parallel_group()
-                torch.distributed.broadcast(tensor=loss_tensor, src=torch.distributed.get_rank(), group=group)
-                broadcasted_loss = loss_tensor.item()
-                Utils.loss.append(broadcasted_loss)
-                if is_last_rank():
-                    append_data_to_csv(args.loss_path, args.curr_iteration, loss)
-
-        results = (
-            loss_reduced,
-            skipped_iter,
-            should_checkpoint,
-            should_exit,
-            exit_code,
-            grad_norm,
-            num_zeros_in_grad,
-        )
-        if args.enable_dynamic_grad_comp and args.all_reduce_time:
-            results = results + (args.params_all_reduce_time,)
-        return results
-
-    if args.enable_dynamic_grad_comp:
-        iter_sample_interval = int(1 / args.iteration_sample_ratio)
-        if args.curr_iteration % iter_sample_interval == 0:
-            group = get_pipeline_model_parallel_group()
-            src_rank = get_pipeline_model_parallel_last_rank()
-            loss_tensor = torch.tensor(0.0, device=torch.cuda.current_device(), dtype=torch.float32)
-            torch.distributed.broadcast(tensor=loss_tensor, src=src_rank, group=group)
-            broadcasted_loss = loss_tensor.item()
-            Utils.loss.append(broadcasted_loss)
-        if args.all_reduce_time:
-            return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, args.params_all_reduce_time
-        else:
-            return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
-    else:
-        return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
-
-
-def training_log(
-    loss_dict,
-    total_loss_dict,
-    learning_rate,
-    decoupled_learning_rate,
-    iteration,
-    loss_scale,
-    report_memory_flag,
-    skipped_iter,
-    grad_norm,
-    params_norm,
-    num_zeros_in_grad,
-):
-    """Log training information such as losses, timing, ...."""
-    args = get_args()
-    timers = get_timers()
-    writer = get_tensorboard_writer()
-    wandb_writer = get_wandb_writer()
-    one_logger = get_one_logger()
-    energy_monitor = get_energy_monitor()
-
-    # Advanced, skipped, and Nan iterations.
-    advanced_iters_key = 'advanced iterations'
-    skipped_iters_key = 'skipped iterations'
-    nan_iters_key = 'nan iterations'
-    # Advanced iterations.
-    if not skipped_iter:
-        total_loss_dict[advanced_iters_key] = total_loss_dict.get(advanced_iters_key, 0) + 1
-    else:
-        if advanced_iters_key not in total_loss_dict:
-            total_loss_dict[advanced_iters_key] = 0
-    # Skipped iterations.
-    total_loss_dict[skipped_iters_key] = total_loss_dict.get(skipped_iters_key, 0) + skipped_iter
-    # Update losses and set nan iterations
-    got_nan = False
-    for key in loss_dict:
-        if not skipped_iter:
-            total_loss_dict[key] = (
-                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device='cuda'))
-                + loss_dict[key]
-            )
-        else:
-            value = loss_dict[key].float().sum().item()
-            is_nan = value == float('inf') or value == -float('inf') or value != value
-            got_nan = got_nan or is_nan
-    total_loss_dict[nan_iters_key] = total_loss_dict.get(nan_iters_key, 0) + int(got_nan)
-
-    # Logging.
-    timers_to_log = [
-        'forward-backward',
-        'forward-compute',
-        'backward-compute',
-        'batch-generator',
-        'forward-recv',
-        'forward-send',
-        'backward-recv',
-        'backward-send',
-        'forward-send-forward-recv',
-        'forward-send-backward-recv',
-        'backward-send-forward-recv',
-        'backward-send-backward-recv',
-        'forward-backward-send-forward-backward-recv',
-        'layernorm-grads-all-reduce',
-        'embedding-grads-all-reduce',
-        'all-grads-sync',
-        'params-all-gather',
-        'optimizer-copy-to-main-grad',
-        'optimizer-unscale-and-check-inf',
-        'optimizer-clip-main-grad',
-        'optimizer-count-zeros',
-        'optimizer-inner-step',
-        'optimizer-copy-main-to-model-params',
-        'optimizer',
-    ]
-
-    # Calculate batch size.
-    batch_size = args.micro_batch_size * args.data_parallel_size * get_num_microbatches()
-
-    # Track app tag & app tag ID
-    one_logger_utils.track_app_tag(batch_size, args.world_size, args.seq_length)
-
-    total_iterations = total_loss_dict[advanced_iters_key] + total_loss_dict[skipped_iters_key]
-
-    # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
-    learning_rate = reduce_max_stat_across_model_parallel_group(learning_rate)
-    # Tensorboard values.
-    # Timer requires all the ranks to call.
-    if args.log_timers_to_tensorboard and (iteration % args.tensorboard_log_interval == 0):
-        timers.write(timers_to_log, writer, iteration, normalizer=total_iterations)
-    if writer and (iteration % args.tensorboard_log_interval == 0):
-        if wandb_writer:
-            wandb_writer.log({'samples vs steps': args.consumed_train_samples}, iteration)
-        writer.add_scalar('learning-rate', learning_rate, iteration)
-        writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
-        if wandb_writer:
-            wandb_writer.log({'learning-rate': learning_rate}, iteration)
-        if args.decoupled_lr is not None:
-            writer.add_scalar('decoupled-learning-rate', decoupled_learning_rate, iteration)
-        if args.skipped_train_samples > 0:
-            writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
-            if wandb_writer:
-                wandb_writer.log({'skipped-train-samples': args.skipped_train_samples}, iteration)
-        writer.add_scalar('batch-size', batch_size, iteration)
-        writer.add_scalar('batch-size vs samples', batch_size, args.consumed_train_samples)
-        if wandb_writer:
-            wandb_writer.log({'batch-size': batch_size}, iteration)
-        for key in loss_dict:
-            writer.add_scalar(key, loss_dict[key], iteration)
-            writer.add_scalar(key + ' vs samples', loss_dict[key], args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({key: loss_dict[key]}, iteration)
-        if args.log_loss_scale_to_tensorboard:
-            writer.add_scalar('loss-scale', loss_scale, iteration)
-            writer.add_scalar('loss-scale vs samples', loss_scale, args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({'loss-scale': loss_scale}, iteration)
-        if args.log_world_size_to_tensorboard:
-            writer.add_scalar('world-size', args.world_size, iteration)
-            writer.add_scalar('world-size vs samples', args.world_size, args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({'world-size': args.world_size}, iteration)
-        if grad_norm is not None:
-            writer.add_scalar('grad-norm', grad_norm, iteration)
-            writer.add_scalar('grad-norm vs samples', grad_norm, args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({'grad-norm': grad_norm}, iteration)
-        if num_zeros_in_grad is not None:
-            writer.add_scalar('num-zeros', num_zeros_in_grad, iteration)
-            writer.add_scalar(
-                'num-zeros vs samples', num_zeros_in_grad, args.consumed_train_samples
-            )
-            if wandb_writer:
-                wandb_writer.log({'num-zeros': num_zeros_in_grad}, iteration)
-        if params_norm is not None:
-            writer.add_scalar('params-norm', params_norm, iteration)
-            writer.add_scalar('params-norm vs samples', params_norm, args.consumed_train_samples)
-            if wandb_writer:
-                wandb_writer.log({'params-norm': params_norm}, iteration)
-        if args.log_memory_to_tensorboard:
-            mem_stats = torch.cuda.memory_stats()
-            writer.add_scalar(
-                "mem-reserved-bytes", mem_stats["reserved_bytes.all.current"], iteration
-            )
-            writer.add_scalar(
-                "mem-allocated-bytes", mem_stats["allocated_bytes.all.current"], iteration
-            )
-            writer.add_scalar(
-                "mem-max-allocated-bytes", mem_stats["allocated_bytes.all.peak"], iteration
-            )
-            writer.add_scalar("mem-allocated-count", mem_stats["allocation.all.current"], iteration)
-    if args.num_experts is not None:
-        moe_loss_scale = 1 / get_num_microbatches()
-        track_names = []
-        if args.moe_router_load_balancing_type in ["aux_loss", "seq_aux_loss"]:
-            track_names.append("load_balancing_loss")
-        if args.moe_z_loss_coeff is not None:
-            track_names.append("z_loss")
-        track_moe_metrics(
-            loss_scale=moe_loss_scale,
-            iteration=iteration,
-            writer=writer,
-            wandb_writer=wandb_writer,
-            total_loss_dict=total_loss_dict,
-            per_layer_logging=args.moe_per_layer_logging,
-            force_initialize=True,
-            track_names=track_names,
-            num_layers=args.num_layers,
-            moe_layer_freq=args.moe_layer_freq,
-            mtp_num_layers=args.mtp_num_layers,
-        )
-    if args.mtp_num_layers is not None:
-        mtp_loss_scale = 1 / get_num_microbatches()
-        MTPLossLoggingHelper.track_mtp_metrics(
-            mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict
-        )
-    if iteration % args.log_interval == 0:
-        if args.record_memory_history and is_last_rank():
-            snapshot = torch.cuda.memory._snapshot()
-            from pickle import dump
-
-            with open(args.memory_snapshot_path, 'wb') as f:
-                dump(snapshot, f)
-
-        elapsed_time = timers('interval-time').elapsed(barrier=True)
-        elapsed_time_per_iteration = elapsed_time / total_iterations
-
-        throughput = num_floating_point_operations(args, batch_size) / (
-            elapsed_time_per_iteration * 10**12 * args.world_size
-        )
-
-        one_logger_utils.track_e2e_metrics(args.log_throughput, throughput)
-
-        if args.log_timers_to_tensorboard:
-            if writer:
-                writer.add_scalar('iteration-time', elapsed_time_per_iteration, iteration)
-            if wandb_writer:
-                wandb_writer.log({'iteration-time': elapsed_time_per_iteration}, iteration)
-        log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
-        log_string += ' iteration {:8d}/{:8d} |'.format(iteration, args.train_iters)
-        log_string += ' consumed samples: {:12d} |'.format(args.consumed_train_samples)
-        if args.skipped_train_samples > 0:
-            log_string += ' skipped samples: {:12d} |'.format(args.skipped_train_samples)
-        log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
-            elapsed_time_per_iteration * 1000.0
-        )
-        if args.log_throughput:
-            log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
-            if args.log_timers_to_tensorboard:
-                if writer:
-                    writer.add_scalar('throughput', throughput, iteration)
-                if wandb_writer:
-                    wandb_writer.log({'throughput': throughput}, iteration)
-        if args.log_energy:
-            energy = (energy_monitor.lap() / total_iterations) / args.world_size
-            power = energy / elapsed_time_per_iteration
-            log_string += f' energy per GPU (J/iter/GPU): {energy:.1f} |'
-            log_string += f' power per GPU (W/GPU): {power:.1f} |'
-            if writer:
-                writer.add_scalar('iter-energy/gpu', energy, iteration)
-                writer.add_scalar('power/gpu', power, iteration)
-            if wandb_writer:
-                wandb_writer.log({'iter-energy/gpu': energy}, iteration)
-                wandb_writer.log({'power/gpu': power}, iteration)
-        # Decoupled_learning_rate should be not None only on first and last pipeline stage.
-        log_string += f' learning rate: {learning_rate:.6E} |'
-        if args.decoupled_lr is not None and (
-            mpu.is_pipeline_first_stage(ignore_virtual=True)
-            or mpu.is_pipeline_last_stage(ignore_virtual=True)
-        ):
-            assert decoupled_learning_rate is not None
-            log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
-        else:
-            assert decoupled_learning_rate is None
-        log_string += f' global batch size: {batch_size:5d} |'
-        for key in total_loss_dict:
-            if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:
-                avg = total_loss_dict[key].item() / float(
-                    max(1, total_loss_dict[advanced_iters_key])
-                )
-                if avg > 0.0:
-                    log_string += ' {}: {:.6E} |'.format(key, avg)
-                total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
-        log_string += f' loss scale: {loss_scale:.1f} |'
-        if grad_norm is not None:
-            log_string += f' grad norm: {grad_norm:.3f} |'
-        if num_zeros_in_grad is not None:
-            log_string += f' num zeros: {num_zeros_in_grad} |'
-        if params_norm is not None:
-            log_string += f' params norm: {params_norm:.3f} |'
-        log_string += ' number of skipped iterations: {:3d} |'.format(
-            total_loss_dict[skipped_iters_key]
-        )
-        log_string += ' number of nan iterations: {:3d} |'.format(total_loss_dict[nan_iters_key])
-        total_loss_dict[advanced_iters_key] = 0
-        total_loss_dict[skipped_iters_key] = 0
-        total_loss_dict[nan_iters_key] = 0
-        print_rank_last(log_string)
-        if report_memory_flag:
-            # Report memory after optimizer state has been initialized.
-            if torch.distributed.get_rank() == 0:
-                num_microbatches = get_num_microbatches()
-                report_theoretical_memory(args, num_microbatches=num_microbatches, verbose=True)
-            report_memory(f'(after {iteration} iterations)')
-            report_memory_flag = False
-        timers.log(timers_to_log, normalizer=args.log_interval)
-
-    return report_memory_flag, log_string
-
-
 def save_checkpoint_and_time_wrapper(fn):
     @wraps(fn)
     def wrapper(
@@ -1791,118 +1906,3 @@ def save_checkpoint_and_time_wrapper(fn):
            non_persistent_ckpt=non_persistent_ckpt, train_data_iterator=train_data_iterator)
 
     return wrapper
-
-
-def checkpoint_and_decide_exit(
-    model,
-    optimizer,
-    opt_param_scheduler,
-    iteration,
-    num_floating_point_operations_so_far,
-    checkpointing_context,
-    train_data_iterator,
-    iter_log
-):
-    """Save checkpoint and decide whether to exit based on arguments (e.g., if
-    --exit-duration-in-mins is set). Actual exit happens in main training loop
-    based on the return value of this function."""
-    args = get_args()
-    timers = get_timers()
-
-    # Exit based on signal handler.
-    saved_checkpoint = False
-    if args.exit_signal_handler:
-        signal_handler = get_signal_handler()
-        if any(signal_handler.signals_received()):
-            if args.save:
-                save_checkpoint_and_time(
-                    iteration,
-                    model,
-                    optimizer,
-                    opt_param_scheduler,
-                    num_floating_point_operations_so_far,
-                    checkpointing_context,
-                    train_data_iterator=train_data_iterator,
-                )
-            print_datetime('exiting program after receiving SIGTERM.')
-
-            return True
-
-    # Regular save (persistent and non-persistent).
-    if args.save and args.save_interval and iteration % args.save_interval == 0:
-        save_checkpoint_and_time(
-            iteration,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            num_floating_point_operations_so_far,
-            checkpointing_context,
-            train_data_iterator=train_data_iterator,
-        )
-        saved_checkpoint = True
-
-    elif (
-        args.save
-        and args.non_persistent_save_interval
-        and iteration % args.non_persistent_save_interval == 0
-    ):
-        save_checkpoint_and_time(
-            iteration,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            num_floating_point_operations_so_far,
-            checkpointing_context,
-            non_persistent_ckpt=True,
-            train_data_iterator=train_data_iterator,
-        )
-        saved_checkpoint = True
-
-    if is_rank0() and saved_checkpoint:
-        #iter——log写文件
-        iter_log_path = os.path.join(args.save, 'last_ckpt_iter_log.txt')
-        os.makedirs(args.save, exist_ok=True)
-        with open(iter_log_path, 'w') as f:
-            f.write(str(iter_log))
-
-    # Exit based on duration.
-    if args.exit_duration_in_mins:
-        train_time = (time.time() - _TRAIN_START_TIME) / 60.0
-        done_cuda = torch.tensor(
-            [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
-        )
-        torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
-        done = done_cuda.item()
-        if done:
-            if args.save and not saved_checkpoint:
-                save_checkpoint_and_time(
-                    iteration,
-                    model,
-                    optimizer,
-                    opt_param_scheduler,
-                    num_floating_point_operations_so_far,
-                    checkpointing_context,
-                    train_data_iterator=train_data_iterator,
-                )
-            print_datetime(f'exiting program after {train_time} minutes')
-
-            return True
-
-    # Exit based on iterations.
-    if args.exit_interval and iteration % args.exit_interval == 0:
-        if args.save and not saved_checkpoint:
-            save_checkpoint_and_time(
-                iteration,
-                model,
-                optimizer,
-                opt_param_scheduler,
-                num_floating_point_operations_so_far,
-                checkpointing_context,
-                train_data_iterator=train_data_iterator,
-            )
-        torch.distributed.barrier()
-        print_datetime(f'exiting program at iteration {iteration}')
-
-        return True
-
-    return False
