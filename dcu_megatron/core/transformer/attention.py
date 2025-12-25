@@ -61,7 +61,7 @@ def attention_init_wrapper(attention_init_func):
         attn_mask_type,
         attention_type,
         cp_comm_type=None,
-        model_comm_pgs=None,
+        pg_collection=None,
     ):
         attention_init_func(
             self,
@@ -71,8 +71,9 @@ def attention_init_wrapper(attention_init_func):
             attn_mask_type=attn_mask_type,
             attention_type=attention_type,
             cp_comm_type=cp_comm_type,
-            model_comm_pgs=model_comm_pgs,
+            pg_collection=pg_collection,
         )
+        self.split_qkv = False
 
         self.offload_qkv_linear = (
             config.fine_grained_activation_offloading
@@ -105,6 +106,7 @@ class Attention():
         rotary_pos_emb: Optional[Union[Tensor, Tuple[Tensor, Tensor]]] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
+        rotary_pos_cos_sin: Optional[Tensor] = None,
         attention_bias: Optional[Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[int] = None,
@@ -124,6 +126,8 @@ class Attention():
                 embedding tensor(s).
             rotary_pos_cos (Optional[Tensor]): Rotary embedding cosine.
             rotary_pos_sin (Optional[Tensor]): Rotary embedding sine.
+            rotary_pos_cos_sin (Optional[Tensor]): Combined rotary embedding cosine and sine.
+            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
             attention_bias (Optional[Tensor]): Attention bias.
             packed_seq_params (Optional[PackedSeqparams]): Parameters used for THD format.
             sequence_len_offset (Optional[int]): Sequence length offset used for
@@ -149,7 +153,17 @@ class Attention():
             ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
-        if self.config.flash_decode and not self.training and inference_context is not None:
+        is_inference_mode = inference_context is not None and not self.training
+        # is_using_flash_decode - True is we are using the static inference engine with flash decode
+        is_using_flash_decode = is_inference_mode and self.config.flash_decode
+        # is_using_flashinfer_rope - True if we are using the dynamic inference engine
+        # with flashinfer fused rope
+        is_using_flashinfer_rope = is_inference_mode and (
+            not inference_context.is_static_batching()
+            and inference_context.use_flashinfer_fused_rope
+        )
+        if is_using_flash_decode or is_using_flashinfer_rope:
+            # flash decode and flash-infer fused rope use rotary_pos_cos and rotary_pos_sin
             rotary_pos_emb = None
         else:
             assert rotary_pos_cos is None and rotary_pos_sin is None
@@ -164,7 +178,39 @@ class Attention():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         nvtx_range_push(suffix="qkv")
-        query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        split_qkv = (self.attention_type == "cross") or not all(
+            [
+                not self.config.test_mode,
+                self.config.fused_single_qkv_rope,
+                inference_context is None,
+                packed_seq_params is None,
+                (
+                    rotary_pos_emb is not None
+                    and rotary_pos_emb[0] is not None
+                    and rotary_pos_emb[1] is not None
+                ),
+                not self.config.flash_decode,
+                HAVE_FUSED_QKV_ROPE,
+                self.q_layernorm is None or isinstance(self.q_layernorm, IdentityOp),
+                self.k_layernorm is None or isinstance(self.k_layernorm, IdentityOp),
+            ]
+        )
+        # Check if fused_single_qkv_rope is requested but either unavailable or not
+        # supported for the current use case.
+        if self.attention_type != "cross":
+            assert not (
+                self.config.fused_single_qkv_rope and split_qkv
+            ), "fused_single_qkv_rope requested but not available/supported for the config."
+
+        qkv_output = self.get_query_key_value_tensors(
+            hidden_states, key_value_states, split_qkv=split_qkv
+        )
+        attn_mask_type = self.attn_mask_type
+        block_table = None
+        if split_qkv:
+            query, key, value = qkv_output
+        else:
+            mixed_qkv, qkv_split_arg_list = qkv_output
         nvtx_range_pop(suffix="qkv")
 
         # ===================================================
@@ -204,23 +250,26 @@ class Attention():
 
         if (
             in_decode_mode
-            and self.config.enable_cuda_graph
+            and self.config.cuda_graph_impl == "local"
+            and self.config.cuda_graph_scope != "full_iteration"
             and inference_context.is_static_batching()
         ):
             raise ValueError(f"CUDA graphs must use flash decode with static batching!")
 
-        query, key, value, rotary_pos_emb, attn_mask_type, block_table = (
-            self._adjust_key_value_for_inference(
-                inference_context,
-                query,
-                key,
-                value,
-                rotary_pos_emb,
-                rotary_pos_cos,
-                rotary_pos_sin,
-                sequence_len_offset,
+        if split_qkv:
+            query, key, value, rotary_pos_emb, attn_mask_type, block_table = (
+                self._adjust_key_value_for_inference(
+                    inference_context,
+                    query,
+                    key,
+                    value,
+                    rotary_pos_emb,
+                    rotary_pos_cos,
+                    rotary_pos_sin,
+                    rotary_pos_cos_sin,
+                    sequence_len_offset,
+                )
             )
-        )
 
         if packed_seq_params is not None:
             query = query.squeeze(1)
@@ -232,7 +281,9 @@ class Attention():
         # relative positional embedding (rotary embedding)
         # ================================================
         nvtx_range_push(suffix="rotary_pos_emb")
-        if rotary_pos_emb is not None and not self.config.flash_decode:
+        if rotary_pos_emb is not None and (
+            not self.config.flash_decode or inference_context is None
+        ):
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
             if packed_seq_params is not None:
@@ -247,27 +298,34 @@ class Attention():
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
 
-            if q_pos_emb is not None:
-                # TODO VIJAY: simplify
-                if inference_context is None or inference_context.is_static_batching():
-                    query = apply_rotary_pos_emb(
-                        query,
-                        q_pos_emb,
+            if split_qkv:
+                if q_pos_emb is not None:
+                    # TODO VIJAY: simplify
+                    if inference_context is None or inference_context.is_static_batching():
+                        query = apply_rotary_pos_emb(
+                            query,
+                            q_pos_emb,
+                            config=self.config,
+                            cu_seqlens=cu_seqlens_q,
+                            mscale=_yarn_get_concentration_factor_from_config(self.config),
+                            cp_group=self.pg_collection.cp,
+                        )
+                    else:
+                        query = inference_context.apply_rotary_emb_query(
+                            query, q_pos_emb, self.config, cu_seqlens_q, self.pg_collection.cp
+                        )
+                if k_pos_emb is not None:
+                    key = apply_rotary_pos_emb(
+                        key,
+                        k_pos_emb,
                         config=self.config,
-                        cu_seqlens=cu_seqlens_q,
-                        cp_group=self.model_comm_pgs.cp,
+                        cu_seqlens=cu_seqlens_kv,
+                        mscale=_yarn_get_concentration_factor_from_config(self.config),
+                        cp_group=self.pg_collection.cp,
                     )
-                else:
-                    query = inference_context.apply_rotary_emb_query(
-                        query, q_pos_emb, self.config, cu_seqlens_q, self.model_comm_pgs.cp
-                    )
-            if k_pos_emb is not None:
-                key = apply_rotary_pos_emb(
-                    key,
-                    k_pos_emb,
-                    config=self.config,
-                    cu_seqlens=cu_seqlens_kv,
-                    cp_group=self.model_comm_pgs.cp,
+            else:
+                query, key, value = apply_fused_qkv_rotary_pos_emb(
+                    mixed_qkv, q_pos_emb, k_pos_emb, qkv_split_arg_list
                 )
 
             # TODO, can apply positional embedding to value_layer so it has
@@ -315,9 +373,7 @@ class Attention():
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
-                cu_kv_lengths, kv_lengths, kv_lengths_decode_only, max_seqlen_k = (
-                    inference_context.cu_kv_lengths()
-                )
+                cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
 
                 core_attn_out = self.flash_decode_and_prefill(
                     q,
@@ -328,7 +384,6 @@ class Attention():
                     cu_query_lengths,
                     cu_kv_lengths,
                     kv_lengths,
-                    kv_lengths_decode_only,
                     block_table,
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
@@ -392,21 +447,46 @@ class Attention():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         nvtx_range_push(suffix="qkv")
-        query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        self.split_qkv = (self.attention_type == "cross") or not all(
+            [
+                not self.config.test_mode,
+                self.config.fused_single_qkv_rope,
+                inference_context is None,
+                packed_seq_params is None,
+                (
+                    rotary_pos_emb is not None
+                    and rotary_pos_emb[0] is not None
+                    and rotary_pos_emb[1] is not None
+                ),
+                not self.config.flash_decode,
+                HAVE_FUSED_QKV_ROPE,
+                self.q_layernorm is None or isinstance(self.q_layernorm, IdentityOp),
+                self.k_layernorm is None or isinstance(self.k_layernorm, IdentityOp),
+            ]
+        )
+        # Check if fused_single_qkv_rope is requested but either unavailable or not
+        # supported for the current use case.
+        if self.attention_type != "cross":
+            assert not (
+                self.config.fused_single_qkv_rope and self.split_qkv
+            ), "fused_single_qkv_rope requested but not available/supported for the config."
+
+        qkv_output = self.get_query_key_value_tensors(
+            hidden_states, key_value_states, split_qkv=self.split_qkv
+        )
         nvtx_range_pop(suffix="qkv")
 
-        return query, key, value
+        return qkv_output
 
     def compute_attn(
         self,
-        query,
-        key,
-        value,
+        qkv_output,
         attention_mask: Tensor,
         inference_context: Optional[BaseInferenceContext] = None,
         rotary_pos_emb: Optional[Union[Tensor, Tuple[Tensor, Tensor]]] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
+        rotary_pos_cos_sin: Optional[Tensor] = None,
         attention_bias: Optional[Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[int] = None,
@@ -437,6 +517,11 @@ class Attention():
         """
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
+        if self.split_qkv:
+            query, key, value = qkv_output
+        else:
+            mixed_qkv, qkv_split_arg_list = qkv_output
+
         no_rope = (
             self.config.no_rope_freq[self.layer_number - 1] if self.config.no_rope_freq else False
         )
@@ -497,23 +582,28 @@ class Attention():
 
         if (
             in_decode_mode
-            and self.config.enable_cuda_graph
+            and self.config.cuda_graph_impl == "local"
+            and self.config.cuda_graph_scope != "full_iteration"
             and inference_context.is_static_batching()
         ):
             raise ValueError(f"CUDA graphs must use flash decode with static batching!")
 
-        query, key, value, rotary_pos_emb, attn_mask_type, block_table = (
-            self._adjust_key_value_for_inference(
-                inference_context,
-                query,
-                key,
-                value,
-                rotary_pos_emb,
-                rotary_pos_cos,
-                rotary_pos_sin,
-                sequence_len_offset,
+        attn_mask_type = self.attn_mask_type
+        block_table = None
+        if self.split_qkv:
+            query, key, value, rotary_pos_emb, attn_mask_type, block_table = (
+                self._adjust_key_value_for_inference(
+                    inference_context,
+                    query,
+                    key,
+                    value,
+                    rotary_pos_emb,
+                    rotary_pos_cos,
+                    rotary_pos_sin,
+                    rotary_pos_cos_sin,
+                    sequence_len_offset,
+                )
             )
-        )
 
         if packed_seq_params is not None:
             query = query.squeeze(1)
@@ -525,7 +615,9 @@ class Attention():
         # relative positional embedding (rotary embedding)
         # ================================================
         nvtx_range_push(suffix="rotary_pos_emb")
-        if rotary_pos_emb is not None and not self.config.flash_decode:
+        if rotary_pos_emb is not None and (
+            not self.config.flash_decode or inference_context is None
+        ):
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
             if packed_seq_params is not None:
@@ -540,27 +632,34 @@ class Attention():
             else:
                 cu_seqlens_q = cu_seqlens_kv = None
 
-            if q_pos_emb is not None:
-                # TODO VIJAY: simplify
-                if inference_context is None or inference_context.is_static_batching():
-                    query = apply_rotary_pos_emb(
-                        query,
-                        q_pos_emb,
+            if self.split_qkv:
+                if q_pos_emb is not None:
+                    # TODO VIJAY: simplify
+                    if inference_context is None or inference_context.is_static_batching():
+                        query = apply_rotary_pos_emb(
+                            query,
+                            q_pos_emb,
+                            config=self.config,
+                            cu_seqlens=cu_seqlens_q,
+                            mscale=_yarn_get_concentration_factor_from_config(self.config),
+                            cp_group=self.pg_collection.cp,
+                        )
+                    else:
+                        query = inference_context.apply_rotary_emb_query(
+                            query, q_pos_emb, self.config, cu_seqlens_q, self.pg_collection.cp
+                        )
+                if k_pos_emb is not None:
+                    key = apply_rotary_pos_emb(
+                        key,
+                        k_pos_emb,
                         config=self.config,
-                        cu_seqlens=cu_seqlens_q,
-                        cp_group=self.model_comm_pgs.cp,
+                        cu_seqlens=cu_seqlens_kv,
+                        mscale=_yarn_get_concentration_factor_from_config(self.config),
+                        cp_group=self.pg_collection.cp,
                     )
-                else:
-                    query = inference_context.apply_rotary_emb_query(
-                        query, q_pos_emb, self.config, cu_seqlens_q, self.model_comm_pgs.cp
-                    )
-            if k_pos_emb is not None:
-                key = apply_rotary_pos_emb(
-                    key,
-                    k_pos_emb,
-                    config=self.config,
-                    cu_seqlens=cu_seqlens_kv,
-                    cp_group=self.model_comm_pgs.cp,
+            else:
+                query, key, value = apply_fused_qkv_rotary_pos_emb(
+                    mixed_qkv, q_pos_emb, k_pos_emb, qkv_split_arg_list
                 )
 
             # TODO, can apply positional embedding to value_layer so it has
@@ -607,9 +706,7 @@ class Attention():
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
-                cu_kv_lengths, kv_lengths, kv_lengths_decode_only, max_seqlen_k = (
-                    inference_context.cu_kv_lengths()
-                )
+                cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
 
                 core_attn_out = self.flash_decode_and_prefill(
                     q,
@@ -620,7 +717,6 @@ class Attention():
                     cu_query_lengths,
                     cu_kv_lengths,
                     kv_lengths,
-                    kv_lengths_decode_only,
                     block_table,
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
@@ -660,9 +756,10 @@ class Attention():
 
 
 class SelfAttention:
-    def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
+    def get_query_key_value_tensors(self, hidden_states, key_value_states=None, split_qkv=True):
         """
-        Derives `query`, `key` and `value` tensors from `hidden_states`.
+        Derives `query`, `key` and `value` tensors from `hidden_states`. If `split_qkv=False`, then
+        the unsplit mixed_qkv tensor is returned.
         """
         # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
         offload_context = contextlib.nullcontext()
@@ -700,6 +797,10 @@ class SelfAttention:
             self.hidden_size_per_attention_head,
             self.hidden_size_per_attention_head,
         ]
+
+        # Return unsplit mixed_qkv and split_arg_list
+        if not split_qkv:
+            return mixed_qkv, split_arg_list
 
         if SplitAlongDim is not None:
 

@@ -9,6 +9,7 @@ import torch.distributed
 
 from megatron.training import get_args, print_rank_0
 from megatron.core.utils import is_torch_min_version
+from megatron.core import parallel_state
 
 PARALLEL_GROUP_RANKS_MAP = defaultdict(list)
 _GROUP_MAP = {}
@@ -75,6 +76,12 @@ def create_group(
             # type error.
             kwargs.pop('timeout')
     group = torch.distributed.new_group(**kwargs)
+    # global _global_process_group_list
+    if parallel_state._global_process_group_list is None:
+        # None stands for the default process group
+        parallel_state._global_process_group_list = [None]
+    if torch.distributed.get_rank() in ranks:
+        parallel_state._global_process_group_list.append(group)
 
     global _GROUP_MAP
     _GROUP_MAP[group] = group_desc

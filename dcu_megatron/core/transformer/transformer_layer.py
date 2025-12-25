@@ -10,7 +10,7 @@ from megatron.core import parallel_state, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import (
     deprecate_inference_params,
     nvtx_range_pop,
@@ -26,12 +26,17 @@ from dcu_megatron.core.transformer import (
 from .utils import DelayReleaseQKVLinearTensorContextManager
 
 
-def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None):
+def get_transformer_layer_offset(
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
     args = get_args()
     pipeline_size = parallel_state.get_pipeline_model_parallel_world_size()
-    pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
-    actual_rank = pipeline_rank if getattr(args, 'dualpipev_first_chunk', True) else 2 * pipeline_size - 1 - pipeline_rank
+
+    if pp_rank is None:
+        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+
+    actual_rank = pp_rank if getattr(args, 'dualpipev_first_chunk', True) else 2 * pipeline_size - 1 - pp_rank
     if args.num_layers_to_build is not None:
         if isinstance(args.num_layers_to_build, int):
             return args.num_layers_to_build * actual_rank
@@ -41,7 +46,7 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
     if not parallel_state.is_inside_encoder():
         pp_decoder_start = parallel_state.get_pipeline_model_parallel_decoder_start()
         if pp_decoder_start is not None:
-            pipeline_rank = pipeline_rank - pp_decoder_start
+            pp_rank = pp_rank - pp_decoder_start
 
     if config.pipeline_model_parallel_size > 1:
 
@@ -92,9 +97,9 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
                 num_layers_per_pipeline_rank = 0
 
             middle_pipeline_rank = (
-                pipeline_rank
+                pp_rank
                 if config.num_layers_in_first_pipeline_stage is None
-                else pipeline_rank - 1
+                else pp_rank - 1
             )
 
             if not getattr(args, 'dualpipev_first_chunk', True):
@@ -102,9 +107,9 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
                     config.pipeline_model_parallel_size
                     if config.num_layers_in_first_pipeline_stage is None
                     else config.pipeline_model_parallel_size - 1
-                ) + (config.pipeline_model_parallel_size - (pipeline_rank + 1))
+                ) + (config.pipeline_model_parallel_size - (pp_rank + 1))
 
-            if getattr(args, 'dualpipev_first_chunk', True) and pipeline_rank == 0:
+            if getattr(args, 'dualpipev_first_chunk', True) and pp_rank == 0:
                     offset = 0
             else:
                 offset = (
@@ -126,9 +131,9 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
                 num_layers_per_pipeline_rank = num_layers_per_pipeline_rank // 2
 
             if getattr(args, 'dualpipev_first_chunk', True):
-                offset = pipeline_rank * num_layers_per_pipeline_rank
+                offset = pp_rank * num_layers_per_pipeline_rank
             else:
-                offset = num_layers - (pipeline_rank + 1) * num_layers_per_pipeline_rank
+                offset = num_layers - (pp_rank + 1) * num_layers_per_pipeline_rank
 
             # Reduce the offset of embedding layer from the total layer number
             if config.account_for_embedding_in_pipeline_split:
@@ -149,7 +154,7 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
         submodules,
         layer_number: int = 1,
         hidden_dropout: Optional[float] = None,
-        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
     ):
         transformer_layer_init_func(
@@ -158,7 +163,7 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
             submodules=submodules,
             layer_number=layer_number,
             hidden_dropout=hidden_dropout,
-            model_comm_pgs=model_comm_pgs,
+            pg_collection=pg_collection,
             vp_stage=vp_stage,
         )
 
@@ -194,6 +199,7 @@ class TransformerLayer():
         rotary_pos_emb: Optional[Tensor] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
+        rotary_pos_cos_sin: Optional[Tensor] = None,
         attention_bias: Optional[Tensor] = None,
         inference_context: Optional[Any] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
@@ -212,6 +218,10 @@ class TransformerLayer():
             context (Tensor, optional): Context tensor for cross-attention.
             context_mask (Tensor, optional): Mask tensor for cross-attention.
             rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
+            rotary_pos_cos (Optional[Tensor]): Rotary embedding cosine.
+            rotary_pos_sin (Optional[Tensor]): Rotary embedding sine.
+            rotary_pos_cos_sin (Optional[Tensor]): Combined rotary embedding cosine and sine.
+            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
             attention_bias (Tensor, optional): Bias tensor for Q * K.T.
             inference_context (object, optional): Parameters for inference-time optimizations.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
@@ -264,6 +274,7 @@ class TransformerLayer():
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
+                rotary_pos_cos_sin=rotary_pos_cos_sin,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 sequence_len_offset=sequence_len_offset,
@@ -382,7 +393,7 @@ class TransformerLayer():
                     self.mlp,
                     False,
                     tensor_parallel.random.get_cuda_rng_tracker,
-                    parallel_state.get_tensor_model_parallel_group(),
+                    self.pg_collection.tp,
                     pre_mlp_layernorm_output,
                 )
             else:

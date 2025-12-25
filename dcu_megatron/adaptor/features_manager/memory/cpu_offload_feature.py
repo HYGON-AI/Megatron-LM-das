@@ -47,6 +47,7 @@ class CPUOffloadFeature(AbstractFeature):
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
         from dcu_megatron.core.extensions.transformer_engine import te_module_init_wrapper
+        from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_with_interleaving_wrapper
 
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.initialize_model_chunk_offload_handler',
                                      GPTModel.initialize_model_chunk_offload_handler,
@@ -59,6 +60,10 @@ class CPUOffloadFeature(AbstractFeature):
 
         patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                      TEGroupedMLP.forward)
+
+        patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
+                                     forward_backward_pipelining_with_interleaving_wrapper,
+                                     apply_wrapper=True)
 
         patch_manager.register_cls_funcs('megatron.core.transformer.mlp.MLP',
                                          [MLP._offload_shared_fc1_forward,
@@ -86,4 +91,3 @@ class CPUOffloadFeature(AbstractFeature):
         patch_manager.register_patch('transformer_engine.pytorch.module.batched_linear.BatchedLinear.__init__',
                                      te_module_init_wrapper,
                                      apply_wrapper=True)
-        

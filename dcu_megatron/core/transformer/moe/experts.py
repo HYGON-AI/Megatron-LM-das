@@ -94,12 +94,6 @@ class GroupedMLP():
 
         return fc2_output, None
 
-    def backward_dw(self):
-        """Performs backward pass for weight gradients in Experts.
-        Empty implementation for compatibility with SequentialMLP and TEGroupedMLP.
-        """
-        pass
-
 
 def te_grouped_mlp_init_wrapper(te_grouped_mlp_init_func):
     @wraps(te_grouped_mlp_init_func)
@@ -108,14 +102,14 @@ def te_grouped_mlp_init_wrapper(te_grouped_mlp_init_func):
         num_local_experts,
         config,
         submodules,
-        model_comm_pgs,
+        pg_collection,
     ):
         te_grouped_mlp_init_func(
             self,
             num_local_experts=num_local_experts,
             config=config,
             submodules=submodules,
-            model_comm_pgs=model_comm_pgs,
+            pg_collection=pg_collection,
         )
 
         self.offload_expert_fc1 = (
@@ -194,7 +188,15 @@ class TEGroupedMLP():
             offload_context = contextlib.nullcontext()
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
-            if self.config.bias_activation_fusion:
+            if self.config.use_te_activation_func:
+                if bias_parallel is not None:
+                    intermediate_parallel = intermediate_parallel + bias_parallel
+                intermediate_parallel = self.activation_func(intermediate_parallel)
+                if permuted_probs is not None:
+                    original_dtype = intermediate_parallel.dtype
+                    intermediate_parallel = intermediate_parallel * permuted_probs
+                    intermediate_parallel = intermediate_parallel.to(original_dtype)
+            elif self.config.bias_activation_fusion:
                 if self.activation_func == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
                     intermediate_parallel = weighted_bias_swiglu_impl(
@@ -203,14 +205,30 @@ class TEGroupedMLP():
                         permuted_probs,
                         self.config.activation_func_fp8_input_store,
                     )
+                elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
+                    intermediate_parallel = weighted_bias_quick_geglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        permuted_probs,
+                        self.config.activation_func_fp8_input_store,
+                        self.config.glu_linear_offset,
+                        self.config.activation_func_clamp_value,
+                    )
                 else:
-                    raise ValueError("Only support fusion of swiglu in TEGroupedMLP.")
+                    raise ValueError(
+                        "Only support fusion of swiglu and quick_gelu in TEGroupedMLP."
+                    )
+            elif (
+                self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
+            ):
+                assert bias_parallel is None
+                intermediate_parallel = weighted_squared_relu_impl(
+                    intermediate_parallel, permuted_probs
+                )
             else:
                 from dcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
                 intermediate_parallel = fused_bias_gelu(
-                    bias_parallel,
                     intermediate_parallel,
-                    tokens_per_expert,
                     permuted_probs,
                     self.config.gated_linear_unit,
                     self.activation_func,
@@ -254,20 +272,7 @@ class TEGroupedMLP():
         if self.config.fp8:
             output = self.fp8_unpadding(output, actual_tokens_per_expert)
 
+        output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
+        output_bias = None
+
         return output, output_bias
-
-    def backward_dw(self):
-        self.linear_fc2.backward_dw()
-        self.linear_fc1.backward_dw()
-
-
-class SequentialMLP():
-    def backward_dw(self):
-        """Backward pass for weight gradients in SequentialMLP."""
-        try:
-            for expert in self.local_experts:
-                expert.backward_dw()
-        except Exception as e:
-            raise Exception(
-                f"Unknown error occurred during SequentialMLP backward_dw() execution: {str(e)}"
-            )

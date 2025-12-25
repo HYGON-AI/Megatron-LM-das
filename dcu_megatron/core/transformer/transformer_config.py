@@ -1,5 +1,3 @@
-import warnings
-
 from functools import wraps
 from dataclasses import make_dataclass, field
 

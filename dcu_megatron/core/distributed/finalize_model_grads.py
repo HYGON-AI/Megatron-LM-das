@@ -15,11 +15,21 @@ from megatron.core import parallel_state
 from megatron.core.utils import get_model_config
 from megatron.training.global_vars import get_args
 from ...training.edgc_utils import Utils
-from megatron.core.distributed.finalize_model_grads import _allreduce_conditional_embedding_grads, \
-    _allreduce_layernorm_grads, _allreduce_embedding_grads, _update_router_expert_bias
+from megatron.core.distributed.finalize_model_grads import (
+    _allreduce_conditional_embedding_grads,
+    _allreduce_non_tensor_model_parallel_grads,
+    _allreduce_word_embedding_grads,
+    _allreduce_position_embedding_grads,
+    reset_model_temporary_tensors,
+    _update_router_expert_bias
+)
 
 
-def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torch.Tensor] = None):
+def finalize_model_grads(
+    model: List[torch.nn.Module],
+    num_tokens: Optional[torch.Tensor] = None,
+    pg_collection: Optional[ProcessGroupCollection] = None,
+):
     """
     All-reduce all model grads across DP replicas, layernorm grads for sequence parallelism,
     embedding grads across first and last pipeline stages (if not tied),
@@ -28,6 +38,35 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
 
     args = get_args()
     config = get_model_config(model[0])
+    if pg_collection is not None:
+        assert hasattr(pg_collection, 'tp')
+        assert hasattr(pg_collection, 'pp')
+        assert hasattr(pg_collection, 'embd'), (
+            "pg_collection must have a embd. In previous version, it is used default "
+            "`parallel_state.default_embedding_ranks` to create the process group."
+            " If you are using the default process group, please use"
+            " `parallel_state.get_embedding_group()` "
+            "If you don't need embd_group, you need to explicitly set it to None."
+        )
+        assert hasattr(pg_collection, 'pos_embd'), (
+            "pg_collection must have a pos_embd. In previous version, it is used default "
+            "`parallel_state.default_position_embedding_ranks` to create the process group."
+            " If you are using the default process group, please use "
+            " `parallel_state.get_position_embedding_group()` "
+            "If you don't need pos_embd_group, you need to explicitly set it to None."
+        )
+        assert hasattr(pg_collection, 'dp_cp')
+        tp_group = pg_collection.tp
+        pp_group = pg_collection.pp
+        embd_group = pg_collection.embd
+        pos_emb_group = pg_collection.pos_embd
+        dp_cp_group = pg_collection.dp_cp
+    else:
+        tp_group = parallel_state.get_tensor_model_parallel_group()
+        pp_group = parallel_state.get_pipeline_model_parallel_group()
+        embd_group = parallel_state.get_embedding_group(check_initialized=False)
+        pos_emb_group = parallel_state.get_position_embedding_group(check_initialized=False)
+        dp_cp_group = parallel_state.get_data_parallel_group(with_context_parallel=True)
 
     # All-reduce / reduce-scatter across DP replicas.
     if config.timers is not None:
@@ -144,30 +183,34 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
         config.timers('conditional-embedder-grads-all-reduce', log_level=1).start(
             barrier=config.barrier_with_L1_time
         )
-    _allreduce_conditional_embedding_grads(model, config)
+    _allreduce_conditional_embedding_grads(model, config, pp_group)
     if config.timers is not None:
         config.timers('conditional-embedder-grads-all-reduce').stop()
 
-    # All-reduce layer-norm grads (for sequence parallelism).
+    # All-reduce layer-norm grads (for sequence parallelism) and non-tensor parallel modules.
     if config.timers is not None:
-        config.timers('layernorm-grads-all-reduce', log_level=1).start(
+        config.timers('non-tensor-parallel-grads-all-reduce', log_level=1).start(
             barrier=config.barrier_with_L1_time
         )
-    _allreduce_layernorm_grads(model, config)
+    _allreduce_non_tensor_model_parallel_grads(model, config, tp_group)
     if config.timers is not None:
-        config.timers('layernorm-grads-all-reduce').stop()
+        config.timers('non-tensor-parallel-grads-all-reduce').stop()
 
     # All-reduce embedding grads (for pipeline parallelism).
     if config.timers is not None:
         config.timers('embedding-grads-all-reduce', log_level=1).start(
             barrier=config.barrier_with_L1_time
         )
-    _allreduce_embedding_grads(model, config)
+    _allreduce_word_embedding_grads(model, config, embd_group, pp_group)
+    _allreduce_position_embedding_grads(model, config, pos_emb_group, pp_group)
+
     if config.timers is not None:
         config.timers('embedding-grads-all-reduce').stop()
 
     if config.moe_router_enable_expert_bias:
         _update_router_expert_bias(model, config)
+
+    reset_model_temporary_tensors(config, model)
 
     # normalize gradients for per-token loss normalization.
     # if we are using by the number of tokens, then we use that as a divisor. this number
@@ -176,24 +219,12 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
 
         # the number of tokens is only present on the last stage, so broadcast it
         # to the other ranks in the pipeline parallel group.
-        last_rank = parallel_state.get_pipeline_model_parallel_last_rank()
-        pp_group = parallel_state.get_pipeline_model_parallel_group()
-
-        if not isinstance(last_rank, list):
-            assert not isinstance(last_rank, list)
-            last_rank = [last_rank]
-            assert not isinstance(pp_group, list)
-            pp_group = [pp_group]
-
-        # need to do a broadcast for every pp group, even though num_tokens should be the same.
-        num_tokens_list = []
-        for lr, group in zip(last_rank, pp_group):
-            torch.distributed.broadcast(num_tokens, src=lr, group=group)
-            num_tokens_list.append(torch.clone(num_tokens))
-        assert all(x.item() == num_tokens_list[0] for x in num_tokens_list)
+        assert not isinstance(pp_group, list)
+        last_rank = get_pp_last_rank(pp_group)
+        torch.distributed.broadcast(num_tokens, src=last_rank, group=pp_group)
 
         # all-reduce across DP ranks.
-        torch.distributed.all_reduce(num_tokens, group=parallel_state.get_data_parallel_group())
+        torch.distributed.all_reduce(num_tokens, group=dp_cp_group)
         for model_chunk in model:
             if num_tokens > 0:
                 scaling = 1.0 / num_tokens

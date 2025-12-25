@@ -1,7 +1,7 @@
 from functools import wraps
 
 from transformers import AutoTokenizer, Qwen2Tokenizer, AutoProcessor
-from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
+from megatron.core.datasets.megatron_tokenizer import MegatronLegacyTokenizer
 from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
 
 
@@ -41,7 +41,7 @@ def build_tokenizer_wrapper(build_tokenizer_func):
     return wrapper
 
 
-class _Llama3Tokenizer(MegatronTokenizer):
+class _Llama3Tokenizer(MegatronLegacyTokenizer):
     """tiktokenTokenizer-Megatron llama3 改写"""
     # https://github.com/meta-llama/llama3/blob/main/llama/tokenizer.py
 
@@ -93,7 +93,7 @@ class _Llama3Tokenizer(MegatronTokenizer):
     def eod(self):
         return self.eod_id
 
-class _Qwen2Tokenizer(MegatronTokenizer):
+class _Qwen2Tokenizer(MegatronLegacyTokenizer):
     def __init__(self, vocab_file, merge_file,extra_vocab_size=0):
         super().__init__(vocab_file, merge_file)
         self.tokenizer = Qwen2Tokenizer(vocab_file, merge_file)
@@ -131,7 +131,7 @@ class _Qwen2Tokenizer(MegatronTokenizer):
         return self.tokenizer.pad_token_id
 
 
-class _DeepSeekV2Tokenizer(MegatronTokenizer):
+class _DeepSeekV2Tokenizer(MegatronLegacyTokenizer):
     def __init__(self, tokenizer_path, extra_vocab_size):
         super().__init__(tokenizer_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -196,7 +196,7 @@ class _DeepSeekV2Tokenizer(MegatronTokenizer):
         return self.tokenizer.eos_token_id
 
 
-class _Qwen2VLTokenizer(MegatronTokenizer):
+class _Qwen2VLTokenizer(MegatronLegacyTokenizer):
     def __init__(self, tokenizer_path, extra_vocab_size):
         super().__init__(tokenizer_path)
         self.tokenizer = AutoTokenizer.from_pretrained(

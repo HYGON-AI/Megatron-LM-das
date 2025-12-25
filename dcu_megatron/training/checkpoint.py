@@ -57,7 +57,7 @@ from .training import iter_log
 
 def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floating_point_operations_so_far,
                     checkpointing_context=None, pipeline_rank=None, expert_rank=None, tensor_rank=None, pipeline_parallel=None, expert_parallel=None, non_persistent_ckpt=False,
-                    train_data_iterator=None, preprocess_common_state_dict_fn = None):
+                    train_data_iterator=None, preprocess_common_state_dict_fn = None, release=False):
     """Save a model, optimizer and optionally dataloader checkpoint.
 
     Checkpointing context is used to persist some checkpointing state
@@ -124,7 +124,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
 
     # Checkpoint name.
     return_base_dir = (ckpt_type != CheckpointType.LEGACY)
-    checkpoint_name = get_checkpoint_name(save_dir, iteration, release=False, pipeline_parallel=pipeline_parallel,
+    checkpoint_name = get_checkpoint_name(save_dir, iteration, release=release, pipeline_parallel=pipeline_parallel,
         tensor_rank=tensor_rank, pipeline_rank=pipeline_rank, expert_parallel=expert_parallel, expert_rank=expert_rank, return_base_dir=return_base_dir)
 
     # Save dataloader state if the dataloader supports it (currently only Megatron Energon).
@@ -210,7 +210,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
             # [ModelOpt]: save sharded modelopt_state
             if has_nvidia_modelopt:
                 save_sharded_modelopt_state(model, checkpoint_name, (args.ckpt_format, 1))
-        elif ckpt_type == CheckpointType.GLOBAL and ckpt_format == "torch_dcp":
+        elif ckpt_type == CheckpointType.GLOBAL and ckpt_format in ["torch_dcp", "fsdp_dtensor"]:
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 # TODO Handle non-empty directories (e.g., after a crash during saving).
                 ensure_directory_exists(checkpoint_name, check_parent=False)
@@ -236,6 +236,12 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
                 except ModuleNotFoundError:
                     raise RuntimeError("The 'nvidia_resiliency_ext' module is required for local "
                                        "checkpointing but was not found. Please ensure it is installed.")
+                if (sharded_sd_metadata or {}).get('distrib_optim_sharding_type') in ['fully_reshardable', 'dp_zero_gather_scatter']:
+                    # Note: Currently full reshardabilty is not supported when local checkpoints are used.
+                    raise RuntimeError(
+                        f"Local checkpointing does not support optimizer sharding type '{sharded_sd_metadata['distrib_optim_sharding_type']}'. "
+                        "Don't use '--dist-ckpt-optim-fully-reshardable' when saving local checkpoints."
+                    )
 
                 algo = args.non_persistent_local_ckpt_algo
                 cached_metadata = None
@@ -276,15 +282,49 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
                                            barrier=False)
         else:
             def iter_finalize_fn():
-                with open(tracker_filename, 'w') as f:
-                    f.write(str(iteration))
-                    f.write(str(iter_log))
+                prev_iteration = 0
+                save_retain_interval = getattr(args, 'save_retain_interval', None)  # For backwards compatibility of tests.
+                if save_retain_interval is not None:
+                    if os.path.exists(tracker_filename):  # TODO: Make this work with MSC remote paths?
+                        with open_file(tracker_filename, 'r') as f:
+                            prev_iteration = int(f.read().strip())
+                with open_file(tracker_filename, 'w') as f:
+                    f.write("release" if release else str(iteration))
+                tensor_rank_to_print = (tensor_rank if tensor_rank is not None else mpu.get_tensor_model_parallel_rank()) + 1
+                pipeline_rank_to_print = (pipeline_rank if pipeline_rank is not None else mpu.get_pipeline_model_parallel_rank()) + 1
                 print_rank_0(f'  successfully saved checkpoint from iteration {int(iteration):7d} to {args.save} '
-                             f'[ t {(tensor_rank if tensor_rank is not None else mpu.get_tensor_model_parallel_rank()) + 1}/{mpu.get_tensor_model_parallel_world_size()}, '
-                             f'p {(pipeline_rank if pipeline_rank is not None else mpu.get_pipeline_model_parallel_rank()) + 1}/{mpu.get_pipeline_model_parallel_world_size()} ]')
+                             f'[ t {tensor_rank_to_print}/{mpu.get_tensor_model_parallel_world_size()}, '
+                             f'p {pipeline_rank_to_print}/{mpu.get_pipeline_model_parallel_world_size()} ]')
                 if args.log_progress and args.async_save:
                     append_to_progress_log(f'Saved async checkpoint\tIteration: {iteration}',
                                            barrier=False)
+
+                def delete_checkpoint(args, iteration_to_delete):
+                    checkpoint_name = get_checkpoint_name(args.save, iteration=iteration_to_delete,
+                                                          return_base_dir=True)
+                    try:
+                        shutil.rmtree(checkpoint_name)  # TODO: Make this work with MSC remote paths?
+                        print_rank_0(f'  successfully deleted checkpoint from iteration {iteration_to_delete:7d} '
+                                     f'at {args.save}')
+                        if args.log_progress:
+                            append_to_progress_log(f'Deleted checkpoint\tIteration: {iteration_to_delete}', barrier=False)
+                    except Exception as e:
+                        print_rank_0(f'  encountered exception "{e}" when trying to delete checkpoint from '
+                                     f'iteration {iteration_to_delete:7d} at {args.save}')
+                        # Any exception encountered in checkpoint deletion can be ignored and is not fatal.
+                        pass
+
+                if save_retain_interval is not None:
+                    if prev_iteration > 0 and prev_iteration != iteration and prev_iteration % save_retain_interval != 0:
+                        checkpoint_name = get_checkpoint_name(args.save, iteration=prev_iteration,
+                                                              return_base_dir=True)
+                        # Don't delete if `checkpoint_name` is a symbolic link.
+                        if os.path.islink(checkpoint_name):  # TODO: Make this work with MSC remote paths?
+                            print_rank_0(f'  skipping deleting checkpoint from iteration {prev_iteration:7d} '
+                                         f'at {args.save} since it is a symbolic link')
+                        else:
+                            # Asynchronous version of delete_checkpoint(args, iteration_to_delete=prev_iteration).
+                            threading.Thread(target=delete_checkpoint, args=(args, prev_iteration,)).start()
 
         if args.async_save:
             assert async_save_request is not None

@@ -2,6 +2,7 @@ import os
 import re
 
 from argparse import ArgumentParser
+from megatron.core import parallel_state
 from megatron.core.utils import is_te_min_version, is_torch_min_version
 
 from ..feature import AbstractFeature
@@ -48,12 +49,9 @@ class PipelineFeature(AbstractFeature):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument('--schedule-method', type=str,
                            default='vanilla',
-                           choices=['vanilla', 'dualpipev', 'interleaved_1f1b'],
+                           choices=['vanilla', 'dualpipev'],
                            help='Use pipeline provided by megatron if schedule-method is set to vanilla')
         # MoE communication overlap arguments
-        group.add_argument('--overlap-moe-expert-parallel-comm',
-                           action='store_true',
-                           help='Overlap the EP A2A communication by batch-level overlapping in 1f1b stage.')
         group.add_argument('--overlap-moe-expert-parallel-comm-impl', type=str,
                            default='dcu_megatron',
                            choices=['megatron', 'dcu_megatron'],
@@ -83,7 +81,7 @@ class PipelineFeature(AbstractFeature):
         return args
 
     def validate_args(self, args):
-        if args.schedule_method in {"interleaved_1f1b", "dualpipev"}:
+        if args.schedule_method == "dualpipev":
             if args.delay_wgrad_compute and args.overlap_grad_reduce:
                 assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
                     "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"
@@ -231,19 +229,11 @@ class PipelineFeature(AbstractFeature):
                                          tie_word_embeddings_state_dict_wrapper,
                                          apply_wrapper=True)
 
-        if args.schedule_method == "interleaved_1f1b":
-            from dcu_megatron.core.pipeline_parallel.schedules import get_pp_rank_microbatches
-            # num_warmup_microbatches + 1
-            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_pp_rank_microbatches',
-                                        get_pp_rank_microbatches)
-
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
         from dcu_megatron.core.transformer.multi_latent_attention import MLASelfAttention
         from dcu_megatron.core.transformer.attention import Attention
-        from dcu_megatron.core.transformer.mlp import MLP
-        from dcu_megatron.core.transformer.moe.experts import GroupedMLP, TEGroupedMLP, SequentialMLP
         from dcu_megatron.core.transformer.moe.moe_layer import MoELayer
         from dcu_megatron.core.distributed.data_parallel_base import _BaseDataParallel
         from dcu_megatron.core.transformer.module import Float16Module
@@ -268,26 +258,13 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_cls_funcs('megatron.core.transformer.multi_latent_attention.MLASelfAttention',
                                          [MLASelfAttention.compute_qkv,
                                           MLASelfAttention.compute_attn,
-                                          MLASelfAttention.compute_proj,
-                                          MLASelfAttention.backward_dw,],
+                                          MLASelfAttention.compute_proj,],
                                          create_dummy=True)
         patch_manager.register_cls_funcs('megatron.core.transformer.attention.Attention',
                                          [Attention.compute_qkv,
                                           Attention.compute_attn,
                                           Attention.compute_proj,],
                                          create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.mlp.MLP.backward_dw',
-                                    MLP.backward_dw,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.moe.experts.GroupedMLP.backward_dw',
-                                    GroupedMLP.backward_dw,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.backward_dw',
-                                    TEGroupedMLP.backward_dw,
-                                    create_dummy=True)
-        patch_manager.register_patch('megatron.core.transformer.moe.experts.SequentialMLP.backward_dw',
-                                    SequentialMLP.backward_dw,
-                                    create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.backward_dw',
                                     TransformerBlock.backward_dw,
                                     create_dummy=True)

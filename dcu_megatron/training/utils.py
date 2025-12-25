@@ -33,11 +33,8 @@ def get_batch_on_this_tp_rank(data_iterator):
 
     if mpu.get_tensor_model_parallel_rank() == 0:
 
-        if data_iterator is not None:
-            data = next(data_iterator)
-        else:
-            data = None
-
+        assert data_iterator is not None
+        data = next(data_iterator)
         batch = {
             'tokens': data["tokens"].cuda(non_blocking=True),
             'labels': data["labels"].cuda(non_blocking=True),

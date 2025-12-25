@@ -4,7 +4,6 @@ from typing import Iterator, List, Union, Optional, Callable
 import torch
 
 from megatron.core import parallel_state
-from megatron.training import get_args
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.utils import (
@@ -21,9 +20,9 @@ from megatron.core.pipeline_parallel.schedules import (
     check_first_val_step,
     finish_embedding_wgrad_compute
 )
+from megatron.core.pipeline_parallel.utils import set_streams
 
 from ..combined_1f1b import forward_backward_step
-from ..utils import set_streams
 from dcu_megatron.core.parallel_state import set_dualpipe_chunk
 from dcu_megatron.core.transformer import PipelineOffloadManager
 from dcu_megatron.core.models.common.language_module.language_module import set_shared_embedding_from_dual_chunk

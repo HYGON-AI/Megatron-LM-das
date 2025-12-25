@@ -11,25 +11,6 @@ from megatron.core.pipeline_parallel.utils import stream_acquire_context, make_v
 from megatron.core.pipeline_parallel.utils import ScheduleNode as MegatronCoreScheduleNode
 
 
-
-class NoopScheduleNode:
-    """A placeholder node in the computation graph that simply passes through inputs and outputs.
-
-    This class is used as a no-op node in the scheduling system when a real computation node
-    is not needed but the interface must be maintained (e.g., dense layer doesn't need
-    moe_dispatch and moe_combine). It simply returns its inputs unchanged
-    in both forward and backward passes.
-    """
-
-    def forward(self, inputs):
-        """Passes through inputs unchanged in the forward pass."""
-        return inputs
-
-    def backward(self, outgrads):
-        """Passes through gradients unchanged in the backward pass."""
-        return outgrads
-
-
 class ScheduleNode(MegatronCoreScheduleNode):
     """Base node for fine-grained scheduling.
 
@@ -117,68 +98,15 @@ class ScheduleNode(MegatronCoreScheduleNode):
             torch.cuda.nvtx.range_pop()
 
         # output_grad maybe from another stream
-        for g in output_grad:
-            g.record_stream(self.stream)
+        if output_grad:
+            for g in output_grad:
+                if g is not None:
+                    g.record_stream(self.stream)
 
         grads = self.get_grad()
         self._release_state()
 
         return grads
-
-
-class AbstractSchedulePlan(ABC):
-    """To use combined 1f1b, model must implement build_schedule_plan while take the same
-    signature as model forward but return an instance of AbstractSchedulePlan"""
-
-    @staticmethod
-    @abstractmethod
-    def run(
-        f_schedule_plan,
-        b_schedule_plan,
-        grad=None,
-        pre_forward=None,
-        pre_backward=None,
-        post_forward=None,
-        post_backward=None,
-    ):
-        """run() is the protocol between our schedule logic and model, which is used to schedule
-        the forward and backward schedule plans for the models.
-        """
-        ...
-
-
-_COMP_STREAM = None
-_COMM_STREAM = None
-
-
-def set_streams(comp_stream=None, comm_stream=None):
-    """Set the streams for communication and computation"""
-    global _COMP_STREAM
-    global _COMM_STREAM
-    if _COMP_STREAM is not None and _COMM_STREAM is not None:
-        return
-
-    if comp_stream is None:
-        comp_stream = torch.cuda.current_stream()
-    if comm_stream is None:
-        comm_stream = torch.cuda.Stream(device="cuda")
-
-    assert _COMP_STREAM is None
-    assert _COMM_STREAM is None
-    _COMP_STREAM = comp_stream
-    _COMM_STREAM = comm_stream
-
-
-def get_comp_stream():
-    """Get the stream for computation"""
-    global _COMP_STREAM
-    return _COMP_STREAM
-
-
-def get_comm_stream():
-    """Get the stream for communication"""
-    global _COMM_STREAM
-    return _COMM_STREAM
 
 
 class VppContextManager:

@@ -13,7 +13,7 @@ from megatron.core.parallel_state import (
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
 )
-from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -57,7 +57,7 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
         k_channels: Optional[int] = None,
         v_channels: Optional[int] = None,
         cp_comm_type: str = "p2p",
-        model_comm_pgs: ModelCommProcessGroups = None,
+        pg_collection: ProcessGroupCollection = None,
     ):
         if not HAVE_TE:
             raise ImportError(
@@ -90,25 +90,23 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
                 f"num_attention_heads ({self.config.num_attention_heads}))"
             )
 
-        if model_comm_pgs is None:
-            # For backward compatibility, remove in v0.14 and raise error
-            # raise ValueError("TEDotProductAttention was called without ModelCommProcessGroups")
-            model_comm_pgs = ModelCommProcessGroups(
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection(
                 tp=get_tensor_model_parallel_group(check_initialized=False),
                 cp=get_context_parallel_group(check_initialized=False),
                 hcp=get_hierarchical_context_parallel_groups(check_initialized=False),
             )
         else:
             assert hasattr(
-                model_comm_pgs, "tp"
-            ), "TEDotProductAttention model_comm_pgs must have tp pg"
+                pg_collection, "tp"
+            ), "TEDotProductAttention pg_collection must have tp pg"
             assert hasattr(
-                model_comm_pgs, "cp"
-            ), "TEDotProductAttention model_comm_pgs must have cp pg"
+                pg_collection, "cp"
+            ), "TEDotProductAttention pg_collection must have cp pg"
             if cp_comm_type == "a2a+p2p":
                 assert hasattr(
-                    model_comm_pgs, "hcp"
-                ), "TEDotProductAttention model_comm_pgs must have hierarchical cp pg"
+                    pg_collection, "hcp"
+                ), "TEDotProductAttention pg_collection must have hierarchical cp pg"
 
         if is_te_min_version("0.10.0"):
             extra_kwargs["attention_type"] = attention_type
@@ -125,9 +123,9 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttention, "cp_stream") is None:
                 TEDotProductAttention.cp_stream = torch.cuda.Stream()
-            extra_kwargs["cp_group"] = model_comm_pgs.cp
+            extra_kwargs["cp_group"] = pg_collection.cp
             extra_kwargs["cp_global_ranks"] = torch.distributed.get_process_group_ranks(
-                model_comm_pgs.cp
+                pg_collection.cp
             )
             extra_kwargs["cp_stream"] = TEDotProductAttention.cp_stream
             if is_te_min_version("1.10.0"):
@@ -153,7 +151,9 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
                     f"Currently set to: {os.getenv('NVTE_ALLOW_NONDETERMINISTIC_ALGO', 'not set')}."
                 )
 
-        if config.window_size is not None:
+        if is_layer_window_attention(
+            config.window_size, config.window_attn_skip_freq, layer_number
+        ):
             # Check version
             assert is_te_min_version("1.2.0"), (
                 f"Transformer-Engine v{get_te_version()} must be >= 1.2.0 to support"
@@ -171,6 +171,13 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             extra_kwargs["softmax_scale"] = softmax_scale
         else:
             kv_channels = self.config.kv_channels
+
+        if self.config.softmax_type != "vanilla":
+            assert is_te_min_version("2.8.0"), (
+                f"Transformer-Engine v{get_te_version()} must be >= 2.8.0 to support"
+                "`softmax_type`."
+            )
+            extra_kwargs["softmax_type"] = self.config.softmax_type
 
         self.kept_packed_seq_params = set(
             field.name for field in dataclasses.fields(PackedSeqParams)
@@ -201,27 +208,7 @@ class TEDotProductAttentionPatch(te.pytorch.DotProductAttention):
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
-            tp_group=model_comm_pgs.tp,
+            tp_group=pg_collection.tp,
             layer_number=layer_number,
             **extra_kwargs,
-        )
-
-
-def set_save_original_input(module):
-    """
-    Set the module to save the original input tensors.
-
-    Some transformer-engine modules would save the quantized tensors by default in fp8 training.
-    This method is used to set these modules to save the original input tensors directly.
-
-    This can save the memory usage in some FP8 training scenarios, such as the attn linear_proj and
-    the shared experts.
-    The output-discarding recompute method also relies on this.
-    """
-    if hasattr(module, 'save_original_input'):
-        module.save_original_input = True
-    else:
-        raise ValueError(
-            "set_save_original_input is only needed on transformer-engine modules that save "
-            "quantized tensors by default. It needs transformer-engine>=2.6.0dev0."
         )

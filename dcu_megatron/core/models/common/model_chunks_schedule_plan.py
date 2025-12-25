@@ -9,7 +9,7 @@ from megatron.training import get_args
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 
-from dcu_megatron.core.pipeline_parallel.utils import (
+from megatron.core.pipeline_parallel.utils import (
     AbstractSchedulePlan,
     NoopScheduleNode,
     get_comm_stream,
@@ -37,130 +37,8 @@ B_ATTN_POST_F_COMBINE_SYNC_EVENT = torch.cuda.Event()
 
 
 class MegatronTransformerLayerSchedulePlan:
-    """Schedule the executing plan of the nodes in a transformer layer.
-
-    This is the megatron implementation.
-
-    This class organizes the computation nodes for a transformer layer,
-    including attention, post attention, MLP, dispatch, and combine nodes.
-
-    layer (TransformerLayerSchedulePlan)
-    ├── attn (TransformerLayerNode): attention module
-    ├── post_attn (TransformerLayerNode): layernorm -> router -> dispatch preprocess
-    ├── moe_dispatch (TransformerLayerNode): dispatch All2All
-    ├── mlp (TransformerLayerNode): mlp module
-    ├── moe_combine (TransformerLayerNode): combine All2All
-    """
-
-    attn = None
-    post_attn = None
-    moe_dispatch = None
-    mlp = None
-    moe_combine = None
-
-    def __init__(self, layer, event, chunk_state, comp_stream, comm_stream, extra_args={}):
-        """Initializes a transformer layer schedule plan.
-
-        Args:
-            layer (TransformerLayer):
-                split a transformer layer into multiple nodes for fine-grained scheduling.
-            event (torch.cuda.Event):
-                record CUDA event across multiple nodes on different streams for synchronization.
-            chunk_state (ModelChunkState): model state shared in the model chunk.
-            comp_stream (torch.cuda.Stream): CUDA stream for computation.
-            comm_stream (torch.cuda.Stream): CUDA stream for communication.
-            extra_args (dict): extra arguments for the layer.
-
-        The event and chunk_state are binded to the TransformerModelChunkSchedulePlan
-        and shared across all layers in the model chunk.
-        """
-        from dcu_megatron.core.models.gpt.fine_grained_callables import TransformerLayerState
-
-        self.layer_state = TransformerLayerState()
-        self.chunk_state = chunk_state
-        self.layer = layer
-        self.event = event
-        self.comp_stream = comp_stream
-        self.comm_stream = comm_stream
-
-        # get callable nodes for transformer/mtp layer
-        self._build_callable_nodes(event, comp_stream, comm_stream, extra_args)
-
-    def _build_callable_nodes(self, event, comp_stream, comm_stream, extra_args):
-        """
-        Builds the callable nodes for the transformer/mtp layer:
-            attn, post_attn, mlp, moe_dispatch and moe_combine.
-        """
-
-        from megatron.core.models.gpt.fine_grained_callables import build_layer_callables
-        from megatron.core.transformer.moe.moe_layer import MoELayer
-        from dcu_megatron.core.models.gpt.fine_grained_callables import TransformerLayerNode
-
-        # build the forward and backward callables for the transformer/mtp layer
-        fwd_callables, bwd_dw_callable_map = build_layer_callables(self.layer)
-
-        # get flags for latter use
-        is_moe = isinstance(self.layer.mlp, MoELayer)
-        enable_deepep = self.layer.config.moe_enable_deepep
-        extra_args["enable_deepep"] = enable_deepep
-        extra_args["is_moe"] = is_moe
-        extra_args["delay_wgrad_compute"] = self.layer.config.delay_wgrad_compute
-
-        # wrapper to help create TransformerLayerNode
-        def create_node(stream, module, name):
-            bwd_dw_callables = bwd_dw_callable_map.get(name, None)
-            return TransformerLayerNode(
-                stream,
-                event,
-                self.layer_state,
-                self.chunk_state,
-                module,
-                name=name,
-                bwd_dw_callables=bwd_dw_callables,
-                extra_args=extra_args,
-            )
-
-        (attn_module, post_attn_module, moe_dispatch_module, mlp_module, moe_combine_module, _) = (
-            fwd_callables
-        )
-
-        # Create nodes for different operations in the layer
-        # Each node type has a predefined name that determines its memory strategy
-        self.attn = create_node(comp_stream, attn_module, "attn")
-        self.mlp = create_node(comp_stream, mlp_module, "mlp")
-        if is_moe:
-            self.post_attn = create_node(comp_stream, post_attn_module, "post_attn")
-            self.moe_dispatch = create_node(comm_stream, moe_dispatch_module, "moe_dispatch")
-            self.moe_combine = create_node(comm_stream, moe_combine_module, "moe_combine")
-        else:
-            self.post_attn = NoopScheduleNode()
-            self.moe_dispatch = NoopScheduleNode()
-            self.moe_combine = NoopScheduleNode()
-
-    def get_fp8_context(self):
-        """
-        Get the fp8 context for the transformer layer.
-        """
-        use_inner_fp8_context = (
-            self.layer.config.fp8 and self.layer.config.fp8_recipe != Fp8Recipe.delayed
-        )
-        return (
-            get_fp8_context(self.layer.config, self.layer.layer_number - 1)
-            if use_inner_fp8_context
-            else nullcontext()
-        )
-
     @staticmethod
-    def run(
-        f_layer,
-        b_layer,
-        f_input=None,
-        b_grad=None,
-        f_context=None,
-        b_context=None,
-        is_last_layer_in_bwd=False,
-        block_level_wgrad_compute=False,
-    ):
+    def run(f_layer, b_layer, f_input=None, b_grad=None, is_last_layer_in_bwd=False):
         """Schedule one-forward-one-backward operations for a single transformer layer.
 
         This function interleaves forward and backward operations, overlapping the communications
@@ -170,58 +48,54 @@ class MegatronTransformerLayerSchedulePlan:
         When f_layer and b_layer are not None, forward and backward pass are overlapped as follows:
         comm_stream: combine_bwd            | dispatch_fwd->dispatch_bwd  | combine_fwd
         comp_stream: attn_fwd->post_attn_fwd| mlp_bwd->mlp_bwd_dw->mlp_fwd| post_attn_bwd->attn_bwd
+        For MTP, mtp_post_process_fwd is executed after the combine_fwd in the comp_stream,
+        and mtp_post_process_bwd is executed before the combine_bwd in the comp_stream.
 
         Args:
             f_layer (TransformerLayerSchedulePlan): Forward layer (for current microbatch)
             b_layer (TransformerLayerSchedulePlan): Backward layer (for previous microbatch)
             f_input (Tensor): Input for forward computation
             b_grad (Tensor): Gradient for backward computation
-            f_context (VppContextManager or None): The VppContextManager for the forward pass.
-            b_context (VppContextManager or None): The VppContextManager for the backward pass
             is_last_layer_in_bwd (bool):
                 Whether the current layer is the last layer in the backward pass.
 
         Returns:
             Functions or values for next iteration's computation
         """
-        f_context = f_context if f_context is not None else contextlib.nullcontext()
-        b_context = b_context if b_context is not None else contextlib.nullcontext()
 
         if b_layer is not None:
-            with b_context:
-                b_grad = b_layer.moe_combine.backward(b_grad)
+            b_grad = b_layer.mtp_post_process.backward(b_grad)
+            b_grad = b_layer.moe_combine.backward(b_grad)
 
         if f_layer is not None:
-            with f_context and f_layer.get_fp8_context():
+            with f_layer.get_fp8_context():
                 f_input = f_layer.attn.forward(f_input)
                 f_input = f_layer.post_attn.forward(f_input)
 
         if b_layer is not None:
-            with b_context:
-                b_grad = b_layer.mlp.backward(b_grad)
+            b_grad = b_layer.mlp.backward(b_grad)
 
         if f_layer is not None:
-            with f_context and f_layer.get_fp8_context():
+            with f_layer.get_fp8_context():
                 f_input = f_layer.moe_dispatch.forward(f_input)
 
         if b_layer is not None:
-            with b_context:
-                if not block_level_wgrad_compute:
-                    b_layer.mlp.backward_dw()
-                b_grad = b_layer.moe_dispatch.backward(b_grad)
+            if not block_level_wgrad_compute:
+                b_layer.mlp.backward_dw()
+            b_grad = b_layer.moe_dispatch.backward(b_grad)
 
         if f_layer is not None:
-            with f_context and f_layer.get_fp8_context():
+            with f_layer.get_fp8_context():
                 f_input = f_layer.mlp.forward(f_input)
 
         if f_layer is not None:
-            with f_context and f_layer.get_fp8_context():
+            with f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(f_input)
+                f_input = f_layer.mtp_post_process.forward(f_input)
 
         if b_layer is not None:
-            with b_context:
-                b_grad = b_layer.post_attn.backward(b_grad)
-                b_grad = b_layer.attn.backward(b_grad)
+            b_grad = b_layer.post_attn.backward(b_grad)
+            b_grad = b_layer.attn.backward(b_grad)
 
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
@@ -230,8 +104,7 @@ class MegatronTransformerLayerSchedulePlan:
 
         if not block_level_wgrad_compute and b_layer is not None:
             if not is_last_layer_in_bwd:
-                with b_context:
-                    attn_backward_dw()
+                attn_backward_dw()
             else:
                 return f_input, b_grad, attn_backward_dw
 
@@ -525,7 +398,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         Returns:
             The model chunk schedule plan.
         """
-        from dcu_megatron.core.models.gpt.fine_grained_callables import PostProcessNode, PreProcessNode
+        from megatron.core.models.gpt.fine_grained_callables import PostProcessNode, PreProcessNode
 
         self._model_chunk_state = ModelChunkState()
         self._transformer_layers = []

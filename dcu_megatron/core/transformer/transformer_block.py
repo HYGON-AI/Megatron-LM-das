@@ -50,12 +50,14 @@ class TransformerBlock():
         rotary_pos_emb: Optional[Tensor] = None,
         rotary_pos_cos: Optional[Tensor] = None,
         rotary_pos_sin: Optional[Tensor] = None,
+        rotary_pos_cos_sin: Optional[Tensor] = None,
         attention_bias: Optional[Tensor] = None,
         inference_context: Optional[BaseInferenceContext] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
+        dynamic_inference_decode_only: Optional[bool] = None,
     ):
         """
         Perform the forward pass through the transformer block.
@@ -73,6 +75,10 @@ class TransformerBlock():
             context (Tensor, optional): Context tensor for cross-attention.
             context_mask (Tensor, optional): Mask for cross-attention context
             rotary_pos_emb (Tensor, optional): Rotary positional embeddings.
+            rotary_pos_cos (Optional[Tensor]): Rotary embedding cosine.
+            rotary_pos_sin (Optional[Tensor]): Rotary embedding sine.
+            rotary_pos_cos_sin (Optional[Tensor]): Combined rotary embedding cosine and sine.
+            Currently used exclusively for inference with dynamic batching and flashinfer RoPE.
             attention_bias (Tensor): Bias tensor for Q * K.T of shape in shape broadcastable
                 to [b, num_head, sq, skv], e.g. [1, 1, sq, skv].
                 Used as an alternative to apply attention mask for TE cuDNN attention.
@@ -80,6 +86,9 @@ class TransformerBlock():
                 optimizations.
             packed_seq_params (PackedSeqParams, optional): Parameters for packed sequence
                 processing.
+            dynamic_inference_decode_only: Optional[bool]: If true, indicates that the current
+                inference context is for decode-only. This args is only used to uniquely
+                identify decode and non-decode cuda graph runners in the cuda graph manager.
 
         Returns:
             Union[Tensor, Tuple[Tensor, Tensor]]: The output hidden states tensor of shape
@@ -87,6 +96,9 @@ class TransformerBlock():
         """
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
+        # Remove 'dynamic_inference_decode_only' from kwargs if present
+        # this is only used to uniquely identify decode and non-decode cuda graph
+        # runners in the cuda graph manager
 
         # Delete the obsolete reference to the initial input tensor if necessary
         if isinstance(hidden_states, WrappedTensor):
@@ -123,11 +135,24 @@ class TransformerBlock():
         # if we are using other fp8 recipes, then the context manager enter&exit are free
         # we can wrap fp8_context within the for loop over layers, so that we can fine-grained
         # control which layer will be fp8 or bf16
-        use_outer_fp8_context = self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.delayed
-        use_inner_fp8_context = self.config.fp8 and self.config.fp8_recipe != Fp8Recipe.delayed
-        outer_fp8_context = get_fp8_context(self.config) if use_outer_fp8_context else nullcontext()
+        # For FP4: NVFP4BlockScaling doesn't have delayed scaling, always uses inner context
+        if self.config.fp8:
+            use_outer_quantization_context = self.config.fp8_recipe == Fp8Recipe.delayed
+            use_inner_quantization_context = self.config.fp8_recipe != Fp8Recipe.delayed
+            outer_quantization_context = (
+                get_fp8_context(self.config) if use_outer_quantization_context else nullcontext()
+            )
+        elif self.config.fp4:
+            use_outer_quantization_context = False
+            use_inner_quantization_context = True
+            outer_quantization_context = nullcontext()
+        else:
+            # No quantization
+            use_outer_quantization_context = False
+            use_inner_quantization_context = False
+            outer_quantization_context = nullcontext()
 
-        with rng_context, outer_fp8_context:
+        with rng_context, outer_quantization_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
                 hidden_states = self._checkpointed_forward(
@@ -138,15 +163,24 @@ class TransformerBlock():
                     rotary_pos_emb=rotary_pos_emb,
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
-                    use_inner_fp8_context=use_inner_fp8_context,
+                    use_inner_quantization_context=use_inner_quantization_context,
                 )
             else:
                 for l_no, layer in enumerate(self.layers):
-                    inner_fp8_context = (
-                        get_fp8_context(self.config, layer.layer_number - 1)
-                        if use_inner_fp8_context
-                        else nullcontext()
-                    )
+                    # Get appropriate inner quantization context
+                    if use_inner_quantization_context:
+                        if self.config.fp8:
+                            inner_quantization_context = get_fp8_context(
+                                self.config, layer.layer_number - 1
+                            )
+                        elif self.config.fp4:
+                            inner_quantization_context = get_fp4_context(
+                                self.config, layer.layer_number - 1
+                            )
+                        else:
+                            inner_quantization_context = nullcontext()
+                    else:
+                        inner_quantization_context = nullcontext()
 
                     if get_args().fine_grained_activation_offloading:
                         if l_no == self.num_layers_per_pipeline_rank - 1:
@@ -154,7 +188,7 @@ class TransformerBlock():
                         else:
                             PipelineOffloadManager.get_instance().set_last_layer(False)
 
-                    with self.offload_context, inner_fp8_context:
+                    with self.offload_context, inner_quantization_context:
                         hidden_states, context = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
@@ -163,6 +197,7 @@ class TransformerBlock():
                             rotary_pos_emb=rotary_pos_emb,
                             rotary_pos_cos=rotary_pos_cos,
                             rotary_pos_sin=rotary_pos_sin,
+                            rotary_pos_cos_sin=rotary_pos_cos_sin,
                             attention_bias=attention_bias,
                             inference_context=inference_context,
                             packed_seq_params=packed_seq_params,

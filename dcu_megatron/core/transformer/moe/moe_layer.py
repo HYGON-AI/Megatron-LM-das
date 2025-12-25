@@ -47,6 +47,8 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
             return probs, routing_map
 
         if self.experts_recompute or self.router_recompute:
+            shared_expert_output = self.shared_experts_compute(hidden_states)
+
             residual = hidden_states
             if self.router_recompute:
                 probs, routing_map = tensor_parallel.checkpoint(custom_forward_router, False, hidden_states)
@@ -58,10 +60,6 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
             )
 
             dispatched_input, probs = self.dispatch(hidden_states, probs)
-            shared_expert_output = None
-            if self.use_shared_expert and not self.shared_expert_overlap:
-                # Compute the shared expert separately when not overlapped with communication.
-                shared_expert_output = self.shared_experts(residual)
             dispatched_input, tokens_per_expert, permuted_probs = (
                 self.token_dispatcher.dispatch_postprocess(hidden_states, probs)
             )
