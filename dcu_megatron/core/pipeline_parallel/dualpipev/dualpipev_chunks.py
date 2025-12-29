@@ -15,7 +15,8 @@ from megatron.training.global_vars import get_args
 from megatron.core.transformer.module import fp32_to_float16, float16_to_fp32
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core import parallel_state
-from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
+from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+from megatron.training.utils import to_empty_if_meta_device
 
 try:
     from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
@@ -27,13 +28,13 @@ except ImportError:
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
 
 
-def dualpipev_fp16forward(self, *inputs, **kwargs):
+def dualpipev_fp16forward(self, *inputs, fp32_output=True, **kwargs):
     dualpipe_first_stage = mpu.is_pipeline_first_stage() and get_dualpipe_chunk() == 0
     if dualpipe_first_stage:
         inputs = fp32_to_float16(inputs, self.float16_convertor)
     outputs = self.module(*inputs, **kwargs)
     dualpipe_last_stage = mpu.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
-    if dualpipe_last_stage:
+    if dualpipe_last_stage and fp32_output is True:
         outputs = float16_to_fp32(outputs)
     return outputs
 
@@ -104,6 +105,11 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         config = get_model_config(model[0])
         model = [Float16Module(config, model_module) for model_module in model]
 
+    # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
+    if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
+        #for model_module in model:
+        model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
+
     # Before TE2.x: The model_module.bfloat16()/model_module.half() above will call the inplace
     #               copy of TE's Float8Tensor, which will write an unwanted value (amax calculated
     #               from the current fp8 param) to its amax_history. The below function will correct
@@ -115,8 +121,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         if args.use_torch_fsdp2:
             assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
             DP = torch_FSDP
-        elif args.use_custom_fsdp:
-            DP = custom_FSDP
+        elif args.use_megatron_fsdp:
+            DP = megatron_FSDP
         else:
             DP = DDP
 
@@ -143,11 +149,11 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 kwargs['bucket_size'] = args.ddp_bucket_size
             kwargs['pad_buckets_for_high_nccl_busbw'] = args.ddp_pad_buckets_for_high_nccl_busbw
             kwargs['average_in_collective'] = args.ddp_average_in_collective
-            if args.use_custom_fsdp and args.use_precision_aware_optimizer:
+            if args.use_megatron_fsdp and args.use_precision_aware_optimizer:
                 kwargs["preserve_fp32_weights"] = False
             ddp_config = DistributedDataParallelConfig(**kwargs)
 
-            # In the custom FSDP and DDP use path, we need to initialize the bucket size.
+            # In the Megatron FSDP and DDP use path, we need to initialize the bucket size.
             # If bucket_size is not provided as an input, use sane default.
             # If using very large dp_sizes, make buckets larger to ensure that chunks used in NCCL
             # ring-reduce implementations are large enough to remain bandwidth-bound rather than
@@ -160,18 +166,19 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             if not ddp_config.overlap_grad_reduce:
                 ddp_config.bucket_size = None
 
-        model = [
-            DP(
-                config=config,
-                ddp_config=ddp_config,
-                module=model_chunk,
-                # Turn off bucketing for model_chunk 2 onwards, since communication for these
-                # model chunks is overlapped with compute anyway.
-                disable_bucketing=(model_chunk_idx > 0)
-                or args.overlap_param_gather_with_optimizer_step,
-            )
-            for (model_chunk_idx, model_chunk) in enumerate(model)
-        ]
+        with torch.cuda.stream(torch.cuda.Stream()):
+            model = [
+                DP(
+                    config=config,
+                    ddp_config=ddp_config,
+                    module=model_chunk,
+                    # Turn off bucketing for model_chunk 2 onwards, since communication for these
+                    # model chunks is overlapped with compute anyway.
+                    disable_bucketing=(model_chunk_idx > 0)
+                    or args.overlap_param_gather_with_optimizer_step,
+                )
+                for (model_chunk_idx, model_chunk) in enumerate(model)
+            ]
 
         # Broadcast params from data parallel src rank to other data parallel ranks.
         if args.data_parallel_random_init:
@@ -181,21 +188,29 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     return model
 
 
-def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] = None) -> int:
+def get_num_layers_to_build(
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
     Args:
         config (TransformerConfig): Configuration object containing transformer model parameters.
+        pp_rank (Optional[int]): Pipeline parallel rank.
 
     Returns:
         int: The number of layers to be built for the current pipeline stage.
     """
+    if pp_rank is None:
+        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+
+    is_first_pp_stage = pp_rank == 0
+    is_last_pp_stage = pp_rank == config.pipeline_model_parallel_size - 1
+
     args = get_args()
     if args.num_layers_to_build is not None:
         if isinstance(args.num_layers_to_build, int):
             return args.num_layers_to_build
 
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
         if getattr(args, 'dualpipev_first_chunk', True):
             return args.num_layers_to_build[pp_rank]
         else:
@@ -214,7 +229,7 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] =
         # Number of layers to distribute over rest of pipeline stages
         layers_to_distribute = config.num_layers
         # Number of pipeline stages left for distributing transformer layers
-        pipeline_stages_left = parallel_state.get_pipeline_model_parallel_world_size()
+        pipeline_stages_left = config.pipeline_model_parallel_size
         if getattr(args, "schedule_method", None) == "dualpipev":
             pipeline_stages_left *= 2
 
@@ -237,14 +252,14 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] =
         # of layers for all virtual pipeline parallel stages within the first (last) pipeline
         # parallel stage.
         if (
-            parallel_state.is_pipeline_first_stage(ignore_virtual=True)
+            is_first_pp_stage
             and getattr(args, 'dualpipev_first_chunk', True)
             and config.num_layers_in_first_pipeline_stage is not None
         ):
             num_layers_per_pipeline_rank = config.num_layers_in_first_pipeline_stage
 
         if (
-            parallel_state.is_pipeline_first_stage(ignore_virtual=True)
+            is_first_pp_stage
             and not getattr(args, 'dualpipev_first_chunk', True)
             and config.num_layers_in_last_pipeline_stage is not None
         ):
@@ -276,7 +291,7 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] =
     # Reduce the number of layers to construct by 1 on the first (or last) stage if the
     # embedding (or loss) layer is included in the pipeline parallelism partition and placement.
     if getattr(args, "schedule_method", None) == "dualpipev":
-        if parallel_state.is_pipeline_first_stage():
+        if is_first_pp_stage:
             if  args.dualpipev_first_chunk and config.account_for_embedding_in_pipeline_split:
                 num_layers_to_build -= 1
                 assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
@@ -286,11 +301,11 @@ def get_num_layers_to_build(config: TransformerConfig, vp_stage: Optional[int] =
 
         return num_layers_to_build
 
-    if parallel_state.is_pipeline_first_stage() and config.account_for_embedding_in_pipeline_split:
+    if is_first_pp_stage and config.account_for_embedding_in_pipeline_split:
         num_layers_to_build -= 1
         assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
 
-    if parallel_state.is_pipeline_last_stage() and config.account_for_loss_in_pipeline_split:
+    if is_last_pp_stage and config.account_for_loss_in_pipeline_split:
         num_layers_to_build -= 1
         assert num_layers_to_build >= 0, "Not enough layers in the last virtual pipeline stage"
 

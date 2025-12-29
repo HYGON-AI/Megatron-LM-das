@@ -3,7 +3,7 @@ from functools import wraps
 from megatron.training import get_args
 from megatron.core.utils import get_model_config
 
-# from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
+from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
 from ..transformer import PipelineOffloadManager
 
 

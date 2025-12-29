@@ -35,6 +35,7 @@ def get_transformer_layer_offset(
 
     if pp_rank is None:
         pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+    is_first_pp_stage = pp_rank == 0
 
     actual_rank = pp_rank if getattr(args, 'dualpipev_first_chunk', True) else 2 * pipeline_size - 1 - pp_rank
     if args.num_layers_to_build is not None:
@@ -42,11 +43,6 @@ def get_transformer_layer_offset(
             return args.num_layers_to_build * actual_rank
         else:
             return sum(args.num_layers_to_build[:actual_rank])
-
-    if not parallel_state.is_inside_encoder():
-        pp_decoder_start = parallel_state.get_pipeline_model_parallel_decoder_start()
-        if pp_decoder_start is not None:
-            pp_rank = pp_rank - pp_decoder_start
 
     if config.pipeline_model_parallel_size > 1:
 
@@ -137,7 +133,7 @@ def get_transformer_layer_offset(
 
             # Reduce the offset of embedding layer from the total layer number
             if config.account_for_embedding_in_pipeline_split:
-                if not parallel_state.is_pipeline_first_stage():
+                if not is_first_pp_stage:
                     offset -= 1
                 elif not getattr(args, 'dualpipev_first_chunk', True):
                     offset -= 1

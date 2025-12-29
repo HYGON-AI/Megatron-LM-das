@@ -147,15 +147,9 @@ def get_mlp_module_flux_spec(
     use_te: Optional[bool] = True,
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
-    fp8: Optional[str] = None,  # pylint: disable=unused-arguments
     moe_use_legacy_grouped_gemm: Optional[bool] = False,
 ) -> ModuleSpec:
     """Helper function to get module spec for MLP/MoE"""
-    if fp8 is not None:
-        warnings.warn(
-            'The fp8 argument in "_get_mlp_module_spec" has been deprecated'
-            ' and will be removed soon. Please update your code accordingly.'
-        )
 
     if num_experts is None:
         # Dense MLP w/ or w/o TE modules.

@@ -394,6 +394,7 @@ class GPTModel:
                     and self.share_embeddings_and_output_weights,
                     embedding_activation_buffer=self.embedding_activation_buffer,
                     grad_output_buffer=self.grad_output_buffer,
+                    tp_group=self.pg_collection.tp,
                 )
             else:
                 self.output_layer = tensor_parallel.ColumnParallelLinear(

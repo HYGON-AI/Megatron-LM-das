@@ -12,9 +12,9 @@ from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.pipeline_parallel.utils import ScheduleNode
 from megatron.core.utils import get_attr_wrapped_model
 from megatron.training.utils import unwrap_model
+from megatron.core.pipeline_parallel.utils import AbstractSchedulePlan
 
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
-from dcu_megatron.core.pipeline_parallel.utils import AbstractSchedulePlan
 
 
 def forward_step_calc_loss(

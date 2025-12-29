@@ -330,16 +330,23 @@ class AGLinear(torch.autograd.Function):
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
-                if weight.main_grad.dtype == torch.float32:
-                    fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
-                        total_input, grad_output, weight.main_grad
-                    )
-                elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                    fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
-                        total_input, grad_output, weight.main_grad
-                    )
+                # In case of Megatron-FSDP, need to create main grad buffers in-place
+                if hasattr(weight, "__fsdp_param__"):
+                    weight.main_grad = weight.get_main_grad()
+                    torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
-                    raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                    if weight.main_grad.dtype == torch.float32:
+                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
+                            total_input, grad_output, weight.main_grad
+                        )
+                    elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
+                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
+                            total_input, grad_output, weight.main_grad
+                        )
+                    else:
+                        raise RuntimeError(
+                            "Unsupported gradient type for gradient accumulation fusion"
+                        )
 
             if hasattr(weight, 'grad_added_to_main_grad'):
                 # When overlap_grad_reduce is True, need to ensure that backward hooks
@@ -347,19 +354,29 @@ class AGLinear(torch.autograd.Function):
                 # dummy grad_weight tensor to prevent backward hooks from being run
                 # in a background thread.
                 if getattr(weight, 'zero_out_wgrad', False):
-                    grad_weight = torch.zeros(
-                        weight.main_grad.shape,
-                        dtype=input.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
+                    if HAVE_TE:
+                        # get_dummy_wgrad function in TE enables reuse of single dummy wgrad buffer
+                        # across different layers/microbatches. The function accepts shape as list.
+                        grad_weight = get_dummy_wgrad(
+                            list(weight.main_grad.shape), input.dtype, zero=True
+                        )
+                    else:
+                        grad_weight = torch.zeros(
+                            weight.main_grad.shape,
+                            dtype=input.dtype,
+                            device=torch.cuda.current_device(),
+                            requires_grad=False,
+                        )
                 else:
-                    grad_weight = torch.empty(
-                        weight.main_grad.shape,
-                        dtype=input.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
+                    if HAVE_TE:
+                        grad_weight = get_dummy_wgrad(list(weight.main_grad.shape), input.dtype)
+                    else:
+                        grad_weight = torch.empty(
+                            weight.main_grad.shape,
+                            dtype=input.dtype,
+                            device=torch.cuda.current_device(),
+                            requires_grad=False,
+                        )
                 weight.grad_added_to_main_grad = True
             else:
                 grad_weight = None
@@ -644,16 +661,23 @@ class LinearRS(torch.autograd.Function):
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
-                if weight.main_grad.dtype == torch.float32:
-                    fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
-                        total_input, total_grad_output, weight.main_grad
-                    )
-                elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                    fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
-                        total_input, total_grad_output, weight.main_grad
-                    )
+                # In case of Megatron-FSDP, need to create main grad buffers in-place
+                if hasattr(weight, "__fsdp_param__"):
+                    weight.main_grad = weight.get_main_grad()
+                    torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
-                    raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                    if weight.main_grad.dtype == torch.float32:
+                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
+                            total_input, grad_output, weight.main_grad
+                        )
+                    elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
+                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
+                            total_input, grad_output, weight.main_grad
+                        )
+                    else:
+                        raise RuntimeError(
+                            "Unsupported gradient type for gradient accumulation fusion"
+                        )
 
             if hasattr(weight, 'grad_added_to_main_grad'):
                 # When overlap_grad_reduce is True, need to ensure that backward hooks
@@ -661,19 +685,29 @@ class LinearRS(torch.autograd.Function):
                 # dummy grad_weight tensor to prevent backward hooks from being run
                 # in a background thread.
                 if getattr(weight, 'zero_out_wgrad', False):
-                    grad_weight = torch.zeros(
-                        weight.main_grad.shape,
-                        dtype=input.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
+                    if HAVE_TE:
+                        # get_dummy_wgrad function in TE enables reuse of single dummy wgrad buffer
+                        # across different layers/microbatches. The function accepts shape as list.
+                        grad_weight = get_dummy_wgrad(
+                            list(weight.main_grad.shape), input.dtype, zero=True
+                        )
+                    else:
+                        grad_weight = torch.zeros(
+                            weight.main_grad.shape,
+                            dtype=input.dtype,
+                            device=torch.cuda.current_device(),
+                            requires_grad=False,
+                        )
                 else:
-                    grad_weight = torch.empty(
-                        weight.main_grad.shape,
-                        dtype=input.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
+                    if HAVE_TE:
+                        grad_weight = get_dummy_wgrad(list(weight.main_grad.shape), input.dtype)
+                    else:
+                        grad_weight = torch.empty(
+                            weight.main_grad.shape,
+                            dtype=input.dtype,
+                            device=torch.cuda.current_device(),
+                            requires_grad=False,
+                        )
                 weight.grad_added_to_main_grad = True
             else:
                 grad_weight = None
@@ -991,7 +1025,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
             returns the master weights used for initialization.
         skip_bias_add:
             If True, do not add the bias term, instead return it to be added by the
-            caller. This enables performance optimations where bias can be fused with other
+            caller. This enables performance optimizations where bias can be fused with other
             elementwise operations.
         skip_weight_param_allocation:
             If True, weight parameter is not allocated and must be passed
@@ -1218,7 +1252,7 @@ class FluxRowParallelLinear(RowParallelLinear):
             used for initialization.
         skip_bias_add:
             If True, do not add the bias term, instead return it to be added by the
-            caller. This enables performance optimations where bias can be fused with other
+            caller. This enables performance optimizations where bias can be fused with other
             elementwise operations.
         is_expert:
             If True, the layer is treated as an MoE expert layer
@@ -1267,7 +1301,6 @@ class FluxRowParallelLinear(RowParallelLinear):
         self.previous_flux_params = (None,) * 6
         self.fw_gemm_rs_op = None
         self.bw_ag_gemm_op = None
-
 
     def forward(self, input_):
         """Forward of RowParallelLinear

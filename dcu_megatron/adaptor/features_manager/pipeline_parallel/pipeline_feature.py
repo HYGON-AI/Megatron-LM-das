@@ -239,9 +239,6 @@ class PipelineFeature(AbstractFeature):
         from dcu_megatron.core.transformer.module import Float16Module
         from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer, MultiTokenPredictionBlock
 
-        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
-                                    GPTModel.build_schedule_plan,
-                                    create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
                                     create_dummy=True)
