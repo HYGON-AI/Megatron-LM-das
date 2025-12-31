@@ -1,4 +1,3 @@
-import contextlib
 from typing import Any, Optional
 from functools import wraps
 
@@ -18,10 +17,11 @@ from megatron.core.utils import (
 )
 from megatron.core.transformer.transformer_layer import make_viewless_tensor
 
-from dcu_megatron.core.transformer import (
+from dcu_megatron.core.pipeline_parallel import (
     PipelineOffloadManager,
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 from .utils import DelayReleaseQKVLinearTensorContextManager
 
@@ -236,29 +236,27 @@ class TransformerLayer():
         # Residual connection.
         residual = hidden_states
 
-        offload_context = contextlib.nullcontext()
         if self.offload_attn_norm:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="attn_norm")
-            offload_context = PipelineOffloadManager.get_instance()
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="attn_norm")
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
             self.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
-                self.input_layernorm, hidden_states
-            )
+            with get_fine_grained_offloading_context(self.offload_attn_norm):
+                input_layernorm_output = self.input_layernorm_checkpoint.checkpoint(
+                    self.input_layernorm, hidden_states
+                )
         else:
-            with offload_context:
+            with get_fine_grained_offloading_context(self.offload_attn_norm):
                 input_layernorm_output = self.input_layernorm(hidden_states)
 
         if self.offload_attn_norm:
-            hidden_states, = group_prefetch_offload_commit(
+            input_layernorm_output, = fine_grained_offloading_group_commit(
                 input_layernorm_output,
                 name="attn_norm",
-                release_tensors=[hidden_states],
+                forced_released_tensors=[hidden_states],
                 delay_release_module="attn_norm",
             )
-            offload_context = contextlib.nullcontext()
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
@@ -347,29 +345,27 @@ class TransformerLayer():
         # Residual connection.
         residual = hidden_states
 
-        offload_context = contextlib.nullcontext()
         if self.offload_mlp_norm:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="mlp_norm")
-            offload_context = PipelineOffloadManager.get_instance()
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="mlp_norm")
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_pre_mlp_layernorm:
             self.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
-                self.pre_mlp_layernorm, hidden_states
-            )
+            with get_fine_grained_offloading_context(self.offload_mlp_norm):
+                pre_mlp_layernorm_output = self.pre_mlp_norm_checkpoint.checkpoint(
+                    self.pre_mlp_layernorm, hidden_states
+                )
         else:
-            with offload_context:
+            with get_fine_grained_offloading_context(self.offload_mlp_norm):
                 pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         if self.offload_mlp_norm:
-            hidden_states, = group_prefetch_offload_commit(
+            pre_mlp_layernorm_output, = fine_grained_offloading_group_commit(
                 pre_mlp_layernorm_output,
                 name="mlp_norm",
-                release_tensors=[hidden_states],
+                forced_released_tensors=[hidden_states],
                 delay_release_module="mlp_norm",
             )
-            offload_context = contextlib.nullcontext()
 
         nvtx_range_push(suffix="mlp")
         # Potentially chunk the MLP computation during prefill to minimize the peak activation size

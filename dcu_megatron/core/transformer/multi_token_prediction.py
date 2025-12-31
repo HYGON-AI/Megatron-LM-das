@@ -1,10 +1,23 @@
 from typing import Optional
 from functools import wraps
 
+import torch
+from torch import Tensor
+
 from megatron.training import get_args
-from megatron.core import mpu
+from megatron.core import mpu, InferenceParams, parallel_state
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.pipeline_parallel.utils import is_vp_last_stage
+from megatron.core.transformer.multi_token_prediction import (
+    roll_tensor,
+    MTPLossAutoScaler,
+    MTPLossLoggingHelper,
+)
+
+from dcu_megatron.core.pipeline_parallel import (
+    fine_grained_offloading_set_last_layer,
+)
 
 
 def tie_word_embeddings_state_dict_wrapper(fn):
@@ -49,6 +62,67 @@ class MultiTokenPredictionLayer:
 
 
 class MultiTokenPredictionBlock:
+    def forward(
+        self,
+        input_ids: Tensor,
+        position_ids: Tensor,
+        hidden_states: Tensor,
+        attention_mask: Tensor,
+        context: Tensor = None,
+        context_mask: Tensor = None,
+        rotary_pos_emb: Tensor = None,
+        rotary_pos_cos: Tensor = None,
+        rotary_pos_sin: Tensor = None,
+        attention_bias: Tensor = None,
+        inference_params: InferenceParams = None,
+        packed_seq_params: PackedSeqParams = None,
+        sequence_len_offset: Tensor = None,
+        extra_block_kwargs: dict = None,
+        embedding=None,
+    ) -> Tensor:
+        """
+        Perform the forward pass through all of the MTP modules.
+
+        Args:
+            hidden_states (Tensor): Hidden states for input token with the shape [s, b, h]
+                where s is the sequence length, b is the batch size, and h is the hidden size.
+            attention_mask (Tensor): Boolean tensor of shape [1, 1, s, s] for masking
+                self-attention.
+
+        Returns:
+            (Tensor): The mtp loss tensor of shape [b, s].
+        """
+        # get hidden states from previous mtp stages
+        offset = get_mtp_layer_offset(self.config)
+        hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))
+        hidden_states = hidden_states_list[offset]
+        for layer_number in range(len(self.layers)):
+            if self.config.fine_grained_activation_offloading:
+                fine_grained_offloading_set_last_layer(layer_number == len(self.layers) - 1)
+
+            (hidden_states, input_ids, position_ids) = self.layers[layer_number](
+                input_ids=input_ids,
+                position_ids=position_ids,
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                inference_params=inference_params,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                packed_seq_params=packed_seq_params,
+                sequence_len_offset=sequence_len_offset,
+                embedding=embedding,
+                **(extra_block_kwargs or {}),
+            )
+
+            # append the output hidden states of the current mtp layer
+            # to the hidden_states_list
+            hidden_states_list.append(hidden_states)
+
+        # concat the hidden states of all mtp layers
+        hidden_states = torch.cat(hidden_states_list, dim=0)
+        return hidden_states
+
     def backward_dw(self):
         for layer in self.layers:
             layer.backward_dw()

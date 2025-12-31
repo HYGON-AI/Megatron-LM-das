@@ -3,6 +3,7 @@ from typing import Iterator, List, Union, Optional, Callable
 
 import torch
 
+from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
@@ -13,7 +14,6 @@ from megatron.core.utils import (
     get_model_type,
 )
 from megatron.core.pipeline_parallel.schedules import clear_embedding_activation_buffer, deallocate_output_tensor
-from megatron.core import ModelParallelConfig
 from megatron.core.pipeline_parallel.schedules import (
     backward_step,
     set_current_microbatch,
@@ -29,13 +29,104 @@ from megatron.core.pipeline_parallel.utils import (
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.process_groups_config import ProcessGroupCollection
 
-from ..combined_1f1b import forward_backward_step
-from dcu_megatron.core.parallel_state import set_dualpipe_chunk
-from dcu_megatron.core.transformer import PipelineOffloadManager
+from ..combined_1f1b import combined_forward_backward_step
+from dcu_megatron.core.parallel_state import set_dualpipe_chunk, get_dualpipe_chunk
 from dcu_megatron.core.models.common.language_module.language_module import set_shared_embedding_from_dual_chunk
 
 # Types
 Shape = Union[List[int], torch.Size]
+
+
+def forward_step_calc_loss(
+    model,
+    output_tensor,
+    loss_func,
+    config,
+    vp_stage,
+    collect_non_loss_data,
+    num_microbatches,
+    forward_data_store,
+    cp_group_size=None,
+    is_last_stage=None,
+):
+    """Calculate the loss and number of tokens for forward_step()"""
+
+    model_vp_stage = getattr(model, "vp_stage", None)
+    if vp_stage is not None and model_vp_stage is not None:
+        assert (
+            vp_stage == model_vp_stage
+        ), f"vp_stage ({vp_stage}) doesn't match model_vp_stage ({model_vp_stage})"
+
+    if cp_group_size is None and is_last_stage is None:
+        # fallback to parallel state
+        cp_group_size = parallel_state.get_context_parallel_world_size()
+        if get_args().schedule_method == "dualpipev":
+            is_last_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
+        else:
+            is_last_stage = parallel_state.is_pipeline_last_stage(
+                ignore_virtual=False, vp_stage=vp_stage
+            )
+    else:
+        assert (
+            cp_group_size is not None and is_last_stage is not None
+        ), "cp_group_size and is_last_stage must be provided"
+
+    num_tokens = torch.tensor(0, dtype=torch.int)
+    if is_last_stage:
+        if not collect_non_loss_data:
+            outputs = loss_func(output_tensor)
+            if len(outputs) == 3:
+                output_tensor, num_tokens, loss_reduced = outputs
+                if not config.calculate_per_token_loss:
+                    # Protect against division by zero when all tokens are masked
+                    #   in a microbatch.
+                    output_tensor /= torch.clamp(num_tokens, min=1)
+                    output_tensor /= num_microbatches
+            else:
+                # preserve legacy loss averaging behavior (ie, over the number of microbatches)
+                assert len(outputs) == 2
+                output_tensor, loss_reduced = outputs
+                output_tensor *= cp_group_size
+                output_tensor /= num_microbatches
+            forward_data_store.append(loss_reduced)
+        else:
+            data = loss_func(output_tensor, non_loss_data=True)
+            forward_data_store.append(data)
+
+    if config.timers is not None:
+        config.timers('forward-compute').stop()
+
+    # Set the loss scale for the auxiliary loss of the MoE layer.
+    # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
+    # explicitly.
+    if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
+        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        loss_scale = (
+            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            if config.grad_scale_func is not None
+            else torch.ones(1, device=output_tensor.device)
+        )
+        # Set the loss scale
+        if config.calculate_per_token_loss:
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
+        else:
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+
+    # Set the loss scale for Multi-Token Prediction (MTP) loss.
+    if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
+        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        loss_scale = (
+            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            if config.grad_scale_func is not None
+            else torch.ones(1, device=output_tensor.device)
+        )
+        # Set the loss scale
+        if config.calculate_per_token_loss:
+            MTPLossAutoScaler.set_loss_scale(loss_scale)
+        else:
+            MTPLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+
+    return output_tensor, num_tokens
 
 
 def is_dualpipev_last_stage(model_chunk_id, is_first_stage):
@@ -381,58 +472,18 @@ def forward_step_no_model_graph(
                 data_iterator, model, checkpoint_activations_microbatch
             )
 
-    num_tokens = torch.tensor(0, dtype=torch.int)
-    if is_dualpipev_last_stage(model_chunk_id, is_first_stage):
-        if not collect_non_loss_data:
-            outputs = loss_func(output_tensor)
-            if len(outputs) == 3:
-                output_tensor, num_tokens, loss_reduced = outputs
-                if not config.calculate_per_token_loss:
-                    output_tensor /= num_tokens
-                    output_tensor /= num_microbatches
-            else:
-                # preserve legacy loss averaging behavior (ie, over the number of microbatches)
-                assert len(outputs) == 2
-                output_tensor, loss_reduced = outputs
-                output_tensor *= cp_group_size
-                output_tensor /= num_microbatches
-            forward_data_store.append(loss_reduced)
-        else:
-            data = loss_func(output_tensor, non_loss_data=True)
-            forward_data_store.append(data)
-
-    if config.timers is not None:
-        config.timers('forward-compute').stop()
-
-    # Set the loss scale for the auxiliary loss of the MoE layer.
-    # Since we use a trick to do backward on the auxiliary loss, we need to set the scale
-    # explicitly.
-    if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
-        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
-        loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
-            if config.grad_scale_func is not None
-            else torch.ones(1, device=output_tensor.device)
-        )
-        # Set the loss scale
-        if config.calculate_per_token_loss:
-            MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
-        else:
-            MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
-
-    # Set the loss scale for Multi-Token Prediction (MTP) loss.
-    if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
-        # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
-        loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
-            if config.grad_scale_func is not None
-            else torch.ones(1, device=output_tensor.device)
-        )
-        # Set the loss scale
-        if config.calculate_per_token_loss:
-            MTPLossAutoScaler.set_loss_scale(loss_scale)
-        else:
-            MTPLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+    output_tensor, num_tokens = forward_step_calc_loss(
+        model,
+        output_tensor,
+        loss_func,
+        config,
+        None,
+        collect_non_loss_data,
+        num_microbatches,
+        forward_data_store,
+        cp_group_size,
+        is_dualpipev_last_stage(model_chunk_id, is_first_stage),
+    )
 
     if unwrap_output_tensor:
         return output_tensor, num_tokens
@@ -529,7 +580,10 @@ def forward_backward_pipelining_with_cutinhalf(
         set_streams()
 
     if not forward_only and config.fine_grained_activation_offloading:
-        PipelineOffloadManager.get_instance().reset()
+        from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload_dualpipev import (
+            fine_grained_offloading_reset,
+        )
+        fine_grained_offloading_reset()
 
     # Needed only when gradients are finalized in M-Core
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -679,7 +733,6 @@ def forward_backward_pipelining_with_cutinhalf(
     ):
         """Helper method to run combined forward and backward step"""
         # forward prepare
-        f_context = contextlib.nullcontext()
         fwd_input_tensor = None
         fwd_microbatch_id = None
         if fwd_model_chunk_id is not None:
@@ -689,7 +742,6 @@ def forward_backward_pipelining_with_cutinhalf(
             fwd_input_tensor = input_tensors[fwd_model_chunk_id][fwd_microbatch_id - offset]
 
         # backward prepare
-        b_context = contextlib.nullcontext()
         bwd_input_tensor = None
         bwd_output_tensor = None
         bwd_output_tensor_grad = None
@@ -698,7 +750,7 @@ def forward_backward_pipelining_with_cutinhalf(
             bwd_output_tensor = output_tensors[bwd_model_chunk_id].pop(0)
             bwd_output_tensor_grad = output_tensor_grads[bwd_model_chunk_id].pop(0)
 
-        output_tensor, num_tokens, input_tensor_grad, chunk_backward_dw_func = forward_backward_step(
+        output_tensor, num_tokens, input_tensor_grad, chunk_backward_dw_func = combined_forward_backward_step(
             forward_step_func,
             data_iterator[fwd_model_chunk_id] if fwd_model_chunk_id is not None else None,
             model[fwd_model_chunk_id] if fwd_model_chunk_id is not None else None,
@@ -710,8 +762,6 @@ def forward_backward_pipelining_with_cutinhalf(
             bwd_output_tensor,
             bwd_output_tensor_grad,
             config,
-            f_context=f_context,
-            b_context=b_context,
             pre_forward=pre_forward,
             pre_backward=pre_backward,
             post_forward=post_forward,

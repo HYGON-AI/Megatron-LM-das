@@ -1,12 +1,11 @@
 import contextlib
 
 import torch
-from torch.utils.checkpoint import detach_variable
 
 try:
     import transformer_engine  # pylint: disable=unused-import
     from transformer_engine.pytorch.distributed import activation_recompute_forward
-    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+    from transformer_engine.pytorch.fp8 import fp8_autocast
 
     HAVE_TE = True
 except ModuleNotFoundError:
@@ -29,6 +28,9 @@ class CheckpointWithoutOutputFunction(MegatronCoreCheckpointWithoutOutputFunctio
     @staticmethod
     def backward(ctx, *args):
         """Backward pass."""
+        # Get the inputs from the context instead of the saved tensors
+        # because the saved tensors are already cached by the recomputation. (by the activation reloading? dongcl)
+        # This is to avoid double-reloading the inputs in CPU offloading scenario.
         inputs = ctx.inputs
         outputs = ctx.outputs
         torch.autograd.backward(outputs, args)

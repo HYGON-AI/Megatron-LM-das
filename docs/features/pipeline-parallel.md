@@ -72,7 +72,7 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 dcu megatron默认使用该调度方案。如考虑使用图2中的调度方案(megatron v0.14及后续版本提供)，需要在训练脚本中增加以下参数:  
 
 ```
---overlap-moe-expert-parallel-comm-impl megatron
+--overlap-ep-comm-with-split-attn
 ```
 
 ### dualpipev流水线

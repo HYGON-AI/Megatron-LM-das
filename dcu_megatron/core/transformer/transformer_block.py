@@ -5,16 +5,45 @@ from functools import wraps
 import torch
 from torch import Tensor
 
-from megatron.training import get_args
 from megatron.core import tensor_parallel
 from megatron.core.enums import Fp8Recipe
+from megatron.core.fp4_utils import get_fp4_context
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
 from megatron.core.transformer.moe.moe_layer import MoELayer
 
-from dcu_megatron.core.transformer import PipelineOffloadManager
+from dcu_megatron.core.pipeline_parallel import (
+    fine_grained_offloading_set_last_layer,
+)
+
+
+GPTBlockWithMTP = False
+
+def get_gpt_block_with_mtp():
+    global GPTBlockWithMTP
+    return GPTBlockWithMTP
+
+
+def set_gpt_block_with_mtp(gpt_block_with_mtp):
+    global GPTBlockWithMTP
+    GPTBlockWithMTP = gpt_block_with_mtp
+
+
+class GPTBlockWithMTPContextManager:
+    """A reusable context manager for switch GPTBlockWithMTP"""
+
+    def __init__(self, gpt_block_with_mtp):
+        self.gpt_block_with_mtp = gpt_block_with_mtp
+
+    def __enter__(self):
+        self.origin_gpt_block_with_mtp = get_gpt_block_with_mtp()
+        set_gpt_block_with_mtp(self.gpt_block_with_mtp)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        set_gpt_block_with_mtp(self.origin_gpt_block_with_mtp)
 
 
 def transformer_block_init_wrapper(fn):
@@ -36,6 +65,8 @@ def transformer_block_init_wrapper(fn):
         for layer in self.layers:
             if not isinstance(layer.mlp, MoELayer):
                 self.num_dense_layer += 1
+
+        self.is_mtp_in_model = get_gpt_block_with_mtp()
 
     return wrapper
 
@@ -182,11 +213,10 @@ class TransformerBlock():
                     else:
                         inner_quantization_context = nullcontext()
 
-                    if get_args().fine_grained_activation_offloading:
-                        if l_no == self.num_layers_per_pipeline_rank - 1:
-                            PipelineOffloadManager.get_instance().set_last_layer(True)
-                        else:
-                            PipelineOffloadManager.get_instance().set_last_layer(False)
+                    if self.config.fine_grained_activation_offloading:
+                        fine_grained_offloading_set_last_layer(
+                            False if self.is_mtp_in_model else l_no == self.num_layers_per_pipeline_rank - 1
+                        )
 
                     with self.offload_context, inner_quantization_context:
                         hidden_states, context = layer(

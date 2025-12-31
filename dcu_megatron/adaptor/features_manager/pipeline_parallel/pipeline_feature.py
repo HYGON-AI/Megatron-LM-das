@@ -52,12 +52,9 @@ class PipelineFeature(AbstractFeature):
                            choices=['vanilla', 'dualpipev'],
                            help='Use pipeline provided by megatron if schedule-method is set to vanilla')
         # MoE communication overlap arguments
-        group.add_argument('--overlap-moe-expert-parallel-comm-impl', type=str,
-                           default='dcu_megatron',
-                           choices=['megatron', 'dcu_megatron'],
-                           help='What TransformerLayerSchedulePlan implementation to use..'
-                           ' megatron: use the schedule plan implemented by megatron'
-                           ' dcu_megatron: use the schedule plan implemented by us')
+        group.add_argument('--overlap-ep-comm-with-split-attn', action="store_true",
+                           default=False,
+                           help='whether to split attention')
         group.add_argument('--num-layers-to-build',
                            type=num_layers_build_type,
                            default=None,
@@ -85,27 +82,6 @@ class PipelineFeature(AbstractFeature):
             if args.delay_wgrad_compute and args.overlap_grad_reduce:
                 assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
                     "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"
-
-        if args.overlap_moe_expert_parallel_comm:
-            assert is_torch_min_version("2.6.0"), "A2A Overlap encounters hang issue with torch version < 2.6.0"
-            # Expert model parallelism requirements
-            assert (
-                args.expert_model_parallel_size > 1
-            ), 'overlap_moe_expert_parallel_comm is only supported with expert model parallelism'
-            assert args.moe_token_dispatcher_type in [
-                'alltoall',
-                'flex',
-            ], 'overlap_moe_expert_parallel_comm is supported with alltoall/flex token dispatcher'
-
-            assert (
-                args.recompute_granularity != 'full'
-            ), 'disable full recomputation when enabling overlap_moe_expert_parallel_comm'
-            assert (
-                args.recompute_method is None
-            ), 'disable recomputation method when enabling overlap_moe_expert_parallel_comm'
-            assert (
-                args.recompute_num_layers is None
-            ), 'recompute_num_layers must be None when enabling overlap_moe_expert_parallel_comm'
 
         if args.schedule_method == "dualpipev":
             if args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
@@ -242,6 +218,9 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
                                     create_dummy=True)
+        if args.schedule_method == "dualpipev" or args.overlap_ep_comm_with_split_attn:
+            patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
+                                        GPTModel.build_schedule_plan)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.backward_dw',
                                     GPTModel.backward_dw,
                                     create_dummy=True)

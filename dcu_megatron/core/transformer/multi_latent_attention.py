@@ -1,12 +1,20 @@
-import contextlib
+import torch
+
+try:
+    from einops import rearrange
+
+    HAVE_EINOPS = True
+except ImportError:
+    HAVE_EINOPS = False
 
 from megatron.core.utils import deprecate_inference_params
 
-from dcu_megatron.core.transformer import (
-    PipelineOffloadManager,
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
+from dcu_megatron.core.pipeline_parallel import (
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
+from .utils import get_delay_release_qkv_linear_tensor
 
 
 class MultiLatentAttention():
@@ -55,13 +63,24 @@ class MultiLatentAttention():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
-        query, key, value = self.get_query_key_value_tensors(
-            hidden_states,
-            key_value_states,
-            position_ids,
-            packed_seq_params,
-            inference_context=inference_context,
-        )
+        if self.offload_qkv_linear:
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
+        with get_fine_grained_offloading_context(self.offload_qkv_linear):
+            query, key, value = self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                position_ids,
+                packed_seq_params,
+                inference_context=inference_context,
+            )
+        if self.offload_qkv_linear:
+            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
+            query, key, value = fine_grained_offloading_group_commit(
+                query, key, value,
+                name="qkv_linear",
+                forced_released_tensors=[hidden_states],
+                delay_release_module=delay_release_module
+            )
 
         # ===================================================
         # Adjust key, value for inference
@@ -89,12 +108,10 @@ class MultiLatentAttention():
             )
         else:
             if inference_context is None or inference_context.is_static_batching():
-                offload_context = contextlib.nullcontext()
                 if self.offload_core_attention and self.training:
-                    query = group_prefetch_offload_start(query, name="core_attn")
-                    offload_context = PipelineOffloadManager.get_instance()
+                    query = fine_grained_offloading_group_start(query, name="core_attn")
 
-                with offload_context:
+                with get_fine_grained_offloading_context(self.offload_core_attention):
                     core_attn_out = self.core_attention(
                         query,
                         key,
@@ -105,8 +122,9 @@ class MultiLatentAttention():
                     )
 
                 if self.offload_core_attention and self.training:
-                    core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
-                    offload_context = contextlib.nullcontext()
+                    (core_attn_out,) = fine_grained_offloading_group_commit(
+                        core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
+                    )
             elif self.cache_mla_latents:
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
@@ -152,15 +170,14 @@ class MultiLatentAttention():
         # =================
         # Output. [sq, b, h]
         # =================
-        offload_context = contextlib.nullcontext()
         if self.offload_attn_proj:
-            core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
+            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
+        with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj:
-            output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
-            offload_context = contextlib.nullcontext()
+            output, bias = fine_grained_offloading_group_commit(
+                output, bias, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
 
         return output, bias
 
@@ -176,12 +193,22 @@ class MLASelfAttention():
         hidden_states,
         key_value_states=None,
         inference_context=None,
+        rotary_pos_emb=None,  # pylint: disable=unused-arguments
+        rotary_pos_cos=None,  # pylint: disable=unused-arguments
+        rotary_pos_sin=None,  # pylint: disable=unused-arguments
         packed_seq_params=None,
         position_ids=None,
         *,
         inference_params=None,
     ):
         inference_context = deprecate_inference_params(inference_context, inference_params)
+        if inference_context and not inference_context.is_static_batching():
+            assert (
+                self.config.cache_mla_latents
+            ), "currently to use dynamic backend for MLA cache mla latents must be true"
+
+        if self.config.cache_mla_latents:
+            self.prepare_for_absorption()
 
         # =====================
         # Query, Key, and Value
@@ -189,13 +216,25 @@ class MLASelfAttention():
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
-        query, key, value = self.get_query_key_value_tensors(
-            hidden_states,
-            key_value_states,
-            position_ids,
-            packed_seq_params,
-            inference_context=inference_context,
-        )
+        if self.offload_qkv_linear:
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
+        with get_fine_grained_offloading_context(self.offload_qkv_linear):
+            query, key, value = self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                position_ids,
+                packed_seq_params,
+                inference_context=inference_context,
+            )
+        if self.offload_qkv_linear:
+            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
+            query, key, value = fine_grained_offloading_group_commit(
+                query, key, value,
+                name="qkv_linear",
+                forced_released_tensors=[hidden_states],
+                delay_release_module=delay_release_module
+            )
+
         return query, key, value
 
     def compute_attn(
@@ -232,8 +271,6 @@ class MLASelfAttention():
                 self.config.cache_mla_latents
             ), "currently to use dynamic backend for MLA cache mla latents must be true"
 
-        if self.config.cache_mla_latents:
-            self.prepare_for_absorption()
         # ===================================================
         # Adjust key, value for inference
         # ===================================================
@@ -260,12 +297,10 @@ class MLASelfAttention():
             )
         else:
             if inference_context is None or inference_context.is_static_batching():
-                offload_context = contextlib.nullcontext()
                 if self.offload_core_attention and self.training:
-                    query = group_prefetch_offload_start(query, name="core_attn")
-                    offload_context = PipelineOffloadManager.get_instance()
+                    query = fine_grained_offloading_group_start(query, name="core_attn")
 
-                with offload_context:
+                with get_fine_grained_offloading_context(self.offload_core_attention):
                     core_attn_out = self.core_attention(
                         query,
                         key,
@@ -276,8 +311,9 @@ class MLASelfAttention():
                     )
 
                 if self.offload_core_attention and self.training:
-                    core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
-                    offload_context = contextlib.nullcontext()
+                    (core_attn_out,) = fine_grained_offloading_group_commit(
+                        core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
+                    )
             elif self.cache_mla_latents:
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
@@ -326,6 +362,12 @@ class MLASelfAttention():
         # =================
         # Output. [sq, b, h]
         # =================
-
-        output, bias = self.linear_proj(core_attn_out)
+        if self.offload_attn_proj:
+            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
+        with get_fine_grained_offloading_context(self.offload_attn_proj):
+            output, bias = self.linear_proj(core_attn_out)
+        if self.offload_attn_proj:
+            output, bias = fine_grained_offloading_group_commit(
+                output, bias, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
         return output, bias

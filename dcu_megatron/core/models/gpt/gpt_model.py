@@ -3,28 +3,36 @@ from collections import OrderedDict
 from typing import Literal, Optional
 from functools import wraps
 
+import torch
 from torch import Tensor
 
 from megatron.training import get_args
+from megatron.core import parallel_state, tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.inference.contexts import BaseInferenceContext
+from megatron.core.models.common.embeddings import YarnRotaryEmbedding
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core import tensor_parallel
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import (
     MultimodalRotaryEmbedding,
     RotaryEmbedding,
 )
 from megatron.core.quantization.utils import get_quant_config_or_none
+from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
 from megatron.core.transformer.enums import ModelType
-from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
+from megatron.core.transformer.multi_token_prediction import (
+    MTPLossAutoScaler,
+    MTPLossLoggingHelper,
+    MultiTokenPredictionBlock,
+    roll_tensor,
+)
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.models.gpt.gpt_model import GPTModel as MegatronCoreGPTModel
 
-from dcu_megatron.core.transformer import PipelineOffloadManager
+from dcu_megatron.core.transformer.transformer_block import GPTBlockWithMTPContextManager
 from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
 
 
@@ -189,8 +197,8 @@ def gpt_model_postprocess(
 def gpt_model_forward_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
-        if self.training and self.config.fine_grained_activation_offloading:
-            self.initialize_model_chunk_offload_handler()
+        if self.config.fine_grained_activation_offloading:
+            self.preprocess_for_fine_grained_offloading()
 
         if (
             self.config.schedule_method == "dualpipev"
@@ -208,7 +216,7 @@ class GPTModel:
     """
     patch megatron GPTModel
     """
-    # (1) introduce an attribute dualpipev_first_chunk. (2) support flux. (3) remove embedding when using dualpipev
+    # (1) introduce an attribute dualpipev_first_chunk. (2) support flux. (3) remove embedding when using dualpipev. (4) activation offload
     def __init__(
         self,
         config: TransformerConfig,
@@ -247,6 +255,7 @@ class GPTModel:
         self.parallel_output = parallel_output
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.vp_stage = vp_stage
+        self.disable_param_offloading = True
 
         args = get_args()
         self.dualpipev_first_chunk = getattr(args, 'dualpipev_first_chunk', True)
@@ -273,7 +282,6 @@ class GPTModel:
         self.mtp_process = mtp_block_spec is not None
 
         if self.pre_process or self.mtp_process:
-            args.mtp_process = self.mtp_process
             self.embedding = LanguageModelEmbedding(
                 config=self.config,
                 vocab_size=self.vocab_size,
@@ -347,14 +355,15 @@ class GPTModel:
         self.rotary_pos_emb_cache = {}
 
         # Transformer.
-        self.decoder = TransformerBlock(
-            config=self.config,
-            spec=transformer_layer_spec,
-            pre_process=self.pre_process,
-            post_process=self.post_process,
-            pg_collection=self.pg_collection,
-            vp_stage=vp_stage,
-        )
+        with GPTBlockWithMTPContextManager(self.mtp_process):
+            self.decoder = TransformerBlock(
+                config=self.config,
+                spec=transformer_layer_spec,
+                pre_process=self.pre_process,
+                post_process=self.post_process,
+                pg_collection=self.pg_collection,
+                vp_stage=vp_stage,
+            )
 
         if self.mtp_process:
             self.mtp = MultiTokenPredictionBlock(
@@ -424,7 +433,9 @@ class GPTModel:
                 quant_config = get_quant_config_or_none(name, self.config.quant_recipe)
                 module.finish_init(quant_config)
 
-    def initialize_model_chunk_offload_handler(self):
+    def preprocess_for_fine_grained_offloading(self):
+        """Preprocess for fine-grained activation offloading."""
+
         args = get_args()
 
         num_layers = self.decoder.num_layers_per_pipeline_rank
@@ -432,23 +443,35 @@ class GPTModel:
             num_layers = num_layers + self.config.mtp_num_layers
 
         if args.schedule_method == "dualpipev":
-            PipelineOffloadManager.get_instance().reset_chunk_handler(
-                num_layers,
+            from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload_dualpipev import (
+                fine_grained_offloading_init_chunk_handler,
+            )
+            fine_grained_offloading_init_chunk_handler(
                 getattr(self, 'dualpipev_first_chunk', True),
-                self.config.fine_grained_activation_offloading,
-                self.decoder.num_dense_layer,
-                False,
+                min_offloaded_tensor_size=self.config.min_offloaded_tensor_size,
             )
         else:
+            from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+                fine_grained_offloading_init_chunk_handler,
+            )
             # last_stage_is_loss = (pp_rank == pp_size - 1) and self.config.last_vp_stage_is_loss
             # TODO: will be an issue when dense layer is placed  across different pipeline stages
-            PipelineOffloadManager.get_instance().reset_chunk_handler(
-                num_layers,
-                self.vp_stage,
-                self.config.fine_grained_activation_offloading,
-                self.decoder.num_dense_layer,
-                False,
+            fine_grained_offloading_init_chunk_handler(
+                vp_size=self.config.virtual_pipeline_model_parallel_size,
+                vp_stage=self.vp_stage,
+                min_offloaded_tensor_size=self.config.min_offloaded_tensor_size,
             )
+
+        if self.disable_param_offloading:
+            for param in self.decoder.parameters():
+                param.offloading_activation = False
+            if self.mtp_process:
+                for param in self.mtp.parameters():
+                    param.offloading_activation = False
+            if self.post_process:
+                for param in self.output_layer.parameters():
+                    param.offloading_activation = False
+            self.disable_param_offloading = False
 
     def shared_embedding_or_output_weight(self) -> Tensor:
         """Gets the embedding weight or output logit weights when share input embedding and
@@ -472,6 +495,67 @@ class GPTModel:
         elif self.post_process:
             return self.output_layer.weight
         return None
+
+    def build_schedule_plan(
+        self,
+        input_ids: Tensor,
+        position_ids: Tensor,
+        attention_mask: Tensor,
+        decoder_input: Tensor = None,
+        labels: Tensor = None,
+        inference_context: BaseInferenceContext = None,
+        packed_seq_params: PackedSeqParams = None,
+        extra_block_kwargs: dict = None,
+        runtime_gather_output: Optional[bool] = None,
+        inference_params: Optional[BaseInferenceContext] = None,
+        loss_mask: Optional[Tensor] = None,
+    ):
+        """Builds a computation schedule plan for the model.
+
+        This function creates a schedule plan for a model chunk, including
+        preprocessing, transformer layers, and postprocessing.
+        The schedule plan is used to optimize computation and memory usage
+        in distributed environments.
+
+        Args:
+            input_ids (Tensor): Input token IDs.
+            position_ids (Tensor): Position IDs.
+            attention_mask (Tensor): Attention mask.
+            decoder_input (Tensor, optional): Decoder input tensor. Defaults to None.
+            labels (Tensor, optional): Labels for loss computation. Defaults to None.
+            inference_context (BaseInferenceContext, optional):
+                Inference context. Defaults to None.
+            packed_seq_params (PackedSeqParams, optional):
+                Parameters for packed sequences. Defaults to None.
+            extra_block_kwargs (dict, optional):
+                Additional keyword arguments for blocks. Defaults to None.
+            runtime_gather_output (Optional[bool], optional):
+                Whether to gather output at runtime. Defaults to None.
+            inference_params (InferenceParams, optional):
+                Parameters for inference. Defaults to None.
+            loss_mask (Optional[Tensor], optional): Loss mask. Defaults to None.
+
+        Returns:
+            TransformerModelChunkSchedulePlan: The model chunk schedule plan.
+        """
+
+        from ..common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
+
+        if get_args().fine_grained_activation_offloading:
+            self.preprocess_for_fine_grained_offloading()
+
+        return TransformerModelChunkSchedulePlan(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            decoder_input,
+            labels,
+            packed_seq_params,
+            extra_block_kwargs,
+            runtime_gather_output,
+            loss_mask,
+        )
 
     def backward_dw(self):
         self.decoder.backward_dw()

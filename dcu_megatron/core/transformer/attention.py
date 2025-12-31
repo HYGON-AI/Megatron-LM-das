@@ -9,11 +9,15 @@ from torch import Tensor
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.utils import (
     deprecate_inference_params,
     is_fa_min_version,
     nvtx_range_pop,
     nvtx_range_push,
+)
+from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
+    _yarn_get_concentration_factor_from_config,
 )
 
 try:
@@ -37,16 +41,16 @@ except ImportError:
     SplitAlongDim = None
 
 try:
-    from transformer_engine.pytorch.utils import ActivationOffloadContextManager as TEActivationOffloadContextManager
+    from transformer_engine.pytorch.attention.rope import apply_fused_qkv_rotary_pos_emb
 
-    HAVE_OFFLOAD_CONTENT_MANAGER = True
-except:
-    HAVE_OFFLOAD_CONTENT_MANAGER = False
+    HAVE_FUSED_QKV_ROPE = True
+except ImportError:
+    HAVE_FUSED_QKV_ROPE = False
 
-from dcu_megatron.core.transformer import (
-    PipelineOffloadManager,
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
+from dcu_megatron.core.pipeline_parallel import (
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 from .utils import get_delay_release_qkv_linear_tensor
 
@@ -90,8 +94,8 @@ def attention_init_wrapper(attention_init_func):
             and "attn_proj" in config.offload_modules
         )
 
-        if (self.offload_qkv_linear or self.offload_attn_proj) and not HAVE_OFFLOAD_CONTENT_MANAGER:
-            raise ImportError(f"fail to import ActivationOffloadContextManager")
+        # if (self.offload_qkv_linear or self.offload_attn_proj) and not HAVE_OFFLOAD_CONTENT_MANAGER:
+        #     raise ImportError(f"fail to import ActivationOffloadContextManager")
 
     return wrapper
 
@@ -202,9 +206,20 @@ class Attention():
                 self.config.fused_single_qkv_rope and split_qkv
             ), "fused_single_qkv_rope requested but not available/supported for the config."
 
-        qkv_output = self.get_query_key_value_tensors(
-            hidden_states, key_value_states, split_qkv=split_qkv
-        )
+        if self.offload_qkv_linear:
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
+        with get_fine_grained_offloading_context(self.offload_qkv_linear):
+            qkv_output = self.get_query_key_value_tensors(
+                hidden_states, key_value_states, split_qkv=split_qkv
+            )
+        if self.offload_qkv_linear:
+            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
+            qkv_output = fine_grained_offloading_group_commit(
+                *qkv_output,
+                name="qkv_linear",
+                forced_released_tensors=[hidden_states],
+                delay_release_module=delay_release_module
+            )
         attn_mask_type = self.attn_mask_type
         block_table = None
         if split_qkv:
@@ -350,15 +365,12 @@ class Attention():
                 packed_seq_params=packed_seq_params,
             )
         else:
-            offload_context = contextlib.nullcontext()
             if self.offload_core_attention and self.training:
-
-                query = group_prefetch_offload_start(query, name="core_attn")
-                offload_context = PipelineOffloadManager.get_instance()
+                query = fine_grained_offloading_group_start(query, name="core_attn")
 
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
-                with offload_context:
+                with get_fine_grained_offloading_context(self.offload_core_attention):
                     core_attn_out = self.core_attention(
                         query,
                         key,
@@ -388,9 +400,8 @@ class Attention():
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
-        if self.offload_core_attention and self.training:
-            core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
-            offload_context = contextlib.nullcontext()
+            if self.offload_core_attention and self.training:
+                core_attn_out, = fine_grained_offloading_group_commit(core_attn_out, name="core_attn", forced_released_tensors=[query, key, value])
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
@@ -406,15 +417,12 @@ class Attention():
 
         nvtx_range_push(suffix="linear_proj")
 
-        offload_context = contextlib.nullcontext()
         if self.offload_attn_proj and self.training:
-            core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
+            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
+        with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj and self.training:
-            output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
-            offload_context = contextlib.nullcontext()
+            output, bias = fine_grained_offloading_group_commit(output, bias, name="attn_proj", forced_released_tensors=[core_attn_out])
 
         nvtx_range_pop(suffix="linear_proj")
 
@@ -425,6 +433,9 @@ class Attention():
         hidden_states: Tensor,
         key_value_states: Optional[Tensor] = None,
         inference_context=None,  # pylint: disable=unused-arguments
+        rotary_pos_emb: Optional[Union[Tensor, Tuple[Tensor, Tensor]]] = None,
+        rotary_pos_cos: Optional[Tensor] = None,
+        rotary_pos_sin: Optional[Tensor] = None,
         packed_seq_params=None,  # pylint: disable=unused-arguments
         position_ids=None,       # pylint: disable=unused-arguments
         *,
@@ -440,6 +451,40 @@ class Attention():
             (Tuple[Tensor, Tensor]) Attention output and bias.
 
         """
+        # Check if we need to skip RoPE
+        # no_rope is 0-indexed array and self.layer_number is 1-indexed
+        no_rope = (
+            self.config.no_rope_freq[self.layer_number - 1] if self.config.no_rope_freq else False
+        )
+        if no_rope:
+            rotary_pos_emb = None
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
+
+        if inference_context and inference_context.is_dynamic_batching():
+            assert HAVE_FA3 or is_fa_min_version(
+                "2.7.3"
+            ), "flash attn verion v2.7.3 and above is required for dynamic batching."
+
+        # hidden_states: [sq, b, h]
+        is_inference_mode = inference_context is not None and not self.training
+        # is_using_flash_decode - True is we are using the static inference engine with flash decode
+        is_using_flash_decode = is_inference_mode and self.config.flash_decode
+        # is_using_flashinfer_rope - True if we are using the dynamic inference engine
+        # with flashinfer fused rope
+        is_using_flashinfer_rope = is_inference_mode and (
+            not inference_context.is_static_batching()
+            and inference_context.use_flashinfer_fused_rope
+        )
+        if is_using_flash_decode or is_using_flashinfer_rope:
+            # flash decode and flash-infer fused rope use rotary_pos_cos and rotary_pos_sin
+            rotary_pos_emb = None
+        else:
+            assert rotary_pos_cos is None and rotary_pos_sin is None
+
+        # For self attention we just duplicate the rotary_pos_emb if it isn't already
+        if rotary_pos_emb is not None and not isinstance(rotary_pos_emb, tuple):
+            rotary_pos_emb = (rotary_pos_emb,) * 2
 
         # =====================
         # Query, Key, and Value
@@ -471,9 +516,20 @@ class Attention():
                 self.config.fused_single_qkv_rope and self.split_qkv
             ), "fused_single_qkv_rope requested but not available/supported for the config."
 
-        qkv_output = self.get_query_key_value_tensors(
-            hidden_states, key_value_states, split_qkv=self.split_qkv
-        )
+        if self.offload_qkv_linear:
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
+        with get_fine_grained_offloading_context(self.offload_qkv_linear):
+            qkv_output = self.get_query_key_value_tensors(
+                hidden_states, key_value_states, split_qkv=self.split_qkv
+            )
+        if self.offload_qkv_linear:
+            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
+            qkv_output = fine_grained_offloading_group_commit(
+                qkv_output,
+                name="qkv_linear",
+                forced_released_tensors=[hidden_states],
+                delay_release_module=delay_release_module
+            )
         nvtx_range_pop(suffix="qkv")
 
         return qkv_output
@@ -684,14 +740,12 @@ class Attention():
                 packed_seq_params=packed_seq_params,
             )
         else:
-            offload_context = contextlib.nullcontext()
             if self.offload_core_attention and self.training:
-                query = group_prefetch_offload_start(query, name="core_attn")
-                offload_context = PipelineOffloadManager.get_instance()
+                query = fine_grained_offloading_group_start(query, name="core_attn")
 
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
-                with offload_context:
+                with get_fine_grained_offloading_context(self.offload_core_attention):
                     core_attn_out = self.core_attention(
                         query,
                         key,
@@ -721,9 +775,10 @@ class Attention():
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
-        if self.offload_core_attention and self.training:
-            core_attn_out, = group_prefetch_offload_commit(core_attn_out, name="core_attn", release_tensors=[query, key, value])
-            offload_context = contextlib.nullcontext()
+            if self.offload_core_attention and self.training:
+                (core_attn_out,) = fine_grained_offloading_group_commit(
+                    core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
+                )
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
@@ -743,13 +798,13 @@ class Attention():
         nvtx_range_push(suffix="linear_proj")
         offload_context = contextlib.nullcontext()
         if self.offload_attn_proj and self.training:
-            core_attn_out = group_prefetch_offload_start(core_attn_out, name="attn_proj")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
+            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
+        with get_fine_grained_offloading_context(self.offload_attn_proj):
             output, bias = self.linear_proj(core_attn_out)
         if self.offload_attn_proj and self.training:
-            output, bias = group_prefetch_offload_commit(output, bias, name="attn_proj", release_tensors=[core_attn_out])
-            offload_context = contextlib.nullcontext()
+            output, bias = fine_grained_offloading_group_commit(
+                output, bias, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias
@@ -762,21 +817,7 @@ class SelfAttention:
         the unsplit mixed_qkv tensor is returned.
         """
         # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
-        offload_context = contextlib.nullcontext()
-        if self.offload_qkv_linear and self.training:
-            hidden_states = group_prefetch_offload_start(hidden_states, name="qkv_linear")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
-            mixed_qkv, _ = self.linear_qkv(hidden_states)
-        if self.offload_qkv_linear and self.training:
-            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
-            mixed_qkv, = group_prefetch_offload_commit(
-                mixed_qkv,
-                name="qkv_linear",
-                release_tensors=[hidden_states],
-                delay_release_module=delay_release_module
-            )
-            offload_context = contextlib.nullcontext()
+        mixed_qkv, _ = self.linear_qkv(hidden_states)
 
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = mixed_qkv.size()[:-1] + (

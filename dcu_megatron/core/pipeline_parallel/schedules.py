@@ -1,10 +1,12 @@
 from functools import wraps
+from typing import Callable, Iterator, List, Optional, Union
+
+import torch
 
 from megatron.training import get_args
-from megatron.core.utils import get_model_config
 
 from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
-from ..transformer import PipelineOffloadManager
+from .fine_grained_activation_offload import fine_grained_offloading_reset
 
 
 def get_forward_backward_func_wrapper(fn):
@@ -31,28 +33,27 @@ def get_forward_backward_func_wrapper(fn):
     return wrapper
 
 
-def forward_backward_pipelining_with_interleaving_wrapper(fn):
+def forward_backward_pipelining_wrapper(fn):
     @wraps(fn)
     def wrapper(
         *,
         forward_step_func,
-        data_iterator,
-        model,
+        data_iterator: Union[Iterator, List[Iterator]],
+        model: Union[torch.nn.Module, List[torch.nn.Module]],
         num_microbatches: int,
         seq_length: int,
         micro_batch_size: int,
-        decoder_seq_length=None,
-        forward_only=False,
-        collect_non_loss_data=False,
-        first_val_step=None,
-        adjust_tensor_shapes_fn=None,  # unused
-        p2p_communicator=None,
-        pg_collection=None,
+        decoder_seq_length: Optional[int] = None,
+        forward_only: bool = False,
+        collect_non_loss_data: bool = False,
+        first_val_step: Optional[bool] = None,
+        adjust_tensor_shapes_fn: Optional[Callable] = None,
     ):
 
-        config = get_model_config(model[0])
-        if not forward_only and config.fine_grained_activation_offloading:
-            PipelineOffloadManager.get_instance().reset()
+        args = get_args()
+
+        if not forward_only and args.fine_grained_activation_offloading:
+            fine_grained_offloading_reset()
 
         return fn(
             forward_step_func=forward_step_func,
@@ -61,13 +62,11 @@ def forward_backward_pipelining_with_interleaving_wrapper(fn):
             num_microbatches=num_microbatches,
             seq_length=seq_length,
             micro_batch_size=micro_batch_size,
-            decoder_seq_length=decoder_seq_lengthe,
+            decoder_seq_length=decoder_seq_length,
             forward_only=forward_only,
             collect_non_loss_data=collect_non_loss_data,
             first_val_step=first_val_step,
-            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,  # unused
-            p2p_communicator=p2p_communicator,
-            pg_collection=pg_collection,
+            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn
         )
 
     return wrapper

@@ -17,10 +17,10 @@ try:
 except ImportError:
     HAVE_TE = False
 
-from dcu_megatron.core.transformer import (
-    PipelineOffloadManager,
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
+from dcu_megatron.core.pipeline_parallel import (
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 
 
@@ -59,68 +59,19 @@ def mlp_init_wrapper(mlp_init_func):
 
 
 class MLP():
-    def _offload_shared_fc1_forward(
-        self,
-        hidden_states,
-    ):
-        """Forward method with router fc1 activation offloading."""
-        if not hidden_states.is_contiguous():
-            hidden_states = hidden_states.contiguous()
-
-        hidden_states = group_prefetch_offload_start(hidden_states)
-
-        hidden_states.offloading_activation = True
-
-        with PipelineOffloadManager.get_instance():
-            intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
-
-        def call_back():
-            cur_stream = torch.cuda.current_stream()
-            hidden_states.record_stream(cur_stream)
-            hidden_states.untyped_storage().resize_(0)
-
-        intermediate_parallel, bias_parallel = group_prefetch_offload_commit(
-            intermediate_parallel,
-            bias_parallel,
-            offloaded_call_back=call_back
-        )
-        return intermediate_parallel, bias_parallel
-
-    def _offload_shared_fc2_forward(
-        self,
-        intermediate_parallel,
-    ):
-        """Forward method with router fc2 activation offloading."""
-        if not intermediate_parallel.is_contiguous():
-            intermediate_parallel = intermediate_parallel.contiguous()
-
-        intermediate_parallel = group_prefetch_offload_start(intermediate_parallel)
-
-        intermediate_parallel.offloading_activation = True
-
-        with PipelineOffloadManager.get_instance():
-            output, output_bias = self.linear_fc2(intermediate_parallel)
-
-        def call_back():
-            cur_stream = torch.cuda.current_stream()
-            intermediate_parallel.record_stream(cur_stream)
-            intermediate_parallel.untyped_storage().resize_(0)
-
-        output, output_bias = group_prefetch_offload_commit(
-            output,
-            output_bias,
-            offloaded_call_back=call_back
-        )
-        return output, output_bias
 
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="linear_fc1")
-        if self.offload_shared_fc1:
-            intermediate_parallel, bias_parallel = self._offload_shared_fc1_forward(hidden_states)
-        else:
+        if self.offload_shared_fc1 and self.training:
+            hidden_states = fine_grained_offloading_group_start(hidden_states, name="linear_fc1")
+        with get_fine_grained_offloading_context(self.offload_shared_fc1):
             intermediate_parallel, bias_parallel = self.linear_fc1(hidden_states)
+        if self.offload_shared_fc1 and self.training:
+            intermediate_parallel, bias_parallel = fine_grained_offloading_group_commit(
+                intermediate_parallel, bias_parallel, name="linear_fc1", forced_released_tensors=[hidden_states]
+            )
         nvtx_range_pop(suffix="linear_fc1")
 
         nvtx_range_push(suffix="activation")
@@ -201,10 +152,14 @@ class MLP():
 
         # [s, b, h]
         nvtx_range_push(suffix="linear_fc2")
-        if self.offload_shared_fc2:
-            output, output_bias = self._offload_shared_fc2_forward(intermediate_parallel)
-        else:
+        if self.offload_shared_fc2 and self.training:
+            intermediate_parallel = fine_grained_offloading_group_start(intermediate_parallel, name="linear_fc2")
+        with get_fine_grained_offloading_context(self.offload_shared_fc2):
             output, output_bias = self.linear_fc2(intermediate_parallel)
+        if self.offload_shared_fc2 and self.training:
+            output, output_bias = fine_grained_offloading_group_commit(
+                output, output_bias, name="linear_fc2", forced_released_tensors=[intermediate_parallel]
+            )
         nvtx_range_pop(suffix="linear_fc2")
 
         if per_token_scale is not None and output_bias is not None:

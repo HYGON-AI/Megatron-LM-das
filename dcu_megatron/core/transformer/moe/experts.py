@@ -8,10 +8,10 @@ from megatron.core import tensor_parallel
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
 from megatron.core.transformer.moe import grouped_gemm_util as gg
 
-from dcu_megatron.core.transformer import (
-    PipelineOffloadManager,
-    group_prefetch_offload_start,
-    group_prefetch_offload_commit,
+from dcu_megatron.core.pipeline_parallel import (
+    fine_grained_offloading_group_commit,
+    fine_grained_offloading_group_start,
+    get_fine_grained_offloading_context,
 )
 
 
@@ -117,18 +117,18 @@ def te_grouped_mlp_init_wrapper(te_grouped_mlp_init_func):
             and "expert_fc1" in config.offload_modules
         )
 
-        self.offload_expert_fc2 = (
-            config.fine_grained_activation_offloading
-            and "expert_fc2" in config.offload_modules
-        )
-
         self.offload_moe_act = (
             config.fine_grained_activation_offloading
             and "moe_act" in config.offload_modules
         )
 
+        self.offload_expert_fc2 = (
+            config.fine_grained_activation_offloading
+            and "expert_fc2" in config.offload_modules
+        )
+
         # This is to avoid the CPU overhead of multiple d2h copies
-        if self.offload_expert_fc1:
+        if self.offload_expert_fc1 and not self.config.fp8:
             from dcu_megatron.core.extensions.transformer_engine import set_save_original_input
             # set_save_original_input(self.linear_fc1)
 
@@ -175,17 +175,21 @@ class TEGroupedMLP():
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        offload_context = contextlib.nullcontext()
         if self.offload_expert_fc1:
-            permuted_local_hidden_states = group_prefetch_offload_start(permuted_local_hidden_states, name="expert_fc1")
-            offload_context = PipelineOffloadManager.get_instance()
-        with offload_context:
-            intermediate_parallel, bias_parallel = self.linear_fc1(
+            permuted_local_hidden_states = fine_grained_offloading_group_start(
+                permuted_local_hidden_states, name="expert_fc1"
+            )
+        with get_fine_grained_offloading_context(self.offload_expert_fc1):
+            fc1_output, bias_parallel = self.linear_fc1(
                 permuted_local_hidden_states, tokens_per_expert
             )
         if self.offload_expert_fc1:
-            intermediate_parallel, bias_parallel = group_prefetch_offload_commit(intermediate_parallel, bias_parallel, name="expert_fc1", release_tensors=[])
-            offload_context = contextlib.nullcontext()
+            fc1_output, bias_parallel = fine_grained_offloading_group_commit(
+                fc1_output,
+                bias_parallel,
+                name="expert_fc1",
+                forced_released_tensors=[permuted_local_hidden_states]
+            )
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
             if self.config.use_te_activation_func:
@@ -237,36 +241,38 @@ class TEGroupedMLP():
             return intermediate_parallel
 
         if self.offload_moe_act:
-            intermediate_parallel = group_prefetch_offload_start(intermediate_parallel, name="moe_act")
-            offload_context = PipelineOffloadManager.get_instance()
+            fc1_output = fine_grained_offloading_group_start(fc1_output, name="moe_act")
 
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            intermediate_parallel = self.activation_checkpoint.checkpoint(
-                bias_act_func, intermediate_parallel, bias_parallel, permuted_probs
-            )
-            output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
-            self.activation_checkpoint.discard_output_and_register_recompute(output)
-        else:
-            with offload_context:
-                intermediate_parallel_act = bias_act_func(
-                    intermediate_parallel, bias_parallel, permuted_probs
+            with get_fine_grained_offloading_context(self.offload_moe_act):
+                bias_act_output = self.activation_checkpoint.checkpoint(
+                    bias_act_func, fc1_output, bias_parallel, permuted_probs
                 )
+        else:
+            with get_fine_grained_offloading_context(self.offload_moe_act):
+                bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
 
-            if self.offload_moe_act:
-                intermediate_parallel_act, = group_prefetch_offload_commit(intermediate_parallel_act, name="moe_act", release_tensors=[])
-                offload_context = contextlib.nullcontext()
+        if self.offload_moe_act:
+            (bias_act_output,) = fine_grained_offloading_group_commit(
+                bias_act_output, name="moe_act", forced_released_tensors=[fc1_output]
+            )
 
-            if self.offload_expert_fc2:
-                intermediate_parallel_act = group_prefetch_offload_start(intermediate_parallel_act, name="expert_fc2")
-                offload_context = PipelineOffloadManager.get_instance()
+        if self.offload_expert_fc2:
+            bias_act_output = fine_grained_offloading_group_start(
+                bias_act_output, name="expert_fc2"
+            )
+        with get_fine_grained_offloading_context(self.offload_expert_fc2):
+            output, output_bias = self.linear_fc2(bias_act_output, tokens_per_expert)
+        if self.offload_expert_fc2:
+            output, output_bias = fine_grained_offloading_group_commit(
+                output, output_bias,
+                name="expert_fc2",
+                forced_released_tensors=[bias_act_output]
+            )
 
-            with offload_context:
-                output, output_bias = self.linear_fc2(intermediate_parallel_act, tokens_per_expert)
-
-            if self.offload_expert_fc2:
-                output, = group_prefetch_offload_commit(output, name="expert_fc2", release_tensors=[])
-                offload_context = contextlib.nullcontext()
+        if self.activation_recompute:
+            self.activation_checkpoint.discard_output_and_register_recompute(output)
 
         # upad and concat the output
         if self.config.fp8:

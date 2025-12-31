@@ -35,8 +35,6 @@ except ImportError:
     has_nvidia_modelopt = False
 
 from dcu_megatron import megatron_adaptor
-from dcu_megatron.training.utils import print_rank_message
-from dcu_megatron.core.parallel_state import get_parallel_group_ranks
 
 stimer = StragglerDetector()
 

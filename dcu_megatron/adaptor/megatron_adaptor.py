@@ -234,7 +234,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     moe_layer_init_wrapper)
         MegatronAdaptation.register('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
                                     moe_layer_forward_wrapper)
-        # (1) activation offload, (2) use_qk_norm
+        # use_qk_norm
         MegatronAdaptation.register('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
                                     SelfAttention.get_query_key_value_tensors)
         # fused gelu and mul
@@ -386,6 +386,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args, validate_args_func_decorator, _print_args_wrapper
         from ..core.parallel_state import create_group, initialize_model_parallel_wrapper
+        from ..miscellaneous.gpt_builders import gpt_builder_wrapper
 
         MegatronAdaptation.register('megatron.training.arguments.parse_args', parse_args)
         MegatronAdaptation.register('megatron.training.arguments.validate_args',
@@ -408,6 +409,10 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     initialize_model_parallel_wrapper,
                                     apply_wrapper=True)
 
+        # output model info
+        MegatronAdaptation.register('gpt_builders.gpt_builder',
+                                    gpt_builder_wrapper,
+                                    apply_wrapper=True)
 
 class LegacyAdaptation(MegatronAdaptationABC):
     """

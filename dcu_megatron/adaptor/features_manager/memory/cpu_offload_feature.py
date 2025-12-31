@@ -28,15 +28,17 @@ class CPUOffloadFeature(AbstractFeature):
                            '"shared_fc1": offload the shared_fc1 part of the transformer layer. '
                            '"shared_fc2": offload the shared_fc2 part of the transformer layer. '
                            '"moe_act": offload the activation function part of the moe layer.')
+        group.add_argument('--min-offloaded-tensor-size', type=int, default=1024*1024,
+                            help='The minimum size of the tensor to be offloaded.')
 
     def validate_args(self, args):
         if args.fine_grained_activation_offloading:
             if args.schedule_method == "dualpipev":
                 assert os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 1"
-            elif args.schedule_method == "interleaved_1f1b":
-                assert not os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 0"
+            # elif args.schedule_method == "interleaved_1f1b":
+            #     assert not os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 0"
             else:
-                raise ValueError(f"schedule_method should be dualpipev or interleaved_1f1b")
+                assert not os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 0"
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
@@ -47,11 +49,17 @@ class CPUOffloadFeature(AbstractFeature):
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
         from dcu_megatron.core.extensions.transformer_engine import te_module_init_wrapper
-        from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_with_interleaving_wrapper
+        from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_wrapper
+        from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
+        from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
 
-        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.initialize_model_chunk_offload_handler',
-                                     GPTModel.initialize_model_chunk_offload_handler,
+        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.preprocess_for_fine_grained_offloading',
+                                     GPTModel.preprocess_for_fine_grained_offloading,
                                      create_dummy=True)
+        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
+                                     GPTModel.__init__)
+        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
+                                     GPTModel.build_schedule_plan)
 
         patch_manager.register_patch('megatron.core.transformer.attention.Attention.forward',
                                      Attention.forward)
@@ -62,15 +70,14 @@ class CPUOffloadFeature(AbstractFeature):
                                      TEGroupedMLP.forward)
 
         patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
-                                     forward_backward_pipelining_with_interleaving_wrapper,
+                                     forward_backward_pipelining_wrapper,
                                      apply_wrapper=True)
 
-        patch_manager.register_cls_funcs('megatron.core.transformer.mlp.MLP',
-                                         [MLP._offload_shared_fc1_forward,
-                                          MLP._offload_shared_fc2_forward],
-                                         create_dummy=True)
         patch_manager.register_patch('megatron.core.transformer.mlp.MLP.forward',
                                      MLP.forward)
+        patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_without_interleaving',
+                                     forward_backward_pipelining_wrapper,
+                                     apply_wrapper=True)
 
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer._forward_attention',
                                      TransformerLayer._forward_attention)
@@ -78,16 +85,24 @@ class CPUOffloadFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.forward',
                                      TransformerBlock.forward)
 
+        patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionBlock.forward',
+                                     MultiTokenPredictionBlock.forward)
+
+        patch_manager.register_cls_funcs('megatron.core.tensor_parallel.random.CheckpointWithoutOutput',
+                                         [CheckpointWithoutOutput.checkpoint,
+                                          CheckpointWithoutOutput._recompute],
+                                         create_dummy=True)
+
         # update fine_grained_activation_offloading param
-        patch_manager.register_patch('transformer_engine.pytorch.module.linear.Linear.__init__',
-                                     te_module_init_wrapper,
-                                     apply_wrapper=True)
-        patch_manager.register_patch('transformer_engine.pytorch.module.layernorm_linear.LayerNormLinear.__init__',
-                                     te_module_init_wrapper,
-                                     apply_wrapper=True)
-        patch_manager.register_patch('transformer_engine.pytorch.module.grouped_linear.GroupedLinear.__init__',
-                                     te_module_init_wrapper,
-                                     apply_wrapper=True)
-        patch_manager.register_patch('transformer_engine.pytorch.module.batched_linear.BatchedLinear.__init__',
-                                     te_module_init_wrapper,
-                                     apply_wrapper=True)
+        # patch_manager.register_patch('transformer_engine.pytorch.module.linear.Linear.__init__',
+        #                              te_module_init_wrapper,
+        #                              apply_wrapper=True)
+        # patch_manager.register_patch('transformer_engine.pytorch.module.layernorm_linear.LayerNormLinear.__init__',
+        #                              te_module_init_wrapper,
+        #                              apply_wrapper=True)
+        # patch_manager.register_patch('transformer_engine.pytorch.module.grouped_linear.GroupedLinear.__init__',
+        #                              te_module_init_wrapper,
+        #                              apply_wrapper=True)
+        # patch_manager.register_patch('transformer_engine.pytorch.module.batched_linear.BatchedLinear.__init__',
+        #                              te_module_init_wrapper,
+        #                              apply_wrapper=True)
