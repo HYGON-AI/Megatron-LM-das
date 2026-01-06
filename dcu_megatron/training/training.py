@@ -16,6 +16,15 @@ from megatron.training.log_handler import CustomHandler
 # Make default logging level INFO, but filter out all log messages not from MCore.
 logging.basicConfig(handlers=[CustomHandler()], level=logging.INFO)
 from megatron.training.theoretical_memory_usage import report_theoretical_memory
+from megatron.core.fp8_utils import correct_amax_history_if_needed
+
+try:
+    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
+
+    HAVE_FSDP2 = True
+except ImportError:
+    HAVE_FSDP2 = False
+from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
 
 import time
 
@@ -23,6 +32,7 @@ import torch
 
 try:
     from megatron.rl import rl_utils
+
     has_rl_utils = True
 except ImportError:
     has_rl_utils = False
@@ -40,8 +50,10 @@ try:
 except ImportError:
     CallWrapper = type(None)
 
+from megatron.core.enums import ModelType
+from megatron.core import mpu, tensor_parallel
+from megatron.core.transformer.module import Float16Module
 
-from megatron.core import mpu
 from megatron.core.utils import (
     check_param_hashes_across_dp_replicas,
     get_model_config,
@@ -92,6 +104,7 @@ from megatron.training.utils import (
     report_memory,
     unwrap_model,
     update_use_dist_ckpt,
+    to_empty_if_meta_device,
 )
 
 from megatron.training.global_vars import (
@@ -119,7 +132,7 @@ from megatron.training.training import (
     _TRAIN_START_TIME,
     build_train_valid_test_data_iterators,
     get_optimizer_param_scheduler,
-    get_model,
+
     preprocess_common_state_dict,
     HAVE_FSDP2,
 )
@@ -132,18 +145,18 @@ stimer = StragglerDetector()
 
 
 def pretrain(
-    train_valid_test_dataset_provider,
-    model_provider,
-    model_type,
-    forward_step_func,
-    process_non_loss_data_func=None,
-    extra_args_provider=None,
-    args_defaults={},
-    get_embedding_ranks=None,
-    get_position_embedding_ranks=None,
-    non_loss_data_func=None,
-    store=None,
-    inprocess_call_wrapper: Optional[CallWrapper] = None,
+        train_valid_test_dataset_provider,
+        model_provider,
+        model_type,
+        forward_step_func,
+        process_non_loss_data_func=None,
+        extra_args_provider=None,
+        args_defaults={},
+        get_embedding_ranks=None,
+        get_position_embedding_ranks=None,
+        non_loss_data_func=None,
+        store=None,
+        inprocess_call_wrapper: Optional[CallWrapper] = None,
 ):
     """Main training program.
 
@@ -442,13 +455,175 @@ def pretrain(
     one_logger_utils.finish()
 
 
+def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True):
+    """Build the model."""
+    args = get_args()
+    args.model_type = model_type
+
+    # Build model.
+    def build_model():
+        if (
+                mpu.get_pipeline_model_parallel_world_size() > 1
+                and args.virtual_pipeline_model_parallel_size is not None
+        ):
+            model = []
+            for i in range(args.virtual_pipeline_model_parallel_size):
+                # Set pre_process and post_process only after virtual rank is set.
+                pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=i)
+                post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=i)
+                this_model = model_provider_func(
+                    pre_process=pre_process, post_process=post_process, vp_stage=i)
+                this_model.model_type = model_type
+                this_model.vp_stage = i
+                model.append(this_model)
+        else:
+            pre_process = mpu.is_pipeline_first_stage()
+            post_process = mpu.is_pipeline_last_stage()
+            model = model_provider_func(pre_process=pre_process, post_process=post_process)
+            model.model_type = model_type
+        return model
+
+    if args.init_model_with_meta_device:
+        with torch.device('meta'):
+            model = build_model()
+    else:
+        model = build_model()
+
+    if not isinstance(model, list):
+        model = [model]
+
+    # Set tensor model parallel attributes if not set.
+    # Only parameters that are already tensor model parallel have these
+    # attributes set for them. We should make sure the default attributes
+    # are set for all params so the optimizer can use them.
+    for model_module in model:
+        for param in model_module.parameters():
+            tensor_parallel.set_defaults_if_not_set_tensor_model_parallel_attributes(param)
+
+    # Print number of parameters.
+    num_parameters = sum(
+        [sum([p.nelement() for p in model_module.parameters()]) for model_module in model]
+    )
+    if mpu.get_data_parallel_rank() == 0 and mpu.get_context_parallel_rank() == 0:
+        print(
+            ' > number of parameters on (tensor, pipeline) '
+            'model parallel rank ({}, {}): {}'.format(
+                mpu.get_tensor_model_parallel_rank(),
+                mpu.get_pipeline_model_parallel_rank(),
+                num_parameters,
+            ),
+            flush=True,
+        )
+
+    # GPU allocation.
+    # For FSDP2, we don't allocate GPU memory here. We allocate GPU memory
+    # in the fully_shard function of FSDP2 instead.
+    if (
+            not (args.use_torch_fsdp2 and args.use_cpu_initialization)
+            and not args.init_model_with_meta_device
+    ):
+        for model_module in model:
+            model_module.cuda(torch.cuda.current_device())
+
+    # Fp16 conversion.
+    if args.fp16 or args.bf16:
+        config = get_model_config(model[0])
+        model = [Float16Module(config, model_module) for model_module in model]
+
+    # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
+    if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
+        # for model_module in model:
+        model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
+
+    # Before TE2.x: The model_module.bfloat16()/model_module.half() above will call the inplace
+    #               copy of TE's Float8Tensor, which will write an unwanted value (amax calculated
+    #               from the current fp8 param) to its amax_history. The below function will correct
+    #               the amax_history back.
+    # After TE2.x: Below function is an empty function and does nothing.
+    correct_amax_history_if_needed(model)
+
+    if wrap_with_ddp:
+        if args.use_torch_fsdp2:
+            assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
+            DP = torch_FSDP
+        elif args.use_megatron_fsdp:
+            DP = megatron_FSDP
+        else:
+            DP = DDP
+
+        config = get_model_config(model[0])
+
+        if getattr(args, "use_torch_fsdp2", False):
+            reshard_after_forward = getattr(args, "torch_fsdp2_reshard_after_forward", True)
+            ddp_config = TorchFullyShardedDataParallelConfig(reshard_after_forward=reshard_after_forward)
+        else:
+            kwargs = {}
+            for f in dataclasses.fields(DistributedDataParallelConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+            kwargs['grad_reduce_in_fp32'] = args.accumulate_allreduce_grads_in_fp32
+            kwargs['check_for_nan_in_grad'] = args.check_for_nan_in_loss_and_grad
+            kwargs['check_for_large_grads'] = args.check_for_large_grads
+            if args.ddp_num_buckets is not None:
+                assert args.ddp_bucket_size is None, \
+                    "Cannot specify both --ddp-num-buckets and --ddp-bucket-size"
+                assert args.ddp_num_buckets > 0, \
+                    "--ddp-num-buckets must be greater than 0"
+                kwargs['bucket_size'] = num_parameters // args.ddp_num_buckets
+            else:
+                kwargs['bucket_size'] = args.ddp_bucket_size
+            kwargs['pad_buckets_for_high_nccl_busbw'] = args.ddp_pad_buckets_for_high_nccl_busbw
+            kwargs['average_in_collective'] = args.ddp_average_in_collective
+            if args.use_megatron_fsdp and args.use_precision_aware_optimizer:
+                kwargs["preserve_fp32_weights"] = False
+            ddp_config = DistributedDataParallelConfig(**kwargs)
+
+            # In the Megatron FSDP and DDP use path, we need to initialize the bucket size.
+            # If bucket_size is not provided as an input, use sane default.
+            # If using very large dp_sizes, make buckets larger to ensure that chunks used in NCCL
+            # ring-reduce implementations are large enough to remain bandwidth-bound rather than
+            # latency-bound.
+            if ddp_config.bucket_size is None:
+                ddp_config.bucket_size = max(
+                    40000000, 1000000 * mpu.get_data_parallel_world_size(with_context_parallel=True)
+                )
+            # Set bucket_size to infinity if overlap_grad_reduce is False.
+            if not ddp_config.overlap_grad_reduce:
+                ddp_config.bucket_size = None
+
+        dp_stream = torch.cuda.Stream()
+        dp_stream.wait_stream(torch.cuda.current_stream())
+
+        with torch.cuda.stream(dp_stream):
+            model = [
+                DP(
+                    config=config,
+                    ddp_config=ddp_config,
+                    module=model_chunk,
+                    # Turn off bucketing for model_chunk 2 onwards, since communication for these
+                    # model chunks is overlapped with compute anyway.
+                    disable_bucketing=(model_chunk_idx > 0)
+                                      or args.overlap_param_gather_with_optimizer_step,
+                )
+                for (model_chunk_idx, model_chunk) in enumerate(model)
+            ]
+        torch.cuda.current_stream().wait_stream(dp_stream)
+
+        # Broadcast params from data parallel src rank to other data parallel ranks.
+        if args.data_parallel_random_init:
+            for model_module in model:
+                model_module.broadcast_params()
+
+    return model
+
+
 def setup_model_and_optimizer(
-    model_provider_func,
-    model_type,
-    no_wd_decay_cond=None,
-    scale_lr_cond=None,
-    lr_mult=1.0,
-    checkpointing_context=None,
+        model_provider_func,
+        model_type,
+        no_wd_decay_cond=None,
+        scale_lr_cond=None,
+        lr_mult=1.0,
+        checkpointing_context=None,
 ):
     """Setup model and optimizer."""
     args = get_args()
@@ -538,7 +713,7 @@ def setup_model_and_optimizer(
         print_rank_0(f'Upcycled checkpoint saved to {args.save}')
 
     if (
-        args.load is not None or args.pretrained_checkpoint is not None
+            args.load is not None or args.pretrained_checkpoint is not None
     ) and not args.moe_use_upcycling:
         one_logger and one_logger.log_metrics(
             {'load_checkpoint_start_time': one_logger_utils.get_timestamp_in_ms()}
@@ -551,8 +726,8 @@ def setup_model_and_optimizer(
             opt_param_scheduler,
             checkpointing_context=checkpointing_context,
             skip_load_to_model_and_opt=HAVE_FSDP2
-            and getattr(args, "use_torch_fsdp2", False)
-            and args.ckpt_format == "torch_dist",
+                                       and getattr(args, "use_torch_fsdp2", False)
+                                       and args.ckpt_format == "torch_dist",
         )
         timers('load-checkpoint').stop(barrier=True)
         timers.log(['load-checkpoint'])
@@ -569,7 +744,7 @@ def setup_model_and_optimizer(
             Utils.mapped_rank = read_data_from_csv(args.mapped_rank_path, args.latest_iteration)
 
         if is_rank0():
-            #iter——log写文件
+            # iter——log写文件
             iter_log_path = os.path.join(args.load, 'last_ckpt_iter_log.txt')
             try:
                 with open(iter_log_path, 'r') as f:
@@ -586,9 +761,9 @@ def setup_model_and_optimizer(
 
     # get model without FP16 and/or DDP wrappers
     if (
-        args.iteration == 0
-        and len(unwrapped_model) == 1
-        and hasattr(unwrapped_model[0], 'init_state_dict_from_bert')
+            args.iteration == 0
+            and len(unwrapped_model) == 1
+            and hasattr(unwrapped_model[0], 'init_state_dict_from_bert')
     ):
         print_rank_0("Initializing ICT from pretrained BERT model")
         unwrapped_model[0].init_state_dict_from_bert()
@@ -834,17 +1009,17 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 
 
 def training_log(
-    loss_dict,
-    total_loss_dict,
-    learning_rate,
-    decoupled_learning_rate,
-    iteration,
-    loss_scale,
-    report_memory_flag,
-    skipped_iter,
-    grad_norm,
-    params_norm,
-    num_zeros_in_grad,
+        loss_dict,
+        total_loss_dict,
+        learning_rate,
+        decoupled_learning_rate,
+        iteration,
+        loss_scale,
+        report_memory_flag,
+        skipped_iter,
+        grad_norm,
+        params_norm,
+        num_zeros_in_grad,
 ):
     """Log training information such as losses, timing, ...."""
     args = get_args()
@@ -871,8 +1046,8 @@ def training_log(
     for key in loss_dict:
         if not skipped_iter:
             total_loss_dict[key] = (
-                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device='cuda'))
-                + loss_dict[key]
+                    total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device='cuda'))
+                    + loss_dict[key]
             )
         else:
             value = loss_dict[key].float().sum().item()
@@ -986,7 +1161,8 @@ def training_log(
             if wandb_writer:
                 wandb_writer.log({'params-norm': params_norm}, iteration)
         if getattr(args, 'perform_rl_step', False):
-            grpo_collection_iteration = iteration // (args.grpo_iterations * ( ( args.grpo_samples_per_iteration )// args.global_batch_size ))
+            grpo_collection_iteration = iteration // (
+                        args.grpo_iterations * ((args.grpo_samples_per_iteration) // args.global_batch_size))
             writer.add_scalar('grpo_collection_iteration', grpo_collection_iteration, iteration)
             if wandb_writer:
                 wandb_writer.log({'grpo_collection_iteration': grpo_collection_iteration}, iteration)
@@ -1043,7 +1219,7 @@ def training_log(
         elapsed_time_per_iteration = elapsed_time / total_iterations
 
         throughput = num_floating_point_operations(args, batch_size) / (
-            elapsed_time_per_iteration * 10**12 * args.world_size
+                elapsed_time_per_iteration * 10 ** 12 * args.world_size
         )
 
         one_logger_utils.track_e2e_metrics(args.log_throughput, throughput)
@@ -1084,8 +1260,8 @@ def training_log(
         # Decoupled_learning_rate should be not None only on first and last pipeline stage.
         log_string += f' learning rate: {learning_rate:.6E} |'
         if args.decoupled_lr is not None and (
-            mpu.is_pipeline_first_stage(ignore_virtual=True)
-            or mpu.is_pipeline_last_stage(ignore_virtual=True)
+                mpu.is_pipeline_first_stage(ignore_virtual=True)
+                or mpu.is_pipeline_last_stage(ignore_virtual=True)
         ):
             assert decoupled_learning_rate is not None
             log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
@@ -1133,14 +1309,14 @@ def training_log(
 
 
 def checkpoint_and_decide_exit(
-    model,
-    optimizer,
-    opt_param_scheduler,
-    iteration,
-    num_floating_point_operations_so_far,
-    checkpointing_context,
-    train_data_iterator,
-    iter_log
+        model,
+        optimizer,
+        opt_param_scheduler,
+        iteration,
+        num_floating_point_operations_so_far,
+        checkpointing_context,
+        train_data_iterator,
+        iter_log
 ):
     """Save checkpoint and decide whether to exit based on arguments (e.g., if
     --exit-duration-in-mins is set). Actual exit happens in main training loop
@@ -1181,9 +1357,9 @@ def checkpoint_and_decide_exit(
         saved_checkpoint = True
 
     elif (
-        args.save
-        and args.non_persistent_save_interval
-        and iteration % args.non_persistent_save_interval == 0
+            args.save
+            and args.non_persistent_save_interval
+            and iteration % args.non_persistent_save_interval == 0
     ):
         save_checkpoint_and_time(
             iteration,
@@ -1198,7 +1374,7 @@ def checkpoint_and_decide_exit(
         saved_checkpoint = True
 
     if is_rank0() and saved_checkpoint:
-        #iter——log写文件
+        # iter——log写文件
         iter_log_path = os.path.join(args.save, 'last_ckpt_iter_log.txt')
         os.makedirs(args.save, exist_ok=True)
         with open(iter_log_path, 'w') as f:
@@ -1247,16 +1423,16 @@ def checkpoint_and_decide_exit(
 
 
 def train(
-    forward_step_func,
-    model,
-    optimizer,
-    opt_param_scheduler,
-    train_data_iterator,
-    valid_data_iterator,
-    process_non_loss_data_func,
-    config,
-    checkpointing_context,
-    non_loss_data_func,
+        forward_step_func,
+        model,
+        optimizer,
+        opt_param_scheduler,
+        train_data_iterator,
+        valid_data_iterator,
+        process_non_loss_data_func,
+        config,
+        checkpointing_context,
+        non_loss_data_func,
 ):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
@@ -1275,14 +1451,14 @@ def train(
         args.load = None
         args.finetune = True
         load_checkpoint(
-                model,
-                None,  # Don't load optimizer state
-                None,  # Don't load scheduler state
-                checkpointing_context=checkpointing_context,
-                skip_load_to_model_and_opt=HAVE_FSDP2
-                and getattr(args, "use_torch_fsdp2", False)
-                and args.ckpt_format == "torch_dist",
-            )
+            model,
+            None,  # Don't load optimizer state
+            None,  # Don't load scheduler state
+            checkpointing_context=checkpointing_context,
+            skip_load_to_model_and_opt=HAVE_FSDP2
+                                       and getattr(args, "use_torch_fsdp2", False)
+                                       and args.ckpt_format == "torch_dist",
+        )
         ref_state_dict = {k: (v.cpu() if v is not None else v) for k, v in model[0].state_dict().items()}
 
         # Reload RL training checkpoint weights
@@ -1290,14 +1466,14 @@ def train(
         args.finetune = finetune
         print_rank_0("> Reloading RL training checkpoint...")
         load_checkpoint(
-                model,
-                None,
-                None,
-                checkpointing_context=checkpointing_context,
-                skip_load_to_model_and_opt=HAVE_FSDP2
-                and getattr(args, "use_torch_fsdp2", False)
-                and args.ckpt_format == "torch_dist",
-            )
+            model,
+            None,
+            None,
+            checkpointing_context=checkpointing_context,
+            skip_load_to_model_and_opt=HAVE_FSDP2
+                                       and getattr(args, "use_torch_fsdp2", False)
+                                       and args.ckpt_format == "torch_dist",
+        )
 
         args.no_load_optim = no_load_optim
 
@@ -1363,7 +1539,6 @@ def train(
         }
         for attr, filename in paths.items():
             setattr(args, attr, os.path.join(log_dir, filename))
-
 
     def _initialize_warmup_iterations(args):
         args.warm_up_train_iter = int(args.train_iters * args.grad_comp_warm_up)
@@ -1466,7 +1641,7 @@ def train(
         # Disable the default garbage collector and perform the collection manually.
         # This is to align the timing of garbage collection across ranks.
         assert (
-            args.manual_gc_interval >= 0
+                args.manual_gc_interval >= 0
         ), 'Manual garbage collection interval should be larger than or equal to 0'
         gc.disable()
         gc.collect()
@@ -1491,13 +1666,14 @@ def train(
     eval_iterations = 0
     # Wrap forward_backward_func for Full iteration CUDA graph
     forward_backward_func = get_forward_backward_func()
-    if args.cuda_graph_impl == "local" and args.cuda_graph_scope=="full_iteration":
-        forward_backward_func = FullCudaGraphWrapper(forward_backward_func, cuda_graph_warmup_steps=args.cuda_graph_warmup_steps)
+    if args.cuda_graph_impl == "local" and args.cuda_graph_scope == "full_iteration":
+        forward_backward_func = FullCudaGraphWrapper(forward_backward_func,
+                                                     cuda_graph_warmup_steps=args.cuda_graph_warmup_steps)
 
     def get_e2e_base_metrics():
         """Get base metrics values for one-logger to calculate E2E tracking metrics."""
         num_floating_point_operations_since_current_train_start = (
-            num_floating_point_operations_so_far - args.num_floating_point_operations_so_far
+                num_floating_point_operations_so_far - args.num_floating_point_operations_so_far
         )
         return {
             'iteration': iteration,
@@ -1518,28 +1694,28 @@ def train(
 
     prof = None
     if (
-        args.profile
-        and torch.distributed.get_rank() in args.profile_ranks
-        and args.use_pytorch_profiler
+            args.profile
+            and torch.distributed.get_rank() in args.profile_ranks
+            and args.use_pytorch_profiler
     ):
         def trace_handler(p):
             from pathlib import Path
             Path(f"{args.profile_dir}").mkdir(parents=True, exist_ok=True)
             if args.rank in [0]:
-                print(p.key_averages(group_by_input_shape=True, 
-                                     group_by_stack_n=5).table(sort_by="self_cuda_time_total", 
-                                                               row_limit=-1, 
+                print(p.key_averages(group_by_input_shape=True,
+                                     group_by_stack_n=5).table(sort_by="self_cuda_time_total",
+                                                               row_limit=-1,
                                                                max_src_column_width=100,
-                                                               max_name_column_width=280, 
+                                                               max_name_column_width=280,
                                                                max_shapes_column_width=200))
-                
+
             p.export_chrome_trace("{path}/trace_rank{rank}_step{step}.json".format(
                 path=args.profile_dir, rank=torch.distributed.get_rank(), step=p.step_num))
 
         prof = torch.profiler.profile(
             activities=[
-               torch.profiler.ProfilerActivity.CPU,
-               torch.profiler.ProfilerActivity.CUDA,
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
             ],
             schedule=torch.profiler.schedule(
                 wait=max(args.profile_step_start - 1, 0),
@@ -1604,7 +1780,7 @@ def train(
         # Update the timeout for all process groups after initialization
         # We update the timeout after the first successful iteration,
         # which takes longer than others usually
-        if args.distributed_timeout_seconds_after_init is not None and iteration == start_iteration+1:
+        if args.distributed_timeout_seconds_after_init is not None and iteration == start_iteration + 1:
             # TODO: some dynamic timeout setting is required
             # based on the iteration time considering interval-based steps (e.g. eval, checkpoint)
             # e.g. timeout for normal iterations vs timeout for iterations with checkpoint
@@ -1645,8 +1821,8 @@ def train(
 
         # Capture CUDA Graphs.
         if (
-            args.cuda_graph_impl == "transformer_engine"
-            and iteration == args.cuda_graph_warmup_steps
+                args.cuda_graph_impl == "transformer_engine"
+                and iteration == args.cuda_graph_warmup_steps
         ):
             if iteration > start_iteration and should_disable_forward_pre_hook(args):
                 disable_forward_pre_hook(model, param_sync=False)
@@ -1663,7 +1839,7 @@ def train(
                 start_iteration = iteration + 1
             iteration += 1
             batch_size = (
-                mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
+                    mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
             )
             args.consumed_train_samples += batch_size
             args.skipped_train_samples += batch_size
@@ -1719,7 +1895,8 @@ def train(
                 grad_norm,
                 num_zeros_in_grad,
             ) = train_step(
-                forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func
+                forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config,
+                forward_backward_func
             )
         ft_integration.on_training_step_end()
         if should_checkpoint:
@@ -1754,8 +1931,8 @@ def train(
                     pre_hook_enabled = True
                     # Set the manual hooks here since it's not set right after the capturing.
                     if (
-                        args.cuda_graph_impl == "transformer_engine"
-                        and iteration == args.cuda_graph_warmup_steps
+                            args.cuda_graph_impl == "transformer_engine"
+                            and iteration == args.cuda_graph_warmup_steps
                     ):
                         cuda_graph_helper.cuda_graph_set_manual_hooks()
 
@@ -1766,7 +1943,7 @@ def train(
             rl_utils.update_sequence_packing_metrics(args)
         else:
             batch_size = (
-                mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
+                    mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
             )
             iteration_sequences = batch_size
 
@@ -1777,7 +1954,7 @@ def train(
         batch_size = iteration_sequences
 
         num_skipped_samples_in_batch = (
-            get_current_global_batch_size() - get_current_running_global_batch_size()
+                get_current_global_batch_size() - get_current_running_global_batch_size()
         )
         if args.decrease_batch_size_if_needed:
             assert num_skipped_samples_in_batch >= 0
@@ -1835,13 +2012,13 @@ def train(
             timers('eval-time', log_level=0).start(barrier=True)
             if getattr(args, 'perform_rl_step', False):
                 rl_utils.evaluate_and_print_results_rl(valid_data_iterator, model, optimizer,
-                                       iteration, write_to_tensorboard=True)
+                                                       iteration, write_to_tensorboard=True)
             else:
                 evaluate_and_print_results(prefix, forward_step_func,
-                                       valid_data_iterator, model,
-                                       iteration, process_non_loss_data_func,
-                                       config, verbose=False, write_to_tensorboard=True,
-                                       non_loss_data_func=non_loss_data_func)
+                                           valid_data_iterator, model,
+                                           iteration, process_non_loss_data_func,
+                                           config, verbose=False, write_to_tensorboard=True,
+                                           non_loss_data_func=non_loss_data_func)
 
             eval_duration += timers('eval-time').elapsed()
             eval_iterations += sum(args.eval_iters) if isinstance(args.eval_iters, list) else args.eval_iters
@@ -1921,14 +2098,14 @@ def train(
 
 
 def evaluate(
-    forward_step_func,
-    data_iterator,
-    model,
-    process_non_loss_data_func,
-    config,
-    verbose=False,
-    non_loss_data_func=None,
-    eval_iters=None,
+        forward_step_func,
+        data_iterator,
+        model,
+        process_non_loss_data_func,
+        config,
+        verbose=False,
+        non_loss_data_func=None,
+        eval_iters=None,
 ):
     """Evaluation."""
     args = get_args()
@@ -1956,8 +2133,9 @@ def evaluate(
     eval_batch_size = args.global_batch_size
     eval_num_microbatches = eval_batch_size // (args.micro_batch_size * args.data_parallel_size)
     forward_backward_func = get_forward_backward_func()
-    if args.cuda_graph_impl == "local" and args.cuda_graph_scope=="full_iteration":
-        forward_backward_func = FullCudaGraphWrapper(forward_backward_func, cuda_graph_warmup_steps=args.cuda_graph_warmup_steps)
+    if args.cuda_graph_impl == "local" and args.cuda_graph_scope == "full_iteration":
+        forward_backward_func = FullCudaGraphWrapper(forward_backward_func,
+                                                     cuda_graph_warmup_steps=args.cuda_graph_warmup_steps)
 
     if eval_iters is None:
         eval_iters = args.eval_iters
@@ -2020,7 +2198,7 @@ def evaluate(
                             )
                             total_loss_dict[key][0] += val
                             total_loss_dict[key][1] += 1
-                        else :
+                        else:
                             val = torch.vstack(val).sum(dim=0)
                             torch.distributed.all_reduce(
                                 val,
@@ -2086,14 +2264,14 @@ def evaluate(
 def save_checkpoint_and_time_wrapper(fn):
     @wraps(fn)
     def wrapper(
-        iteration,
-        model,
-        optimizer,
-        opt_param_scheduler,
-        num_floating_point_operations_so_far,
-        checkpointing_context,
-        non_persistent_ckpt=False,
-        train_data_iterator=None,
+            iteration,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            num_floating_point_operations_so_far,
+            checkpointing_context,
+            non_persistent_ckpt=False,
+            train_data_iterator=None,
     ):
         args = get_args()
 
