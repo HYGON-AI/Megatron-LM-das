@@ -239,9 +239,7 @@ class MLASelfAttention():
 
     def compute_attn(
         self,
-        query,
-        key,
-        value,
+        qkv_output,
         attention_mask,
         inference_context=None,
         rotary_pos_emb=None,
@@ -254,6 +252,7 @@ class MLASelfAttention():
         *,
         inference_params=None,
     ):
+        query, key, value = qkv_output
 
         assert rotary_pos_emb is None, "Rotary position embeddings should not be passed into MLA."
         assert attention_bias is None, "Attention bias should not be passed into MLA."

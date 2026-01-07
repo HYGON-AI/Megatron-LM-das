@@ -5,15 +5,11 @@ import torch
 from torch import Tensor
 
 from megatron.training import get_args
-from megatron.core import mpu, InferenceParams, parallel_state
+from megatron.core import InferenceParams, parallel_state
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.pipeline_parallel.utils import is_vp_last_stage
-from megatron.core.transformer.multi_token_prediction import (
-    roll_tensor,
-    MTPLossAutoScaler,
-    MTPLossLoggingHelper,
-)
+from megatron.core.transformer.multi_token_prediction import get_mtp_layer_offset
 
 from dcu_megatron.core.pipeline_parallel import (
     fine_grained_offloading_set_last_layer,

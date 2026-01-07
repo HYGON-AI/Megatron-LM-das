@@ -1,4 +1,3 @@
-import contextlib
 from contextlib import nullcontext
 from typing import Optional
 
@@ -12,13 +11,14 @@ from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.pipeline_parallel.utils import (
     NoopScheduleNode,
     get_comm_stream,
+    get_comp_stream,
 )
+from megatron.core.models.common.model_chunk_schedule_plan import ModelChunkState
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan as MegatronTransformerLayerSchedulePlan
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan as MegatronTransformerModelChunkSchedulePlan
+from megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
 
-from dcu_megatron.core.pipeline_parallel import (
-    fine_grained_offloading_set_last_layer,
-)
+from dcu_megatron.core.pipeline_parallel import fine_grained_offloading_set_last_layer
 
 
 F_DISPATCH_B_MLP_SYNC_EVENT = None
@@ -167,10 +167,10 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         from megatron.core.transformer.moe.moe_layer import MoELayer
         from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 
-        from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables
+        from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_with_split_attn
 
         # build the forward and backward callables for the transformer/mtp layer
-        fwd_callables, bwd_dw_callable_map = build_layer_callables(self.layer)
+        fwd_callables, bwd_dw_callable_map = build_layer_callables_with_split_attn(self.layer)
 
         # get flags for latter use
         is_mtp = isinstance(self.layer, MultiTokenPredictionLayer)
@@ -208,7 +208,6 @@ class TransformerLayerSchedulePlanWithSplitAttn:
             moe_combine_module,
             mtp_post_process_module
         ) = fwd_callables
-
 
         # Create nodes for different operations in the layer
         # Each node type has a predefined name that determines its memory strategy
@@ -342,10 +341,9 @@ class TransformerLayerSchedulePlanWithSplitAttn:
             b_grad = b_layer.core_attn.backward(b_grad)
             b_grad = b_layer.attn_qkv.backward(b_grad)
 
-
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
-        if not block_level_wgrad_compute
+        if not block_level_wgrad_compute:
             if b_layer is not None and not is_last_layer_in_bwd:
                 b_layer.attn_qkv.backward_dw()
                 b_layer.attn_proj.backward_dw()
@@ -353,11 +351,10 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         return f_input, b_grad
 
 
-args = get_args()
-if args.overlap_ep_comm_with_split_attn == "megatron":
-    layer_schedule_plan_cls = TransformerLayerSchedulePlanWithoutSplitAttn
-else:
+if get_args().overlap_ep_comm_with_split_attn:
     layer_schedule_plan_cls = TransformerLayerSchedulePlanWithSplitAttn
+else:
+    layer_schedule_plan_cls = TransformerLayerSchedulePlanWithoutSplitAttn
 
 class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePlan):
     """Schedule the executing plan of the sub-modules in a model chunk sub-modules.
@@ -373,6 +370,97 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
     │   └── ...
     └── post_process: PostProcessNode
     """
+    def __init__(
+        self,
+        model,
+        input_ids: Tensor,
+        position_ids: Tensor,
+        attention_mask: Tensor,
+        decoder_input: Tensor = None,
+        labels: Tensor = None,
+        packed_seq_params=None,
+        extra_block_kwargs=None,
+        runtime_gather_output: Optional[bool] = None,
+        loss_mask: Optional[Tensor] = None,
+    ):
+        """Initialize the schedule plan of all Transformer layers' sub-modules.
+
+        This function creates a schedule plan for a model chunk, including
+        preprocessing, transformer layers, and postprocessing.
+
+        Args:
+            model: The model to build a schedule plan for.
+            input_ids: Input token IDs.
+            position_ids: Position IDs.
+            attention_mask: Attention mask.
+            decoder_input: Decoder input tensor.
+            labels: Labels for loss computation.
+            packed_seq_params: Parameters for packed sequences.
+            extra_block_kwargs: Additional keyword arguments for blocks.
+            runtime_gather_output: Whether to gather output at runtime.
+            loss_mask (torch.Tensor): Used to mask out some portions of the loss
+
+        Returns:
+            The model chunk schedule plan.
+        """
+        from megatron.core.models.gpt.fine_grained_callables import PostProcessNode, PreProcessNode
+
+        self._model_chunk_state = ModelChunkState()
+        self._transformer_layers = []
+        self._event = torch.cuda.Event()
+        self.pre_process = None
+        self.post_process = None
+        self.vp_stage = model.vp_stage
+
+        comp_stream = get_comp_stream()
+        comm_stream = get_comm_stream()
+
+        # save the inputs of model.forward() to ModelChunkState
+        self._model_chunk_state.input_ids = input_ids
+        self._model_chunk_state.position_ids = position_ids
+        self._model_chunk_state.attention_mask = attention_mask
+        self._model_chunk_state.decoder_input = decoder_input
+        self._model_chunk_state.labels = labels
+        self._model_chunk_state.mtp_hidden_states = None
+        self._model_chunk_state.loss_mask = loss_mask
+        self._model_chunk_state.packed_seq_params = packed_seq_params
+        self._model_chunk_state.extra_block_kwargs = extra_block_kwargs
+        self._model_chunk_state.runtime_gather_output = runtime_gather_output
+        self._model_chunk_state.model = model
+        self._model_chunk_state.context = None
+        self._model_chunk_state.context_mask = None
+        self._model_chunk_state.attention_bias = None
+
+        transformer_num_layers = model.decoder.num_layers_per_pipeline_rank
+        mtp_num_layers = get_mtp_num_layers_to_build(model.config, vp_stage=self.vp_stage)
+
+        # build preprocess
+        self.pre_process = PreProcessNode(model, self._model_chunk_state, self._event, comp_stream)
+        # build layer schedule plan for each layer
+        for layer_idx in range(transformer_num_layers):
+            layer = model.decoder._get_layer(layer_idx)
+            layer_plan = layer_schedule_plan_cls(
+                layer, self._event, self._model_chunk_state, comp_stream, comm_stream
+            )
+            self._transformer_layers.append(layer_plan)
+
+        # build mtp layers
+        for layer_idx in range(mtp_num_layers):
+            extra_args = {
+                "is_first_layer": layer_idx == 0,
+                "is_last_layer": layer_idx == mtp_num_layers - 1,
+            }
+            layer = model.mtp.layers[layer_idx]
+            layer_plan = layer_schedule_plan_cls(
+                layer, self.event, self.state, comp_stream, comm_stream, extra_args
+            )
+            self._transformer_layers.append(layer_plan)
+
+        # build post process
+        if model.post_process:
+            self.post_process = PostProcessNode(
+                model, self._model_chunk_state, self._event, comp_stream
+            )
 
     @staticmethod
     def run(
@@ -438,9 +526,9 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
 
         # combined forward and backward pass for overlapped layers
         for i in range(overlapped_layers):
-            if args.fine_grained_activation_offloading:
-                fine_grained_offloading_set_last_layer(i == f_num_layers - 1)
             f_layer = f_schedule_plan.get_layer(i)
+            if f_layer.layer.config.fine_grained_activation_offloading:
+                fine_grained_offloading_set_last_layer(i == f_num_layers - 1)
             b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
             torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
             f_input, b_grad = layer_schedule_plan_cls.run(
@@ -468,9 +556,9 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
 
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
-            if args.fine_grained_activation_offloading:
-                fine_grained_offloading_set_last_layer(i == f_num_layers - 1)
             f_layer = f_schedule_plan.get_layer(i)
+            if f_layer.layer.config.fine_grained_activation_offloading:
+                fine_grained_offloading_set_last_layer(i == f_num_layers - 1)
             torch.cuda.nvtx.range_push(f"layer_{i}f")
             f_input, _ = layer_schedule_plan_cls.run(f_layer, None, f_input=f_input)
             torch.cuda.nvtx.range_pop()
@@ -491,11 +579,11 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
         if not block_level_wgrad_compute and b_num_layers > 0:
-            if get_args().overlap_ep_comm_with_split_attn == "megatron":
-                b_schedule_plan.get_layer(0).attn.backward_dw()
-            else:
+            if get_args().overlap_ep_comm_with_split_attn:
                 b_schedule_plan.get_layer(0).attn_qkv.backward_dw()
                 b_schedule_plan.get_layer(0).attn_proj.backward_dw()
+            else:
+                b_schedule_plan.get_layer(0).attn.backward_dw()
 
         # post process forward
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
@@ -512,6 +600,10 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         # Release reference as early as possible, this helps avoid memory leak.
         if b_schedule_plan is not None:
             b_schedule_plan.release_state()
+
+        if get_args().schedule_method != "dualpipev":
+            assert not block_level_wgrad_compute, "block_level_wgrad_compute should be False when not using dualpipev"
+            return f_input
 
         if b_num_layers and block_level_wgrad_compute:
             def chunk_backward_dw():

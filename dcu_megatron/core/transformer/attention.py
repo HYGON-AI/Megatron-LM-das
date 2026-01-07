@@ -524,7 +524,7 @@ class Attention():
             )
         if self.offload_qkv_linear:
             delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
-            qkv_output = fine_grained_offloading_group_commit(
+            (qkv_output,) = fine_grained_offloading_group_commit(
                 qkv_output,
                 name="qkv_linear",
                 forced_released_tensors=[hidden_states],
@@ -546,7 +546,6 @@ class Attention():
         attention_bias: Optional[Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[int] = None,
-        *,
         inference_params: Optional[BaseInferenceContext] = None,
     ) -> Tuple[Tensor, Tensor]:
         """

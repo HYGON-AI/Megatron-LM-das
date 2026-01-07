@@ -20,9 +20,14 @@ def transformer_config_post_init_wrapper(post_init_func):
         self.recompute_modules = list(self.recompute_modules)
 
         # set delay_wgrad_compute to avoid AssertionError(overlap_moe_expert_parallel_comm must be enabled when enabling delay_wgrad_compute)
+        # set overlap_moe_expert_parallel_comm to avoid AssertionError
         if args.schedule_method == "dualpipev":
             origin_delay_wgrad_compute = self.delay_wgrad_compute
             self.delay_wgrad_compute = False
+
+            origin_overlap_moe_expert_parallel_comm = self.overlap_moe_expert_parallel_comm
+            self.overlap_moe_expert_parallel_comm = False
+
         post_init_func(self)
         if recompute_experts:
             self.recompute_modules.append("experts")
@@ -31,6 +36,7 @@ def transformer_config_post_init_wrapper(post_init_func):
 
         if args.schedule_method == "dualpipev":
             self.delay_wgrad_compute = origin_delay_wgrad_compute
+            self.overlap_moe_expert_parallel_comm = origin_overlap_moe_expert_parallel_comm
 
         fields = []
         for key, value in vars(args).items():

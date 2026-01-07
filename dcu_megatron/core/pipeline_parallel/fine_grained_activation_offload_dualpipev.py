@@ -1,10 +1,8 @@
-import copy
 from collections import deque
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import Any
 
 import torch
-import transformer_engine as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase
 
@@ -79,12 +77,10 @@ class PipelineOffloadManager:
         while self._backward_chunk_order:
             backward_chunk = self._backward_chunk_order.popleft()
             self._cur_backward_chunk = self._queue[backward_chunk].popleft()
-            if not chunk_handler.is_empty_chunk():
+            if not self._cur_backward_chunk.is_empty_chunk():
                 break
 
     def front(self):
-        from dcu_megatron.training.utils import print_rank_message
-
         if not self.size():
             return None
 
@@ -94,7 +90,7 @@ class PipelineOffloadManager:
                 return None
 
             chunk_handler = self._queue[backward_chunk][backward_chunk_index[backward_chunk]]
-            if not self._cur_backward_chunk.is_empty_chunk():
+            if not chunk_handler.is_empty_chunk():
                 return chunk_handler
 
             backward_chunk_index[backward_chunk] += 1
@@ -128,7 +124,7 @@ class PipelineOffloadManager:
         return self._cur_backward_chunk
 
     def __enter__(self):
-        from megatron.core.extensions.transformer_engine import cpu_offload
+        from dcu_megatron.core.extensions.transformer_engine import cpu_offload
 
         if cpu_offload is not None:
             cpu_offload.CPUOffloadEnabled = True
@@ -141,7 +137,7 @@ class PipelineOffloadManager:
         )
 
     def __exit__(self, *args: Any):
-        from megatron.core.extensions.transformer_engine import cpu_offload
+        from dcu_megatron.core.extensions.transformer_engine import cpu_offload
 
         if cpu_offload is not None:
             cpu_offload.CPUOffloadEnabled = False
@@ -274,7 +270,7 @@ class ChunkOffloadHandler():
         """Check if the tensor needs to be offloaded."""
         if tensor is None:
             return False
-        if tensor.numel() < self.min_offloaded_tensor_size::
+        if tensor.numel() < self.min_offloaded_tensor_size:
             return False
         if hasattr(tensor, "offloading_activation") and not tensor.offloading_activation:
             return False
@@ -446,7 +442,7 @@ class ChunkOffloadHandler():
         self.bulk_reload()
 
 
-class GroupCommitFunction(torch.autograd.Function):
+class FineGrainedOffloadingGroupCommitFunction(torch.autograd.Function):
     """this is a dummy op with output identical to input.
     However, it is necessary for marking a timepoint for offload handler to
     accomplish all synchronizations. Implementing it as a function is necessary

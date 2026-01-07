@@ -1,8 +1,8 @@
-import os
+from dcu_megatron.adaptor.megatron_adaptor import get_adaptor_args
 
 
-if int(os.environ.get("USE_DUALPIPEV_SCHEDULE", 0)):
-    from .cpu_offload_dualpipev import (
+if get_adaptor_args().schedule_method == "dualpipev":
+    from .fine_grained_activation_offload_dualpipev import (
         PipelineOffloadManager,
         fine_grained_offloading_group_commit,
         fine_grained_offloading_group_start,

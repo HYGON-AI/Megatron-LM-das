@@ -154,6 +154,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_core_distributed()
         self.patch_core_models()
         self.patch_core_transformers()
+        self.patch_core_tokenizers()
         self.patch_core_extentions()
         self.patch_tensor_parallel()
         self.patch_training()
@@ -252,6 +253,13 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
         MegatronAdaptation.register('megatron.core.transformer.mlp.MLP.__init__',
                                     mlp_init_wrapper,
+                                    apply_wrapper=True)
+
+    def patch_core_tokenizers(self):
+        from ..core.tokenizers.text.utils.build_tokenizer import build_tokenizer_wrapper
+
+        MegatronAdaptation.register('megatron.core.tokenizers.text.utils.build_tokenizer.build_tokenizer',
+                                    build_tokenizer_wrapper,
                                     apply_wrapper=True)
 
     def patch_core_extentions(self):

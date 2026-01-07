@@ -86,13 +86,6 @@ def gpt_model_postprocess(
             **(extra_block_kwargs or {}),
         )
 
-    if (
-        self.mtp_process is not None
-        and getattr(self.decoder, "main_final_layernorm", None) is not None
-    ):
-        # move block main model final norms here
-        hidden_states = self.decoder.main_final_layernorm(hidden_states)
-
     if not self.post_process:
         return hidden_states
 
@@ -137,6 +130,14 @@ def gpt_model_postprocess(
                 hidden_states = MTPLossAutoScaler.apply(
                     hidden_states, mtp_loss_scale * mtp_loss / num_tokens
                 )
+
+    if (
+        self.mtp_process is not None
+        and getattr(self.decoder, "main_final_layernorm", None) is not None
+    ):
+        # move block main model final norms here
+        hidden_states = self.decoder.main_final_layernorm(hidden_states)
+
     sequence_parallel_override = False
     if in_inference_mode and inference_context.materialize_only_last_token_logits:
         if inference_context.is_static_batching():

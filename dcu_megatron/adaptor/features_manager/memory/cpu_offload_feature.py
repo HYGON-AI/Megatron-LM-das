@@ -31,15 +31,6 @@ class CPUOffloadFeature(AbstractFeature):
         group.add_argument('--min-offloaded-tensor-size', type=int, default=1024*1024,
                             help='The minimum size of the tensor to be offloaded.')
 
-    def validate_args(self, args):
-        if args.fine_grained_activation_offloading:
-            if args.schedule_method == "dualpipev":
-                assert os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 1"
-            # elif args.schedule_method == "interleaved_1f1b":
-            #     assert not os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 0"
-            else:
-                assert not os.environ.get("USE_DUALPIPEV_SCHEDULE", 0), "USE_DUALPIPEV_SCHEDULE should be set to 0"
-
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
         from dcu_megatron.core.transformer.attention import Attention
@@ -52,6 +43,7 @@ class CPUOffloadFeature(AbstractFeature):
         from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_wrapper
         from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
         from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
+        from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
 
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.preprocess_for_fine_grained_offloading',
                                      GPTModel.preprocess_for_fine_grained_offloading,
@@ -93,16 +85,5 @@ class CPUOffloadFeature(AbstractFeature):
                                           CheckpointWithoutOutput._recompute],
                                          create_dummy=True)
 
-        # update fine_grained_activation_offloading param
-        # patch_manager.register_patch('transformer_engine.pytorch.module.linear.Linear.__init__',
-        #                              te_module_init_wrapper,
-        #                              apply_wrapper=True)
-        # patch_manager.register_patch('transformer_engine.pytorch.module.layernorm_linear.LayerNormLinear.__init__',
-        #                              te_module_init_wrapper,
-        #                              apply_wrapper=True)
-        # patch_manager.register_patch('transformer_engine.pytorch.module.grouped_linear.GroupedLinear.__init__',
-        #                              te_module_init_wrapper,
-        #                              apply_wrapper=True)
-        # patch_manager.register_patch('transformer_engine.pytorch.module.batched_linear.BatchedLinear.__init__',
-        #                              te_module_init_wrapper,
-        #                              apply_wrapper=True)
+        patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
+                                     build_layer_callables_without_split_attn)
