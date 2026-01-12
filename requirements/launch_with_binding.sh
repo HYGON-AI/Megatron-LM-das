@@ -5,8 +5,8 @@ export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 numa_map=(0 1 2 3 4 5 6 7)
 
 # 508 天龙
-# export HIP_VISIBLE_DEVICES=0,1,2,3,5,4,7,6
-# numa_map=(0 1 2 3 5 4 7 6)
+# export HIP_VISIBLE_DEVICES=0,1,5,4,2,3,7,6
+# numa_map=(0 1 5 4 2 3 7 6)
 
 # 508 mlxn
 # export HIP_VISIBLE_DEVICES=0,1,2,3,5,4,7,6
