@@ -8,11 +8,21 @@ gelu激活函数会产生大量的数据，但本身的计算量很小。此时�
 
 #### 图一重计算与反向绑定
 
-<img src="D:\gitlab_fugx1\dcu_megatron\docs\source\images\sources_images_activation_function_a.png" style="zoom:75%;" />
+<figure style="text-align:center;">
+  <img src=../source/images/sources_images_activation_function_a.png alt="示例图"/>
+  <figcaption>
+  图一
+  </figcaption>
+</figure>
 
 #### 图二灵活插入重计算
 
-<img src="D:\gitlab_fugx1\dcu_megatron\docs\source\images\sources_images_activation_function_b.png" style="zoom:75%;" />
+<figure style="text-align:center;">
+  <img src=../source/images/sources_images_activation_function_b.png alt="示例图"/>
+  <figcaption>
+  图二
+  </figcaption>
+</figure>
 
 ### 使用方法
 
@@ -23,19 +33,19 @@ gelu激活函数会产生大量的数据，但本身的计算量很小。此时�
 # 可选, 指定激活函数重计算的层数
 --recompute-activation-function-num-layers ${num}
 
-# 说明
-激活函数重计算可以与全重计算同时开启:
 
-1. 同时开启时，仅支持 --recompute-method 为 block
-
-2. 同时开启时，会按照指定的全重计算和激活函数重计算的层数做各自类型的重计算，即不会有一层既做全重计算又做激活函数重计算。
-
-执行优先级是先计算全重计算层，后计算激活函数重计算层。在流水线并行未开启的情况下，全重计算层数和激活函数重计算层数之和应该等于总层数。
-
-暂不兼容自适应重计算特性。
 ```
 
+##### 说明
+激活函数重计算可以与全重计算同时开启:
 
+1. 同时开启时, 仅支持 --recompute-method 为 block
+
+2. 同时开启时, 会按照指定的全重计算和激活函数重计算的层数做各自类型的重计算, 即不会有一层既做全重计算又做激活函数重计算.
+
+执行优先级是先计算全重计算层, 后计算激活函数重计算层. 在流水线并行未开启的情况下, 全重计算层数和激活函数重计算层数之和应该等于总层数.
+
+暂不兼容自适应重计算特性.
 
 ### 使用效果
 
