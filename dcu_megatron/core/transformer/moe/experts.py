@@ -1,11 +1,13 @@
 import torch
-import contextlib
 import torch.nn.functional as F
 
 from typing import Optional, Tuple
 from functools import wraps
 from megatron.core import tensor_parallel
+from megatron.core.activations import squared_relu
+from megatron.core.fusions.fused_bias_geglu import quick_gelu, weighted_bias_quick_geglu_impl
 from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
+from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_relu_impl
 from megatron.core.transformer.moe import grouped_gemm_util as gg
 
 from dcu_megatron.core.pipeline_parallel import (
