@@ -234,10 +234,9 @@ class TEGroupedMLP():
             else:
                 from dcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
                 intermediate_parallel = fused_bias_gelu(
+                    self,
                     intermediate_parallel,
                     permuted_probs,
-                    self.config.gated_linear_unit,
-                    self.activation_func,
                 )
 
             return intermediate_parallel

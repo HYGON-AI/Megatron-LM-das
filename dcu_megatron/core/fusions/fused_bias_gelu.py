@@ -2,13 +2,12 @@ import torch
 
 @torch.compile(fullgraph=True)
 def fused_bias_gelu(
+    self,
     intermediate_parallel, 
     permuted_probs,
-    gated_linear_unit,
-    activation_func,
 ):
 
-    if gated_linear_unit:
+    if self.config.gated_linear_unit:
 
         def glu(x):
             x_glu, x_linear = torch.chunk(x, 2, dim=-1)
