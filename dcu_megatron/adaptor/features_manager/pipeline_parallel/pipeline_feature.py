@@ -49,7 +49,7 @@ class PipelineFeature(AbstractFeature):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument('--schedule-method', type=str,
                            default='vanilla',
-                           choices=['vanilla', 'dualpipev'],
+                           choices=['vanilla', 'dualpipev', 'seq1f1b', 'interleaved_seq1f1b'],
                            help='Use pipeline provided by megatron if schedule-method is set to vanilla')
         # MoE communication overlap arguments
         group.add_argument('--overlap-ep-comm-with-split-attn', action="store_true",

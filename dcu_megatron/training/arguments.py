@@ -126,6 +126,10 @@ def _add_extra_training_args(parser):
                         '"router: recompute the Router layer"'
                         '"moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing, '
                         '"core_attn", "mlp", and "moe" uses normal checkpointing.')
+    group.add_argument('--pipe-sp-splits', type=int, default=1,
+                       help='num micro sequence')
+    group.add_argument('--pipe-sp-strategy', type=str, default="average", choices=['average', 'uniform_comp'],
+                       help='how to split sequence exactly')
     return parser
 
 

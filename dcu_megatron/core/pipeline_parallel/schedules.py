@@ -7,6 +7,7 @@ from megatron.training import get_args
 
 from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
 from .fine_grained_activation_offload import fine_grained_offloading_reset
+from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
 
 
 def get_forward_backward_func_wrapper(fn):
@@ -27,6 +28,10 @@ def get_forward_backward_func_wrapper(fn):
             return fn()
         elif args.schedule_method == "dualpipev":
             return forward_backward_pipelining_with_cutinhalf
+        elif args.schedule_method == "seq1f1b":
+            return seq1f1b_forward_backward_pipelining_without_interleaving
+        elif args.schedule_method == "interleaved_seq1f1b":
+            return seq1f1b_forward_backward_pipelining_with_interleaving
         else:
             raise ValueError(f"schedule_method {args.schedule_method} is not supported")
 
