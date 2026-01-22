@@ -195,24 +195,6 @@ def gpt_model_postprocess(
     return loss
 
 
-def gpt_model_forward_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        if self.config.fine_grained_activation_offloading:
-            self.preprocess_for_fine_grained_offloading()
-
-        if (
-            self.config.schedule_method == "dualpipev"
-            and not self.dualpipev_first_chunk
-            and self.mtp_process
-        ):
-            self.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
-
-        return fn(self, *args, **kwargs)
-
-    return wrapper
-
-
 class GPTModel:
     """
     patch megatron GPTModel
@@ -731,6 +713,15 @@ class GPTModel:
             runtime_gather_output (bool): Gather output at runtime. Default None means
                 `parallel_output` arg in the constructor will be used.
         """
+        if self.config.fine_grained_activation_offloading:
+            self.preprocess_for_fine_grained_offloading()
+
+        if (
+            self.config.schedule_method == "dualpipev"
+            and not self.dualpipev_first_chunk
+            and self.mtp_process
+        ):
+            self.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
 

@@ -201,17 +201,14 @@ class CoreAdaptation(MegatronAdaptationABC):
             _ParamAndGradBucketGroup.finish_grad_sync)
 
     def patch_core_models(self):
-        from ..core.models.gpt.gpt_model import gpt_model_postprocess, gpt_model_forward_wrapper, GPTModel
+        from ..core.models.gpt.gpt_model import gpt_model_postprocess,  GPTModel
 
         # GPT Model
-        # MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
-        #                             GPTModel.__init__)
-        # MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
-        #                             gpt_model_forward_wrapper,
-        #                             apply_wrapper=True)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
+                                    GPTModel.__init__)
         # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
-        # MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',
-        #                             gpt_model_postprocess)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',
+                                    gpt_model_postprocess)
 
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
                                     GPTModel.forward)
