@@ -51,6 +51,7 @@ def get_gpt_layer_with_flux_spec(
     qk_l2_norm: Optional[bool] = False,
     use_te_op_fuser: Optional[bool] = False,  # pylint: disable=unused-argument
     use_kitchen: bool = False,  # pylint: disable=unused-argument
+    use_te_activation_func: bool = False, # pylint: disable=unused-argument
 ) -> ModuleSpec:
     """Use this spec to use flux modules (required for fp8 training).
 
