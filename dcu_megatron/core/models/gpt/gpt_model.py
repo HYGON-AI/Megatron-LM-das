@@ -28,12 +28,13 @@ from megatron.core.transformer.multi_token_prediction import (
     roll_tensor,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.models.gpt.gpt_model import GPTModel as MegatronCoreGPTModel
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
-from dcu_megatron.core.transformer.transformer_block import GPTBlockWithMTPContextManager
+
+from dcu_megatron.core.transformer.transformer_block import TransformerBlock, GPTBlockWithMTPContextManager
 from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
+from dcu_megatron.core.tensor_parallel import VocabParallelOutput
 
 
 def gpt_model_postprocess(
@@ -161,6 +162,14 @@ def gpt_model_postprocess(
             hidden_states = inference_context.last_token_logits(
                 hidden_states.squeeze(1).unsqueeze(0)
             ).unsqueeze(1)
+
+    if get_args().enable_vocab_parallel:
+        assert labels is not None, "not supported yet"
+        labels = labels.transpose(0, 1).contiguous()
+        loss, _ = self.output_layer(hidden_states, weight=output_weight, labels=labels)
+        loss = loss.transpose(0, 1).contiguous()
+        return loss
+
     logits, _ = self.output_layer(
         hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
     )
@@ -223,6 +232,9 @@ class GPTModel:
         mtp_block_spec: Optional[ModuleSpec] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
+        split_vocab_embedding: bool = False,
+        noop_block: bool = False,
+        include_layer_norm: bool = False,
     ) -> None:
         super(MegatronCoreGPTModel, self).__init__(config=config, pg_collection=pg_collection)
 
@@ -239,6 +251,15 @@ class GPTModel:
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.vp_stage = vp_stage
         self.disable_param_offloading = True
+
+        # Vocabulary parallelism
+        self.split_vocab_embedding = split_vocab_embedding
+        self.noop_block = noop_block
+        self.include_layer_norm = include_layer_norm
+        self.has_vocab_embedding = (
+            (self.pre_process and (not self.split_vocab_embedding))
+            or ((not self.pre_process) and self.split_vocab_embedding)
+        )
 
         args = get_args()
         self.dualpipev_first_chunk = getattr(args, 'dualpipev_first_chunk', True)
@@ -264,7 +285,7 @@ class GPTModel:
         self.mtp_block_spec = mtp_block_spec
         self.mtp_process = mtp_block_spec is not None
 
-        if self.pre_process or self.mtp_process:
+        if self.pre_process or self.mtp_process or self.split_vocab_embedding:
             self.embedding = LanguageModelEmbedding(
                 config=self.config,
                 vocab_size=self.vocab_size,
@@ -272,6 +293,8 @@ class GPTModel:
                 position_embedding_type=position_embedding_type,
                 scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
                 tp_group=self.pg_collection.tp,
+                split_vocab_embedding=self.split_vocab_embedding,
+                vocab_embedding_only=(not self.pre_process),
             )
 
         # dualpipev use shared embedding weight
@@ -346,6 +369,9 @@ class GPTModel:
                 post_process=self.post_process,
                 pg_collection=self.pg_collection,
                 vp_stage=vp_stage,
+                noop_block=self.noop_block,
+                force_layer_norm=self.include_layer_norm,
+                post_layer_norm=not get_args().enable_vocab_parallel,
             )
 
         if self.mtp_process:
@@ -371,7 +397,19 @@ class GPTModel:
                 self.embedding_activation_buffer = None
                 self.grad_output_buffer = None
 
-            if args.parallel_linear_impl == "flux":
+            if args.enable_vocab_parallel:
+                self.output_layer = VocabParallelOutput(
+                    config.hidden_size,
+                    self.vocab_size,
+                    config=config,
+                    init_method=config.init_method,
+                    skip_weight_param_allocation=self.pre_process
+                    and self.share_embeddings_and_output_weights,
+                    embedding_activation_buffer=self.embedding_activation_buffer,
+                    fuse_forward_input_grad=not args.disable_backward_fusion,
+                    sync_allreduce=False,
+                )
+            elif args.parallel_linear_impl == "flux":
                 from dcu_megatron.core.tensor_parallel.layers import FluxColumnParallelLinear
 
                 self.output_layer = FluxColumnParallelLinear(
@@ -404,7 +442,7 @@ class GPTModel:
                     tp_group=self.pg_collection.tp,
                 )
 
-        if self.pre_process or self.post_process:
+        if self.has_vocab_embedding or self.post_process:
             self.setup_embeddings_and_output_layer()
 
         if has_config_logger_enabled(self.config):
@@ -466,7 +504,7 @@ class GPTModel:
         if not self.pre_process and self.post_process and get_args().schedules_method == 'dualpipev':
             return get_shared_embedding_from_dual_chunk()
 
-        if self.pre_process or self.mtp_process:
+        if self.has_vocab_embedding or self.mtp_process:
             # Multi-Token Prediction (MTP) need both embedding layer and output layer.
             # So there will be both embedding layer and output layer in the mtp process stage.
             # In this case, if share_embeddings_and_output_weights is True, the shared weights
@@ -545,6 +583,7 @@ class GPTModel:
 
         if self.mtp_process:
             self.mtp.backward_dw()
+
     def _preprocess(
         self,
         input_ids: Tensor,
@@ -713,6 +752,11 @@ class GPTModel:
             runtime_gather_output (bool): Gather output at runtime. Default None means
                 `parallel_output` arg in the constructor will be used.
         """
+
+        if self.has_vocab_embedding and (not self.pre_process):
+            embedding_output = self.embedding(input_ids=input_ids, position_ids=position_ids)
+            return embedding_output
+
         if self.config.fine_grained_activation_offloading:
             self.preprocess_for_fine_grained_offloading()
 

@@ -1,0 +1,31 @@
+from megatron.core import mpu
+
+from dcu_megatron.core import parallel_state
+
+
+class InputStore:
+    """
+    For storing and retrieving batch input that are partially unused.
+    """
+
+    cache = []
+
+    @classmethod
+    def save_batch(cls, microbatch_id, data):
+        while len(cls.cache) <= microbatch_id:
+            cls.cache.append(None)
+        cls.cache[microbatch_id] = data
+
+    @classmethod
+    def get_batch(cls, microbatch_id):
+        contents = cls.cache[microbatch_id]
+        if (
+            parallel_state.get_virtual_vocab_parallel_chunk() == 3
+        ):
+            cls.cache[microbatch_id] = None
+        elif (
+            not mpu.is_pipeline_last_stage()
+            and (parallel_state.get_virtual_vocab_parallel_chunk() == 1)
+        ):
+            cls.cache[microbatch_id] = None
+        return contents

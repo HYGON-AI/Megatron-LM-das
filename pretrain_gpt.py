@@ -34,15 +34,17 @@ try:
 except ImportError:
     has_nvidia_modelopt = False
 
+from dcu_megatron.core.parallel_state import get_virtual_vocab_parallel_chunk
+from input_store import InputStore
 from dcu_megatron import megatron_adaptor
 
 stimer = StragglerDetector()
 
 
-def get_batch(data_iterator, vp_stage=None):
+def get_batch(data_iterator, vp_stage=None, microbatch_id=None):
     """Generate a batch."""
     # TODO: this is pretty hacky, find a better way
-    if not is_first_or_last_pipeline_stage(vp_stage):
+    if not get_args().enable_vocab_parallel and not is_first_or_last_pipeline_stage(vp_stage):
         return None, None, None, None, None
 
     if (
@@ -51,11 +53,17 @@ def get_batch(data_iterator, vp_stage=None):
     ):
         return None, None, None, None, None
 
+    if (get_args().enable_vocab_parallel) and (get_virtual_vocab_parallel_chunk() != 2):
+        return InputStore.get_batch(microbatch_id)
+
     # get batches based on the TP rank you are on
     batch = get_batch_on_this_tp_rank(data_iterator)
 
     # slice batch along sequence dimension for context parallelism
     batch = get_batch_on_this_cp_rank(batch)
+
+    if (get_args().enable_vocab_parallel) and (get_virtual_vocab_parallel_chunk() == 2):
+        InputStore.save_batch(microbatch_id, batch.values())
 
     return batch.values()
 
@@ -126,7 +134,7 @@ def loss_func(
     return (loss, num_tokens, {'lm loss': reporting_loss})
 
 
-def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = False):
+def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = False, microbatch_id = None):
     """Forward training step.
 
     Args:
@@ -142,7 +150,7 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
     global stimer
     with stimer(bdata=True):
         vp_stage = get_attr_wrapped_model(model, "vp_stage")
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator, vp_stage)
+        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator, vp_stage, microbatch_id=microbatch_id)
     timers('batch-generator').stop()
 
     with stimer:
@@ -166,6 +174,8 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
 
 
 def is_dataset_built_on_rank(vp_stage=None):
+    if get_args().enable_vocab_parallel:
+        return parallel_state.get_tensor_model_parallel_rank() == 0
     return is_first_or_last_pipeline_stage(vp_stage) and parallel_state.get_tensor_model_parallel_rank() == 0
 
 

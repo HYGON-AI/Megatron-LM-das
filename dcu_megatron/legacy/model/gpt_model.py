@@ -3,8 +3,6 @@ from megatron.legacy.model.module import MegatronModule
 from megatron.legacy.model.gpt_model import post_language_model_processing
 
 
-
-
 class GPTModelPatch(MegatronModule):
     """GPT-2 Language model."""
 

@@ -47,7 +47,7 @@ def get_batch_on_this_tp_rank(data_iterator):
             'position_ids': data["position_ids"].cuda(non_blocking=True),
         }
 
-        if args.pipeline_model_parallel_size == 1:
+        if args.enable_vocab_parallel or args.pipeline_model_parallel_size == 1:
             _broadcast(batch['tokens'])
             _broadcast(batch['labels'])
             _broadcast(batch['loss_mask'])
@@ -104,7 +104,7 @@ def get_batch_on_this_tp_rank(data_iterator):
             device=torch.cuda.current_device(),
         )
 
-        if args.pipeline_model_parallel_size == 1:
+        if args.enable_vocab_parallel or args.pipeline_model_parallel_size == 1:
             _broadcast(tokens)
             _broadcast(labels)
             _broadcast(loss_mask)
@@ -158,16 +158,6 @@ def get_ltor_masks_and_position_ids(data,
 
     # Extract batch size and sequence length.
     micro_batch_size, seq_length = data.size()
-
-    # Attention mask (lower triangular).
-    if reset_attention_mask:
-        att_mask_batch = micro_batch_size
-    else:
-        att_mask_batch = 1
-    # long sequence will causal OOM here since mask is N^2 memory
-    # attention_mask = torch.tril(torch.ones(
-    #     (att_mask_batch, seq_length, seq_length), device=data.device)).view(
-    #         att_mask_batch, 1, seq_length, seq_length)
 
     # Loss mask.
     loss_mask = torch.ones(data.size(), dtype=torch.float, device=data.device)

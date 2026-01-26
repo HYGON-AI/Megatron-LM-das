@@ -145,18 +145,18 @@ stimer = StragglerDetector()
 
 
 def pretrain(
-        train_valid_test_dataset_provider,
-        model_provider,
-        model_type,
-        forward_step_func,
-        process_non_loss_data_func=None,
-        extra_args_provider=None,
-        args_defaults={},
-        get_embedding_ranks=None,
-        get_position_embedding_ranks=None,
-        non_loss_data_func=None,
-        store=None,
-        inprocess_call_wrapper: Optional[CallWrapper] = None,
+    train_valid_test_dataset_provider,
+    model_provider,
+    model_type,
+    forward_step_func,
+    process_non_loss_data_func=None,
+    extra_args_provider=None,
+    args_defaults={},
+    get_embedding_ranks=None,
+    get_position_embedding_ranks=None,
+    non_loss_data_func=None,
+    store=None,
+    inprocess_call_wrapper: Optional[CallWrapper] = None,
 ):
     """Main training program.
 
@@ -463,8 +463,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     # Build model.
     def build_model():
         if (
-                mpu.get_pipeline_model_parallel_world_size() > 1
-                and args.virtual_pipeline_model_parallel_size is not None
+            mpu.get_pipeline_model_parallel_world_size() > 1
+            and args.virtual_pipeline_model_parallel_size is not None
         ):
             model = []
             for i in range(args.virtual_pipeline_model_parallel_size):
@@ -476,6 +476,64 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 this_model.model_type = model_type
                 this_model.vp_stage = i
                 model.append(this_model)
+
+        elif args.enable_vocab_parallel:
+            pre_process = mpu.is_pipeline_first_stage(ignore_virtual=True)
+            assert model_type != ModelType.encoder_and_decoder, \
+                'vocab parallel is not yet supported in encoder-decoder models'
+            model = [
+                model_provider_func(
+                    pre_process=pre_process,
+                    post_process=False,
+                    split_vocab_embedding=pre_process,
+                    include_layer_norm=mpu.is_pipeline_last_stage(ignore_virtual=True),
+                ),
+                model_provider_func(
+                    pre_process=False,
+                    post_process=True,
+                    noop_block=True,
+                ),
+                model_provider_func(
+                    pre_process=False,
+                    post_process=False,
+                    split_vocab_embedding=True,
+                    noop_block=True,
+                )
+            ]
+            model[0].model_type = model_type
+            model[1].model_type = model_type
+            model[2].model_type = model_type
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                model.append(
+                    model_provider_func(
+                        pre_process=False,
+                        post_process=False,
+                        noop_block=True,
+                    )
+                )
+                model[3].model_type = model_type
+
+        elif args.schedule_method == "dualpipev":
+            assert model_type != ModelType.encoder_and_decoder, \
+                "dualpipev schedule not supported for model with both encoder and decoder"
+
+            model = []
+            args.dualpipev_first_chunk = True
+            first_model = model_provider_func(
+                pre_process=mpu.is_pipeline_first_stage(),
+                post_process=False
+            )
+            first_model.model_type = model_type
+            model.append(first_model)
+
+            args.dualpipev_first_chunk = False
+            second_model = model_provider_func(
+                pre_process=False,
+                post_process=mpu.is_pipeline_first_stage()
+            )
+            second_model.model_type = model_type
+            model.append(second_model)
+
         else:
             pre_process = mpu.is_pipeline_first_stage()
             post_process = mpu.is_pipeline_last_stage()
@@ -519,8 +577,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     # For FSDP2, we don't allocate GPU memory here. We allocate GPU memory
     # in the fully_shard function of FSDP2 instead.
     if (
-            not (args.use_torch_fsdp2 and args.use_cpu_initialization)
-            and not args.init_model_with_meta_device
+        not (args.use_torch_fsdp2 and args.use_cpu_initialization)
+        and not args.init_model_with_meta_device
     ):
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
@@ -528,12 +586,26 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         config = get_model_config(model[0])
-        model = [Float16Module(config, model_module) for model_module in model]
+        if args.enable_vocab_parallel:
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                loss_chunk = Float16Module(config, model[3])
+            model = [
+                Float16Module(config, model[0]),
+                Float16Module(config, model[1], force_output_fp32=True),
+                Float16Module(config, model[2], is_embedding_chunk=True),
+            ]
+            if mpu.is_pipeline_last_stage(ignore_virtual=True):
+                model.append(loss_chunk)
+        else:
+            model = [Float16Module(config, model_module) for model_module in model]
 
     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
-        # for model_module in model:
+        #for model_module in model:
         model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
+
+
+
 
     # Before TE2.x: The model_module.bfloat16()/model_module.half() above will call the inplace
     #               copy of TE's Float8Tensor, which will write an unwanted value (amax calculated
@@ -618,12 +690,12 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
 
 def setup_model_and_optimizer(
-        model_provider_func,
-        model_type,
-        no_wd_decay_cond=None,
-        scale_lr_cond=None,
-        lr_mult=1.0,
-        checkpointing_context=None,
+    model_provider_func,
+    model_type,
+    no_wd_decay_cond=None,
+    scale_lr_cond=None,
+    lr_mult=1.0,
+    checkpointing_context=None,
 ):
     """Setup model and optimizer."""
     args = get_args()

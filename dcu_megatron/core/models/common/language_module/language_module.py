@@ -16,7 +16,7 @@ class LanguageModule():
         """
 
         # Set `is_embedding_or_output_parameter` attribute.
-        if self.pre_process:
+        if self.has_vocab_embedding:
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
         if self.post_process and self.output_layer.weight is not None:
             self.output_layer.weight.is_embedding_or_output_parameter = True
@@ -42,15 +42,16 @@ class LanguageModule():
         if (
             is_vp_first_stage(self.vp_stage, self.vp_size)
             and is_pp_first_stage(self.pp_group)
-            and self.pre_process
+            and self.has_vocab_embedding
             and not self.post_process
         ):
             self.shared_embedding_or_output_weight().shared_embedding = True
 
-        if (self.post_process or getattr(self, 'mtp_process', False)) and not self.pre_process:
-            assert not (
-                is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(self.pp_group)
-            )
+        if (self.post_process or getattr(self, 'mtp_process', False)) and not self.has_vocab_embedding:
+            # disabled the following assertion, intended behavior in vocab parallel (TODO dongcl)
+            # assert not (
+            #     is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(self.pp_group)
+            # )
             # set weights of the duplicated embedding to 0 here,
             # then copy weights from pre processing stage using all_reduce below.
             weight = self.shared_embedding_or_output_weight()

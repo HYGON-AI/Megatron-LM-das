@@ -1,6 +1,5 @@
 from contextlib import nullcontext
 from typing import Optional, Union
-from functools import wraps
 
 import torch
 from torch import Tensor
@@ -11,9 +10,26 @@ from megatron.core.fp4_utils import get_fp4_context
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_block import TransformerBlock as MegatronCoreTransformerBlock
+from megatron.core.transformer.transformer_block import (
+    TransformerBlockSubmodules,
+    LayerNormImpl,
+    get_num_layers_to_build,
+    get_cpu_offload_context,
+)
+from megatron.core.utils import (
+    WrappedTensor,
+    deprecate_inference_params,
+    get_pg_rank,
+    make_viewless_tensor,
+)
+from megatron.core.transformer.transformer_layer import BaseTransformerLayer
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core import parallel_state
+
 te_checkpoint = None
 try:
     import transformer_engine.pytorch as te
@@ -22,6 +38,7 @@ except ImportError:
     HAVE_TE = False
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine import te_checkpoint
+
 from dcu_megatron.core.pipeline_parallel import (
     fine_grained_offloading_set_last_layer,
 )
@@ -54,13 +71,122 @@ class GPTBlockWithMTPContextManager:
         set_gpt_block_with_mtp(self.origin_gpt_block_with_mtp)
 
 
-def transformer_block_init_wrapper(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        fn(self, *args, **kwargs)
+def _get_block_submodules(
+    config: TransformerConfig,
+    spec: Union[TransformerBlockSubmodules, ModuleSpec],
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    noop_block: bool = False
+) -> TransformerBlockSubmodules:
+    """
+    Retrieve or construct TransformerBlockSubmodules based on the provided specification.
+
+    Args:
+        config (TransformerConfig): Configuration object for the transformer model.
+        spec (Union[TransformerBlockSubmodules, ModuleSpec]): Specification for the
+            transformer block submodules. Can be either a TransformerBlockSubmodules
+            instance or a ModuleSpec.
+        vp_stage (Optional[int]): Virtual pipeline stage number.
+
+    Returns:
+        TransformerBlockSubmodules: The submodules for the transformer block.
+    """
+    # Transformer block submodules.
+    if isinstance(spec, TransformerBlockSubmodules):
+        return spec
+
+    # ModuleSpec here is generally assumed to be for a transformer layer that
+    # is implemented in `transformer_layer.py` or if it subclasses
+    # `BaseTransformerLayer` from the `transformer_layer.py` file.
+    elif isinstance(spec, ModuleSpec):
+        if issubclass(spec.module, TransformerBlock):
+            return spec.submodules
+        elif issubclass(spec.module, BaseTransformerLayer):
+            num_layers = get_num_layers_to_build(config, vp_stage, pp_rank)
+            if noop_block:
+                num_layers = 0
+            return TransformerBlockSubmodules(
+                layer_specs=[spec] * num_layers, layer_norm=LayerNormImpl
+            )
+        else:
+            raise Exception(f"specialize for {spec.module.__name__}.")
+    else:
+        raise Exception(f"specialize for {type(spec).__name__}.")
+
+
+class TransformerBlock(MegatronCoreTransformerBlock):
+    def __init__(
+        self,
+        config: TransformerConfig,
+        spec: Union[TransformerBlockSubmodules, ModuleSpec],
+        post_layer_norm: bool = True,
+        pre_process: bool = True,
+        post_process: bool = True,
+        pg_collection: ProcessGroupCollection = None,
+        vp_stage: Optional[int] = None,
+        noop_block: bool = False,
+        force_layer_norm: bool = False,
+    ):
+        super(MegatronCoreTransformerBlock, self).__init__(config=config)
+
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+        self.pg_collection = pg_collection
+
+        pp_group = self.pg_collection.pp if hasattr(self.pg_collection, 'pp') else None
+        pp_rank = get_pg_rank(pp_group)
+
+        self.submodules = _get_block_submodules(config, spec, vp_stage, pp_rank, noop_block)
+        self.post_layer_norm = post_layer_norm
+        self.pre_process = pre_process
+        self.post_process = post_process
+        self.vp_stage = vp_stage
+        self.noop_block = noop_block
+        self.force_layer_norm = force_layer_norm
+
+        # required for pipeline parallel schedules
+        self.input_tensor = None
+
+        self.checkpoint_core_attention = (
+            self.config.recompute_granularity == 'selective'
+            and "core_attn" in self.config.recompute_modules
+        )
+
+        if get_cpu_offload_context is not None:
+            (self.offload_context, self.group_prefetch_offload_commit_async) = (
+                get_cpu_offload_context(
+                    self.config.cpu_offloading,
+                    self.config.cpu_offloading_num_layers,
+                    self.config.num_layers,
+                    self.config.cpu_offloading_activations,
+                    self.config.cpu_offloading_weights,
+                    self.config.cpu_offloading_double_buffering,
+                )
+            )
+            self.config._cpu_offloading_context = (
+                self.offload_context if self.config.cpu_offloading else None
+            )
+        else:
+            assert (
+                self.config.cpu_offloading is False
+            ), "CPU Offloading is enabled when TE is not present"
+
+            self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
+            self.config._cpu_offloading_context = None
+
+        self._build_layers()
+        self.num_layers_per_pipeline_rank = len(self.layers)
+
+        # Vocabulary parallelism
+        if self.submodules.layer_norm and self.force_layer_norm:
+            self.final_layernorm = build_module(
+                self.submodules.layer_norm,
+                config=self.config,
+                hidden_size=self.config.hidden_size,
+                eps=self.config.layernorm_epsilon,
+            )
 
         # mtp require seperate layernorms for main model and mtp modules, thus move finalnorm out of block
-        config = args[0] if len(args) > 1 else kwargs['config']
         if (
             hasattr(config, "mtp_num_layers")
             and config.mtp_num_layers is not None
@@ -69,17 +195,9 @@ def transformer_block_init_wrapper(fn):
             self.main_final_layernorm = self.final_layernorm
             self.final_layernorm = None
 
-        self.num_dense_layer = 0
-        for layer in self.layers:
-            if not isinstance(layer.mlp, MoELayer):
-                self.num_dense_layer += 1
-
+        # activation offload
         self.is_mtp_in_model = get_gpt_block_with_mtp()
 
-    return wrapper
-
-
-class TransformerBlock():
     def forward(
         self,
         hidden_states: Union[Tensor, WrappedTensor],
@@ -391,6 +509,7 @@ class TransformerBlock():
             raise ValueError("Invalid activation recompute method.")
 
         return hidden_states
+
 
 class TransformerBlockPatch():
 

@@ -61,6 +61,17 @@ class PipelineFeature(AbstractFeature):
                            help='number of layers to build: '
                                 '- An integer N: meaning n layers for each model block '
                                 '- A string containing a Python list expression that defines a custom pattern')
+        # Vocabulary parallelism.
+        group.add_argument('--enable-vocab-parallel', action='store_true',
+                           help='Enables vocabulary parallelism at the vocabulary layers. '
+                           'Must be enabled together with pipeline model parallelism.')
+        group.add_argument('--disable-backward-fusion', action='store_true',
+                           help='disables the forward-backward fusion for the output '
+                           'layer. requires two communication barriers instead of one')
+        group.add_argument('--schedule-timer-start', type=int, default=10,
+                           help='Start iteration of the vocabulary parallelism schedule timer')
+        group.add_argument('--schedule-timer-end', type=int, default=20,
+                           help='End iteration of the vocabulary parallelism schedule timer')
 
     def pre_validate_args(self, args):
         if args.schedule_method != "dualpipev":
@@ -127,6 +138,21 @@ class PipelineFeature(AbstractFeature):
             assert args.schedule_method == "dualpipev" or args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
                 'moe a2a overlap is only supported with vpp or dualpipev'
 
+        # Vocabulary parallelism.
+        if args.enable_vocab_parallel:
+            assert args.pipeline_model_parallel_size > 1, 'pipeline parallel size '\
+                'must be > 1 when vocab parallel is enabled'
+            assert args.virtual_pipeline_model_parallel_size is None, 'vocab parallel'\
+                'with interleaved schedule is not supported yet'
+            assert (
+                args.make_vocab_size_divisible_by %
+                (args.tensor_model_parallel_size * args.pipeline_model_parallel_size) == 0
+            ), f'vocab size must be divisible by model parallel size ({args.tensor_model_parallel_size * args.pipeline_model_parallel_size}) for vocab parallel'
+            assert args.untie_embeddings_and_output_weights, '--enable-vocab-parallel requires' \
+                'untie embeddings and output weights'
+        else:
+            args.disable_backward_fusion = False
+
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.pipeline_parallel.schedules import get_forward_backward_func_wrapper
 
@@ -138,14 +164,12 @@ class PipelineFeature(AbstractFeature):
             from megatron.training.utils import print_rank_0
 
             from dcu_megatron.core.pipeline_parallel.dualpipev.dualpipev_chunks import (
-                get_model,
                 dualpipev_fp16forward,
                 get_num_layers_to_build,
                 _allreduce_embedding_grads_wrapper
             )
             from dcu_megatron.training.training import evaluate
             from dcu_megatron.core.transformer.transformer_layer import get_transformer_layer_offset
-            from dcu_megatron.training.utils import get_batch_on_this_tp_rank
             from dcu_megatron.training.training import pretrain
             from dcu_megatron.core.models.gpt.gpt_model import GPTModel
             from dcu_megatron.training.global_vars import _set_tensorboard_writer, _set_wandb_writer, _set_one_logger
@@ -153,8 +177,8 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
             from dcu_megatron.core.tensor_parallel.layers import VocabParallelEmbedding
             from dcu_megatron.core.transformer.multi_token_prediction import tie_word_embeddings_state_dict_wrapper
+            from dcu_megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
 
-            patch_manager.register_patch('megatron.training.training.get_model', get_model)
             patch_manager.register_patch(
                 'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
             patch_manager.register_patch(
@@ -172,11 +196,6 @@ class PipelineFeature(AbstractFeature):
 
             # support dualpipev, two data iterators
             patch_manager.register_patch('megatron.training.training.pretrain', pretrain)
-
-            # support dualpipev, broadcast loss_mask and labels
-            patch_manager.register_patch(
-                'megatron.training.utils.get_batch_on_this_tp_rank',
-                get_batch_on_this_tp_rank)
 
             # (1) introduce an attribute dualpipev_first_chunk. (2) remove embedding when using dualpipev
             patch_manager.register_patch(
@@ -201,6 +220,26 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.tie_word_embeddings_state_dict',
                                          tie_word_embeddings_state_dict_wrapper,
                                          apply_wrapper=True)
+
+            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_step_calc_loss',
+                                         forward_step_calc_loss)
+
+        if args.enable_vocab_parallel:
+            from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper
+            from dcu_megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
+            from dcu_megatron.core.transformer.module import Float16Module
+
+            patch_manager.register_patch('megatron.core.parallel_state.destroy_model_parallel',
+                                        destroy_model_parallel_wrapper,
+                                        create_dummy=True)
+            patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.p2p_communication.P2PCommunicator',
+                                             [P2PCommunicator._communicate,
+                                              P2PCommunicator.recv_forward,
+                                              P2PCommunicator.send_backward_recv_forward])
+            # embedding/output layer
+            patch_manager.register_cls_funcs('megatron.core.transformer.module.Float16Module',
+                                             [Float16Module.__init__,
+                                              Float16Module.forward])
 
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock

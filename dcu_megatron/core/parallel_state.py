@@ -3,6 +3,8 @@ import inspect
 import warnings
 from functools import wraps
 from collections import defaultdict
+from datetime import timedelta
+from typing import Callable, List, Optional
 
 import torch
 import torch.distributed
@@ -10,6 +12,12 @@ import torch.distributed
 from megatron.training import get_args, print_rank_0
 from megatron.core.utils import is_torch_min_version
 from megatron.core import parallel_state
+from megatron.core.parallel_state import (
+    RankGenerator,
+    overwrite_nccl_comm_cfgs,
+    get_nccl_options,
+)
+
 
 PARALLEL_GROUP_RANKS_MAP = defaultdict(list)
 _GROUP_MAP = {}
@@ -94,20 +102,6 @@ def get_parallel_group_ranks():
     return PARALLEL_GROUP_RANKS_MAP
 
 
-def initialize_model_parallel_wrapper(fn):
-
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        fn(*args, **kwargs)
-
-        global PARALLEL_GROUP_RANKS_MAP
-
-        for group_key, group_value in _GROUP_NAME_DICT.items():
-            print_rank_0(f"{group_key}: {PARALLEL_GROUP_RANKS_MAP[group_value]}")
-
-    return wrapper
-
-
 _DUALPIPE_CHUNK = None
 
 def set_dualpipe_chunk(chunk_id):
@@ -173,4 +167,142 @@ def log_timing_wrapper(fn):
 
         return result
     
+    return wrapper
+
+
+# Vocabulary parallelism
+_LM_HEAD_MODEL_PARALLEL_GROUP = None
+_VIRTUAL_VOCAB_PARALLEL_CHUNK = None
+
+def get_lm_head_model_parallel_group():
+    """Get the language model head result reduce group the caller rank belongs to."""
+    assert (
+        _LM_HEAD_MODEL_PARALLEL_GROUP is not None
+    ), 'pipeline_model parallel group is not initialized'
+    return _LM_HEAD_MODEL_PARALLEL_GROUP
+
+
+def get_virtual_vocab_parallel_chunk():
+    """Get the current chunk for vocab pipeline-parallel."""
+    global _VIRTUAL_VOCAB_PARALLEL_CHUNK
+    return _VIRTUAL_VOCAB_PARALLEL_CHUNK
+
+
+def set_virtual_vocab_parallel_chunk(chunk):
+    """Set the current chunk for vocab pipeline-parallel."""
+    global _VIRTUAL_VOCAB_PARALLEL_CHUNK
+    _VIRTUAL_VOCAB_PARALLEL_CHUNK = chunk
+
+
+def initialize_model_parallel_wrapper(fn):
+    @wraps(fn)
+    def wrapper(
+        tensor_model_parallel_size: int = 1,
+        pipeline_model_parallel_size: int = 1,
+        virtual_pipeline_model_parallel_size: Optional[int] = None,
+        pipeline_model_parallel_comm_backend: Optional[str] = None,
+        use_sharp: bool = False,
+        context_parallel_size: int = 1,
+        hierarchical_context_parallel_sizes: Optional[List[int]] = None,
+        expert_model_parallel_size: int = 1,
+        num_distributed_optimizer_instances: int = 1,
+        expert_tensor_parallel_size: Optional[int] = None,
+        nccl_communicator_config_path: Optional[str] = None,
+        distributed_timeout_minutes: int = 30,
+        order: str = "tp-cp-ep-dp-pp",
+        get_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
+        get_position_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
+        create_gloo_process_groups: bool = True,
+        high_priority_stream_groups: Optional[List[str]] = None,
+        sharp_enabled_group: Optional[str] = None,
+    ) -> None:
+        fn(
+            tensor_model_parallel_size=tensor_model_parallel_size,
+            pipeline_model_parallel_size=pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_comm_backend=pipeline_model_parallel_comm_backend,
+            use_sharp=use_sharp,
+            context_parallel_size=context_parallel_size,
+            hierarchical_context_parallel_sizes=hierarchical_context_parallel_sizes,
+            expert_model_parallel_size=expert_model_parallel_size,
+            num_distributed_optimizer_instances=num_distributed_optimizer_instances,
+            expert_tensor_parallel_size=expert_tensor_parallel_size,
+            nccl_communicator_config_path=nccl_communicator_config_path,
+            distributed_timeout_minutes=distributed_timeout_minutes,
+            order=order,
+            get_embedding_ranks=get_embedding_ranks,
+            get_position_embedding_ranks=get_position_embedding_ranks,
+            create_gloo_process_groups=create_gloo_process_groups,
+            high_priority_stream_groups=high_priority_stream_groups,
+            sharp_enabled_group=sharp_enabled_group,
+        )
+
+        global _LM_HEAD_MODEL_PARALLEL_GROUP
+        assert _LM_HEAD_MODEL_PARALLEL_GROUP is None, 'lm head model parallel group is already initialized'
+
+        world_size: int = torch.distributed.get_world_size()
+
+        model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
+
+        if world_size % model_size != 0:
+            raise RuntimeError(f"world_size ({world_size}) is not divisible by {model_size}")
+
+        data_parallel_size: int = world_size // model_size
+
+        rank = torch.distributed.get_rank()
+
+        decoder_rank_generator = RankGenerator(
+            tp=tensor_model_parallel_size,
+            ep=1,
+            dp=data_parallel_size,
+            pp=pipeline_model_parallel_size,
+            cp=context_parallel_size,
+            order=order,
+            rank_offset=0,
+        )
+
+        nccl_comm_cfgs = {}
+        if nccl_communicator_config_path is not None:
+            try:
+                import yaml
+            except ImportError:
+                raise RuntimeError(
+                    "Cannot import `yaml`. Setting custom nccl communicator configs "
+                    "requires the yaml package."
+                )
+
+            with open(nccl_communicator_config_path, "r") as stream:
+                nccl_comm_cfgs = yaml.safe_load(stream)
+
+        # Set is_high_priority_stream flag to the nccl_comm_cfgs if it is in high_priority_stream_groups
+        high_priority_stream_groups = high_priority_stream_groups or []
+        for pg_name in high_priority_stream_groups:
+            overwrite_nccl_comm_cfgs(nccl_comm_cfgs, pg_name, ("is_high_priority_stream", True))
+
+        for ranks in decoder_rank_generator.get_ranks('pp'):
+            group = create_group(
+                ranks,
+                timeout=timedelta(minutes=distributed_timeout_minutes),
+                pg_options=get_nccl_options("pp-lmhead", nccl_comm_cfgs),
+                group_desc="LM_HEAD_MODEL_PARALLEL_GROUP",
+            )
+            if rank in ranks:
+                _LM_HEAD_MODEL_PARALLEL_GROUP = group
+
+        # output parallel group info
+        global PARALLEL_GROUP_RANKS_MAP
+
+        for group_key, group_value in _GROUP_NAME_DICT.items():
+            print_rank_0(f"{group_key}: {PARALLEL_GROUP_RANKS_MAP[group_value]}")
+
+    return wrapper
+
+
+def destroy_model_parallel_wrapper(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        fn(*args, **kwargs)
+        global _LM_HEAD_MODEL_PARALLEL_GROUP
+        _LM_HEAD_MODEL_PARALLEL_GROUP = None
+
     return wrapper

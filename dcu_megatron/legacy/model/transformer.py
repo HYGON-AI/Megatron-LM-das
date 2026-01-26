@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from megatron.core import mpu, tensor_parallel
 from functools import wraps
 from megatron import core
-from megatron.legacy.model.enums import AttnMaskType, LayerType, AttnType
+from megatron.legacy.model.enums import LayerType, AttnType
 from megatron.training import get_args
 from megatron.core import tensor_parallel
 from megatron.core.utils import deprecate_inference_params
@@ -47,6 +47,7 @@ def parallel_mlp_init_wrapper(fn):
             self.activation_func = swiglu
 
     return wrapper
+
 
 def kv_sp_flash_func(q, k, v, kv_cache, softmax_scale, causal):
     out = FlashAttnVarlenFunc.apply(q, k, v, kv_cache, 0.0, causal, softmax_scale)
@@ -211,6 +212,7 @@ class FlashFixedSelfAttention(torch.nn.Module):
         output = self.flash_attn_func(q, k, v, dropout_p=self.dropout_p, softmax_scale=self.softmax_scale, causal=self.causal)
         # [b,s,a,dim]
         return output
+
 
 class FlashSeqSelfAttention(torch.nn.Module):
     """Implement the scaled dot product attention with softmax.
@@ -482,6 +484,7 @@ class ParallelAttentionPatch(MegatronModule):
 
         return output, bias
 
+
 class ParallelTransformerLayerPatch(MegatronModule):
     """A single transformer layer.
 
@@ -632,7 +635,6 @@ class ParallelTransformerLayerPatch(MegatronModule):
             return output, retriever_output
         else:
             return output
-
 
 
 class ParallelTransformerPatch(MegatronModule):

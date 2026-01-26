@@ -201,22 +201,30 @@ class CoreAdaptation(MegatronAdaptationABC):
             _ParamAndGradBucketGroup.finish_grad_sync)
 
     def patch_core_models(self):
-        from ..core.models.gpt.gpt_model import gpt_model_postprocess,  GPTModel
+        from ..core.models.gpt.gpt_model import gpt_model_postprocess, GPTModel
+        from ..core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 
         # GPT Model
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
                                     GPTModel.__init__)
-        # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
-        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',
-                                    gpt_model_postprocess)
-
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.forward',
                                     GPTModel.forward)
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._preprocess',
                                     GPTModel._preprocess)
 
+        # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',
+                                    gpt_model_postprocess)
+
+        # Vocabulary parallelism
+        MegatronAdaptation.register('megatron.core.models.common.embeddings.language_model_embedding.LanguageModelEmbedding.__init__',
+                                    LanguageModelEmbedding.__init__)
+        MegatronAdaptation.register('megatron.core.models.common.embeddings.language_model_embedding.LanguageModelEmbedding.forward',
+                                    LanguageModelEmbedding.forward)
+        MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.shared_embedding_or_output_weight',
+                                    GPTModel.shared_embedding_or_output_weight)
+
     def patch_core_transformers(self):
-        from ..core import transformer_block_init_wrapper
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         from ..core.transformer.attention import attention_init_wrapper, SelfAttention
@@ -224,10 +232,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.transformer.transformer_layer import transformer_layer_init_wrapper
         from ..core.transformer.mlp import mlp_init_wrapper
         from ..core.transformer.moe.experts import TEGroupedMLP
-
-        # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
-        MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.__init__',
-                                    transformer_block_init_wrapper)
 
         # Transformer config, add new params
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
@@ -271,10 +275,6 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.forward',
                                     AttentionPatch.forward)
-
-
-
-
 
     def patch_core_tokenizers(self):
         from ..core.tokenizers.text.utils.build_tokenizer import build_tokenizer_wrapper
@@ -381,6 +381,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.training import train_step
         from ..training.training import setup_model_and_optimizer
         from ..training.datasets import _get_ltor_masks_and_position_ids
+        from ..training.utils import get_batch_on_this_tp_rank
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
@@ -411,6 +412,9 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     pad)
         MegatronAdaptation.register('megatron.training.datasets.sft_dataset.SFTDataset._get_ltor_masks_and_position_ids',
                                     _get_ltor_masks_and_position_ids)
+
+        # (1) dualpipev, (2) vocabulary parallelism
+        MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args, validate_args_func_decorator, _print_args_wrapper
@@ -492,7 +496,6 @@ class LegacyAdaptation(MegatronAdaptationABC):
                                     ParallelTransformerPatch.forward)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelTransformer._checkpointed_forward',
                                     ParallelTransformerPatch._checkpointed_forward)
-
 
 
 MegatronAdaptation.execute()

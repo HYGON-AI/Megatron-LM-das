@@ -130,6 +130,7 @@ def attention_init_wrapper(attention_init_func):
             )
     return wrapper
 
+
 def kv_sp_flash_func(q, k, v, kv_cache, softmax_scale, causal):
     out = FlashAttnVarlenFunc.apply(q, k, v, kv_cache, 0.0, causal, softmax_scale)
     return out
@@ -212,9 +213,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         pk = pk.contiguous()
         pv = pv.contiguous()
         q = q.contiguous()
-        # from megatron.core.pipeline_parallel.schedules import print_log
-        # print_rank(k_whole.shape, 7)
-        # print_rank(f"seqlen: {ctx._seqlen_k}", 7)
+
         last_idx = not 'k_grad' in ctx._kv_cache
         dq, dk, dv = torch.empty_like(q), torch.empty_like(pk), torch.empty_like(pv)
         _flash_attn_varlen_backward(
@@ -257,6 +256,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
 
         return dq, dk, dv, None, None, None, None, None, None, None
 
+
 class FlashSeqSelfAttention(torch.nn.Module):
     """Implement the scaled dot product attention with softmax.
     Arguments
@@ -298,6 +298,7 @@ class FlashSeqSelfAttention(torch.nn.Module):
             output = kv_sp_flash_func(q, k, v, self.kv_cache, self.softmax_scale, True)
             output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
             return output.contiguous()
+
 
 class Attention():
     def forward(
@@ -1091,6 +1092,7 @@ class SelfAttention:
 
         return query, key, value
 
+
 class AttentionPatch(MegatronModule, ABC):
     def __init__(
         self,
@@ -1183,6 +1185,7 @@ class AttentionPatch(MegatronModule, ABC):
             # linear_proj to save the original input tensors to avoid the extra memory usage of
             # the quantized tensor.
             set_save_original_input(self.linear_proj)
+
     def forward(
         self,
         hidden_states: Tensor,

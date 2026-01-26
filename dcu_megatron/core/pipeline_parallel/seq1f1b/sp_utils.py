@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from dcu_megatron.core.pipeline_parallel.seq1f1b.split_solver import solver
 from megatron.training import get_args
 import torch
+
+
 @dataclass
 class SeqTFlops:
     num_layers: int
@@ -47,6 +49,7 @@ class SeqTFlops:
         tf = embed_tflops + self.num_layers * (attn_part + ffn_tflops) + emb_proj_tflops
         return tf / 10 ** 12
 
+
 class sp_queue:
     def __init__(self, pipe_sp_splits=4, print=False, chunk=None, add_msg=""):
         # two stage queue
@@ -80,7 +83,7 @@ class sp_queue:
             self._idx = 0
             self._offset += 1
         self.count += 1
-    
+
     def pop(self, idx=0):
         self.print_log(f"pop head inp of first queue")
         assert idx == 0, "only pop head item"
@@ -98,9 +101,9 @@ class sp_queue:
         self.print_log(f"get tail inp ")
         #assert idx == -1
         return self.tail_obj
-        
 
 partitions = None
+
 def get_tflops():
     args = get_args()
     config = {
@@ -115,7 +118,7 @@ def get_tflops():
     tflops = config.get_seq_tflops(args.seq_length, causal=True)
     return tflops
 
-    args.total_tflops = sol.total_tflops 
+
 def get_splits():
     global partitions
     args = get_args()
@@ -148,13 +151,14 @@ def get_splits():
 
 class sp_shape_queue:
     def __init__(self, seqlen, bs, sz, backward=False):
-        self.splits = get_splits() 
+        self.splits = get_splits()
         self.idx = 0 if not backward else len(self.splits) - 1
-        self.shape = [[[s, bs, sz]] for s in self.splits] 
+        self.shape = [[[s, bs, sz]] for s in self.splits]
         args = get_args()
         if args.sequence_parallel:
             self.shape = [[[s // args.tensor_model_parallel_size, bs, sz]] for s in self.splits]
         self.backward = backward
+
     def __iter__(self):
         iter = self.shape[self.idx].__iter__()
         if not self.backward:
@@ -162,6 +166,7 @@ class sp_shape_queue:
         else:
             self.idx = (self.idx -1) % len(self.splits)
         return iter
+
     def get(self):
         res = self.shape[self.idx][0]
         if not self.backward:

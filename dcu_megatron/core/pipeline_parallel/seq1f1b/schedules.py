@@ -1283,6 +1283,7 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
     pg_collection: Optional[ProcessGroupCollection] = None,
 ):
     global_args = get_args()
+
     def recv_forward_send(*args):
         args = list(args)
         input_tensor = recv_forward_wrapper()
@@ -1299,11 +1300,12 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
             if not last_iteration:
                 return recv_forward_wrapper()
             else:
-                return args[4] 
+                return args[4]
+
     def deallocate_output_tensor_lis(t_list, flag):
         for i in range(len(t_list)):
             deallocate_output_tensor(t_list[i], flag)
-    
+
     def _1f1b_with_comm( last_iteration, first_iteration, *args):
 
         args = list(args)
@@ -1338,15 +1340,15 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
             input_tensor = None
             send_backward_wrapper(input_tensor_grad)
         else:
-            if parallel_state.get_pipeline_model_parallel_rank() % 2 == 0:          
+            if parallel_state.get_pipeline_model_parallel_rank() % 2 == 0:
                 send_backward_wrapper(input_tensor_grad)
                 input_tensor = recv_forward_wrapper()
             else:
                 input_tensor = recv_forward_wrapper()
                 send_backward_wrapper(input_tensor_grad)
-            
+
         return input_tensor, num_tokens
-    
+
     def recv_backward_send():
         input_tensor = input_tensors.pop(0)
         output_tensor = output_tensors.pop(0)
@@ -1485,7 +1487,6 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
         max_outstanding_backprops = num_warmup_microbatches + 1
 
     model_type = get_model_type(model)
-    encoder_decoder_xattn = get_model_xattn(model)
 
     rank = p2p_communicator.pp_group.rank()
     recv_forward_tensor_shapes = get_tensor_shapes(
@@ -1495,23 +1496,6 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
         config=config,
         tp_group=tp_group,
         cp_group=cp_group,
-    )
-    send_forward_tensor_shapes = get_tensor_shapes(
-        seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
-        decoder_seq_length=decoder_seq_length,
-        config=config,
-        tp_group=tp_group,
-        cp_group=cp_group,
-    )
-    send_backward_tensor_shapes = get_tensor_shapes(
-        seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
-        decoder_seq_length=decoder_seq_length,
-        config=config,
-        tp_group=tp_group,
-        cp_group=cp_group,
-        backward=True,
     )
     recv_backward_tensor_shapes = get_tensor_shapes(
         seq_length=seq_length,
@@ -1527,7 +1511,7 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
     recv_backward_wrapper = lambda : p2p_communicator.recv_backward(recv_backward_tensor_shapes, is_pp_last_stage(p2p_communicator.pp_group))
     send_forward_wrapper = lambda output: p2p_communicator.send_forward(output, is_pp_last_stage(p2p_communicator.pp_group))
     send_backward_wrapper = lambda output: p2p_communicator.send_backward(output, is_pp_first_stage(p2p_communicator.pp_group))
-            
+
     # Input, output tensors only need to be saved when doing backward passes
     input_tensors = None
     output_tensors = None
@@ -1591,27 +1575,24 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
-      
-
         if forward_only:
-            output_tensor = forward_send_recv(last_iteration,
-                            forward_step_func,                              
-                            data_iterator,
-                            model,
-                            num_microbatches*global_args.pipe_sp_splits,
-                            input_tensor,
-                            forward_data_store,
-                            config,
-                            pg_collection.cp.size(),
-                            collect_non_loss_data,
-                            checkpoint_activations_microbatch,
-                            check_first_val_step(first_val_step, forward_only,(i == 0) and (num_warmup_microbatches == 0)),
-                            i + num_warmup_microbatches,
-                            None,
-                            is_pp_last_stage(p2p_communicator.pp_group),)
-
-
-
+            output_tensor = forward_send_recv(
+                last_iteration,
+                forward_step_func,
+                data_iterator,
+                model,
+                num_microbatches*global_args.pipe_sp_splits,
+                input_tensor,
+                forward_data_store,
+                config,
+                pg_collection.cp.size(),
+                collect_non_loss_data,
+                checkpoint_activations_microbatch,
+                check_first_val_step(first_val_step, forward_only,(i == 0) and (num_warmup_microbatches == 0)),
+                i + num_warmup_microbatches,
+                None,
+                is_pp_last_stage(p2p_communicator.pp_group),
+            )
         else:
             input_tensor, num_tokens = _1f1b_with_comm(last_iteration, first_iteration,
                 forward_step_func,
@@ -1629,6 +1610,7 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
                 None,
                 is_pp_last_stage(p2p_communicator.pp_group),)
             total_num_tokens += num_tokens
+
     # Run cooldown backward passes.
     if not forward_only:
         for i in range(num_warmup_microbatches):
@@ -1649,7 +1631,6 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
             enable_grad_sync()
             if config.grad_sync_func is not None:
                 config.grad_sync_func(model.parameters())
-
 
     if config.finalize_model_grads_func is not None and not forward_only:
 
