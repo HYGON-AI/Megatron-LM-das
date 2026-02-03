@@ -14,6 +14,11 @@ export RCCL_SDMA_COPY_ENABLE=0
 # wz
 export NCCL_IB_HCA=mlx5_0:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1
 export NCCL_TOPO_FILE=${MEGATRON_PATH}/requirements/topo-input.xml
+export ROCSHMEM_GDA_NUM_QPS_DEFAULT_CTX=288
+export ROCSHMEM_MAX_NUM_CONTEXTS=48
+export ROCSHMEM_ALLOWED_IBV_DEVICES=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9
+export ROCSHMEM_HEAP_SIZE=10737418240
+export ROCSHMEM_TOPO_FILE_FORCE=${MEGATRON_PATH}/requirements/topo.config
 
 # 508-shca
 # module load app/rccl/shca_rdma_plugins/v8 
