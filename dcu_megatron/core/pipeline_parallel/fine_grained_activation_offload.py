@@ -5,7 +5,15 @@ from typing import Any
 import torch
 import transformer_engine as te
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase
+
+from megatron.core.utils import is_te_min_version
+
+if is_te_min_version("2.10.0"):
+    from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage as QuantizedTensorBase
+elif is_te_min_version("2.9.0"):
+    from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorStorage as QuantizedTensorBase
+else:
+    from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensorBase
 
 
 # CPU offload implementation for pipeline parallelism
