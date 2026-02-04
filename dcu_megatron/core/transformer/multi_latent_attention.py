@@ -34,6 +34,7 @@ class MultiLatentAttention():
         sequence_len_offset=None,
         *,
         inference_params=None,
+        micro_sp_idx=None,  # pylint: disable=unused-argument
     ):
         """Forward pass for multi-latent attention"""
         assert rotary_pos_emb is None, "Rotary position embeddings should not be passed into MLA."

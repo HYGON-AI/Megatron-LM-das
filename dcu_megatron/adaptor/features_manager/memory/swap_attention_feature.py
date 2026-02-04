@@ -42,7 +42,7 @@ class SwapAttentionFeature(AbstractFeature):
             from dcu_megatron.core.memory.swap_attention.adaptor_swap_atten import allowed_recomputing_swap_module_wrapper
             from megatron.legacy.model.transformer import ParallelTransformerLayer
             from megatron.core.transformer.transformer_layer import TransformerLayer
-            from dcu_megatron.core.memory.common import transformer_block_checkpointed_forward
+
             if hasattr(args, "use_legacy_models") and not args.use_legacy_models:
                 allowed_recomputing_swap_module_wrapper(TransformerLayer)
             else:
@@ -55,6 +55,3 @@ class SwapAttentionFeature(AbstractFeature):
                                 linear_forward_main_grad_wrapper)
             patch_manager.register_patch('megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication.backward',
                                 linear_backward_main_grad_wrapper)
-            patch_manager.register_patch(
-                'megatron.core.transformer.transformer_block.TransformerBlock._checkpointed_forward',
-                transformer_block_checkpointed_forward)

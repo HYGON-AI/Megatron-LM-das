@@ -247,7 +247,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
-        # cpu offload.
+        # (1) cpu offload. (2) seq1f1b
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
                                     attention_init_wrapper,
                                     apply_wrapper=True)
@@ -261,20 +261,23 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     mlp_init_wrapper,
                                     apply_wrapper=True)
 
-        from ..core.transformer.attention import AttentionPatch
-        from ..core.transformer.transformer_block import TransformerBlockPatch
-        from ..core.transformer.transformer_layer import TransformerLayerPatch
+        from ..core.transformer.attention import Attention
+        from ..core.transformer.transformer_block import TransformerBlock
+        from ..core.transformer.transformer_layer import TransformerLayer
+        from ..core.transformer.multi_latent_attention import MultiLatentAttention
 
         MegatronAdaptation.register(
             'megatron.core.transformer.transformer_block.TransformerBlock._checkpointed_forward',
-            TransformerBlockPatch._checkpointed_forward)
+            TransformerBlock._checkpointed_forward)
         MegatronAdaptation.register('megatron.core.transformer.transformer_block.TransformerBlock.forward',
-                                    TransformerBlockPatch.forward)
+                                    TransformerBlock.forward)
         MegatronAdaptation.register('megatron.core.transformer.transformer_layer.TransformerLayer._forward_attention',
-                                    TransformerLayerPatch._forward_attention)
+                                    TransformerLayer._forward_attention)
 
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.forward',
-                                    AttentionPatch.forward)
+                                    Attention.forward)
+        MegatronAdaptation.register('megatron.core.transformer.multi_latent_attention.MultiLatentAttention.forward',
+                                    MultiLatentAttention.forward)
 
     def patch_core_tokenizers(self):
         from ..core.tokenizers.text.utils.build_tokenizer import build_tokenizer_wrapper
