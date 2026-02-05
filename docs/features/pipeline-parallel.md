@@ -31,7 +31,6 @@ dcu megatron对megatron已有流水线调度策略进行了优化，并提供一
 ### interleaved 1f1b支持moe a2a overlap
 dcu megatron支持基于interleaved 1f1b的moe a2a overlap，如需使用该特性，训练时需要在脚本中增加以下参数：
 ```
---schedule-method interleaved_1f1b
 --overlap-moe-expert-parallel-comm
 ```
 
@@ -92,7 +91,7 @@ dcu megatron提供dualpipev流水线调度，每个stage上有两个模型chunk�
 dualpipev支持moe a2a overlap，开启overlap需要额外增加以下参数：  
 ```
 --overlap-moe-expert-parallel-comm
---overlap-moe-expert-parallel-comm-impl megatron或者dcu_megatron # 默认为dcu_megatron
+--overlap-ep-comm-with-split-attn # 可选参数，如果使用该参数，attn被拆分为三部分
 ```
 dualpipev可通过指定每个stage中transformer层数的方式对网络进行切分，使用该切分方式时需要增加如下参数
 ```
