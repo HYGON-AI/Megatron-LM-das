@@ -37,6 +37,7 @@ export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
 # enable BatchLinear
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
+export NVTE_OVERLAP_GRAD_REDUCE=1
 export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
@@ -44,6 +45,8 @@ DISTRIBUTED_ARGS=(
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
+    --distributed-timeout-minutes 60
+    --distributed-backend nccl
 )
 
 MODEL_ARGS=(
@@ -51,9 +54,8 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 4096
     --max-position-embeddings 4096
-    --num-layers 9
-    --moe-layer-freq ([0]*3+[1]*6)
-    --pipeline-model-parallel-layout "Et|(tt|)*4|mL"
+    --num-layers 16
+    --moe-layer-freq 1
     --hidden-size 7168
     --ffn-hidden-size 18432
     --num-attention-heads 128
@@ -73,7 +75,7 @@ MODEL_ARGS=(
     --cross-entropy-loss-fusion
     --cross-entropy-fusion-impl te
     --manual-gc
-    --manual-gc-interval 10
+    --manual-gc-interval 20
     --no-create-attention-mask-in-dataloader
     --kv-channels 128
     --make-vocab-size-divisible-by 3232
@@ -86,9 +88,6 @@ MODEL_ARGS=(
     --rotary-scaling-factor 40
     --mscale 1.0
     --mscale-all-dim 1.0
-    --cuda-graph-impl transformer_engine
-    --cuda-graph-scope attn
-    --te-rng-tracker
     --use-precision-aware-optimizer
     --main-grads-dtype fp32
     --main-params-dtype fp32
@@ -99,10 +98,11 @@ MODEL_ARGS=(
 MOE_ARGS=(
     --num-experts 256
     --moe-aux-loss-coeff 1e-4
-    --moe-deepep-num-sms 48
+    # --moe-enable-deepep
+    # --moe-deepep-num-sms 48
+    --moe-token-dispatcher-type alltoall # flex
     --moe-ffn-hidden-size 2048
     --moe-shared-expert-intermediate-size 2048
-    --moe-token-dispatcher-type flex
     --moe-router-topk 8
     --moe-router-group-topk 4
     --moe-router-num-groups 8
@@ -115,30 +115,28 @@ MOE_ARGS=(
     --moe-router-load-balancing-type seq_aux_loss
     --moe-router-fusion
     --moe-router-force-load-balancing
-    --moe-enable-deepep
     --moe-permute-fusion
     --moe-grouped-gemm
 )
 
 DATA_ARGS=(
-    --tokenizer-type DeepSeekV2Tokenizer
+    --tokenizer-type Llama2Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
-    --split 99,1,0
+    --split 949,50,1
     --num-workers 6
+    --no-mmap-bin-files
 )
 
 TRAINING_ARGS=(
     --train-iters 10
     --micro-batch-size 1
-    --global-batch-size 2048
+    --global-batch-size 256
     --lr 3.9e-6
     --min-lr 3.9e-7
-    --lr-decay-iters 10000
     --lr-decay-style cosine
-    --lr-decay-samples 584765624
-    --lr-warmup-samples 1536000
     --lr-warmup-init 3.9e-7
+    --lr-warmup-fraction 0.01
     --weight-decay 0.1
     --clip-grad 1.0
     --bf16
@@ -147,7 +145,7 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
+    --tensor-model-parallel-size 2
     --pipeline-model-parallel-size 2
     --expert-model-parallel-size 32
     --expert-tensor-parallel-size 1
@@ -156,11 +154,19 @@ MODEL_PARALLEL_ARGS=(
     --sequence-parallel
     --overlap-param-gather
     --overlap-grad-reduce
+    # --num-layers-per-virtual-pipeline-stage 2
+    # --overlap-moe-expert-parallel-comm
+    # --schedule-method dualpipev
+    # --delay-wgrad-compute
+    # --use-quantize-comm
 )
 
 LOGGING_ARGS=(
     --log-throughput
     --log-interval 1
+    --log-memory-to-tensorboard
+    --log-validation-ppl-to-tensorboard
+    --logging-level 40
     --save-interval 10000
     --eval-interval 200
     --eval-iters -1
@@ -179,7 +185,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_deepseek671B_8nodes
+    --profile-dir torch_prof_deepseek671B_32nodes
     --use-pytorch-profiler
 )
 
