@@ -154,11 +154,12 @@ MODEL_PARALLEL_ARGS=(
     --sequence-parallel
     --overlap-param-gather
     --overlap-grad-reduce
-    # --num-layers-per-virtual-pipeline-stage 2
-    # --overlap-moe-expert-parallel-comm
+    --num-layers-per-virtual-pipeline-stage 2
+    --overlap-moe-expert-parallel-comm
+    --overlap-ep-comm-with-split-attn
+    --use-quantize-comm
     # --schedule-method dualpipev
     # --delay-wgrad-compute
-    # --use-quantize-comm
 )
 
 LOGGING_ARGS=(
