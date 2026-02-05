@@ -582,10 +582,11 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             token_dispatcher._comm_manager.token_probs = probs
 
         dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
+        node.layer_state.dispatched_probs = node.detach(dispatched_probs)
    
-        return dispatched_tokens, dispatched_probs
+        return dispatched_tokens
 
-    def submodule_routed_experts_forward(node: ScheduleNode, dispatched_input, dispatched_probs):
+    def submodule_routed_experts_forward(node: ScheduleNode, dispatched_input):
         """
         Performs a forward pass for the MLP submodule, including only routed-expert computations.
         """
@@ -595,6 +596,13 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs, None)
             assert mlp_bias is None, f"mlp_bias is not supported for {type(layer.mlp.token_dispatcher)}"
             return expert_output
+
+        dispatched_probs = node.layer_state.dispatched_probs
+        token_dispatcher = layer.mlp.token_dispatcher
+        if enable_deepep:
+            # update dispatched_probs to be detached version, prevents
+            # backward graph from connecting to dispatch submodule
+            token_dispatcher._comm_manager.dispatched_probs = dispatched_probs
 
         args = [
             dispatched_input,
@@ -622,6 +630,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             # as a gradient hook of expert_output
             layer.pre_mlp_norm_checkpoint.discard_output_and_register_recompute(expert_output)
 
+        node.layer_state.dispatched_probs = None
         return expert_output
 
     def submodule_combine_forward(
