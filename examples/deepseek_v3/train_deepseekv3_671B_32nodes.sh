@@ -88,9 +88,6 @@ MODEL_ARGS=(
     --rotary-scaling-factor 40
     --mscale 1.0
     --mscale-all-dim 1.0
-    --cuda-graph-impl transformer_engine
-    --cuda-graph-scope attn
-    --te-rng-tracker
     --use-precision-aware-optimizer
     --main-grads-dtype fp32
     --main-params-dtype fp32
