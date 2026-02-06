@@ -24,6 +24,7 @@ try:
     from megatron.core.extensions.transformer_engine import (
         TEDotProductAttention,
         TENorm,
+        TELinear,
     )
 except ImportError:
     warnings.warn('transformer_engine is not installed.')
@@ -92,9 +93,9 @@ def get_gpt_layer_with_flux_spec(
                     params={"attn_mask_type": AttnMaskType.causal},
                     submodules=MLASelfAttentionSubmodules(
                         linear_q_proj=FluxColumnParallelLinear,
-                        linear_q_down_proj=FluxColumnParallelLinear,
+                        linear_q_down_proj=TELinear,
                         linear_q_up_proj=FluxColumnParallelLinear,
-                        linear_kv_down_proj=FluxColumnParallelLinear,
+                        linear_kv_down_proj=TELinear,
                         linear_kv_up_proj=FluxColumnParallelLinear,
                         core_attention=TEDotProductAttention,
                         linear_proj=FluxRowParallelLinear,
