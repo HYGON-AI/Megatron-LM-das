@@ -131,7 +131,7 @@ DATA_ARGS=(
 TRAINING_ARGS=(
     --train-iters 10
     --micro-batch-size 1
-    --global-batch-size 256
+    --global-batch-size $((${WORLD_SIZE} * 32))
     --lr 3.9e-6
     --min-lr 3.9e-7
     --lr-decay-style cosine
