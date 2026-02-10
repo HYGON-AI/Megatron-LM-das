@@ -178,6 +178,7 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.core.tensor_parallel.layers import VocabParallelEmbedding
             from dcu_megatron.core.transformer.multi_token_prediction import tie_word_embeddings_state_dict_wrapper
             from dcu_megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
+            from dcu_megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
 
             patch_manager.register_patch(
                 'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
@@ -223,6 +224,9 @@ class PipelineFeature(AbstractFeature):
 
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_step_calc_loss',
                                          forward_step_calc_loss)
+
+            patch_manager.register_patch('megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
+                                         DistributedDataParallel._make_backward_post_hook)
 
         if args.enable_vocab_parallel:
             from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper
