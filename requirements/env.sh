@@ -7,6 +7,7 @@ export NCCL_MIN_NCHANNELS=32
 export NCCL_NET_GDR_LEVEL=4
 export NCCL_NET_GDR_READ=1
 export RCCL_SDMA_COPY_ENABLE=0
+export TRITON_HOME=/tmp
 
 # These variables should be modified according to the environment of the machine you are using.
 # Please choose one from [wz, 508-shca, 508-mlnx].

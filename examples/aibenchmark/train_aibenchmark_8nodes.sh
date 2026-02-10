@@ -40,9 +40,6 @@ export NVTE_INT8_SIM_FP8_TENSORWISE=1
 export NVTE_DISABLE_NVRTC=1
 export NVTE_INT8_SIM_FP8=1
 
-# triton cache dir
-export TRITON_HOME=/tmp
-
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
