@@ -38,7 +38,6 @@ export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 # enable BatchLinear
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
 export NVTE_OVERLAP_GRAD_REDUCE=1
-export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -131,7 +130,7 @@ DATA_ARGS=(
 TRAINING_ARGS=(
     --train-iters 10
     --micro-batch-size 1
-    --global-batch-size 256
+    --global-batch-size 8192
     --lr 3.9e-6
     --min-lr 3.9e-7
     --lr-decay-style cosine
@@ -150,11 +149,11 @@ MODEL_PARALLEL_ARGS=(
     --expert-model-parallel-size 32
     --expert-tensor-parallel-size 1
     --context-parallel-size 1
+    --num-layers-per-virtual-pipeline-stage 2
     --use-distributed-optimizer
     --sequence-parallel
     --overlap-param-gather
     --overlap-grad-reduce
-    --num-layers-per-virtual-pipeline-stage 2
     --overlap-moe-expert-parallel-comm
     --overlap-ep-comm-with-split-attn
     --use-quantize-comm

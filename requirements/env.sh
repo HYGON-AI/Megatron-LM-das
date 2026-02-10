@@ -7,14 +7,15 @@ export NCCL_MIN_NCHANNELS=32
 export NCCL_NET_GDR_LEVEL=4
 export NCCL_NET_GDR_READ=1
 export RCCL_SDMA_COPY_ENABLE=0
+export TRITON_HOME=/tmp
 
 # These variables should be modified according to the environment of the machine you are using.
 # Please choose one from [wz, 508-shca, 508-mlnx].
 
 # wz
+export GLOO_SOCKET_IFNAME=enp33s0f3u1
 export NCCL_IB_HCA=mlx5_0:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1,mlx5_8:1,mlx5_9:1
 export NCCL_TOPO_FILE=${MEGATRON_PATH}/requirements/topo-input.xml
-export ROCSHMEM_GDA_NUM_QPS_DEFAULT_CTX=288
 export ROCSHMEM_MAX_NUM_CONTEXTS=48
 export ROCSHMEM_ALLOWED_IBV_DEVICES=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9
 export ROCSHMEM_HEAP_SIZE=10737418240

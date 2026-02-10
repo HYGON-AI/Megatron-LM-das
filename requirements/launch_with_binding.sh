@@ -8,10 +8,9 @@ numa_map=(0 1 2 3 4 5 6 7)
 # export HIP_VISIBLE_DEVICES=0,1,5,4,2,3,7,6
 # numa_map=(0 1 5 4 2 3 7 6)
 
-# 508 mlxn
+# 508 mlnx
 # export HIP_VISIBLE_DEVICES=0,1,2,3,5,4,7,6
 # corenum=`cat /proc/cpuinfo| grep "cpu cores" | uniq | awk '{print $4}'`
-
 # if [ "${corenum}" -eq "64" ]
 # then
 #         numa_map=(0 3 2 1 7 4 5 6)

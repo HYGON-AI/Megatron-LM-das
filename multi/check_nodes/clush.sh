@@ -10,4 +10,3 @@ clush --hostfile=$clushnode -f 100 -b "source ${ENV} && rocminfo | grep amdgcn-a
 clush --hostfile=$clushnode -f 100 -b "rdma resource"
 clush --hostfile=$clushnode -f 100 -b "ibstat | grep Active | wc -l"
 clush --hostfile=$clushnode -f 100 -b "ibstat | grep Rate"
-# clush --hostfile=$clushnode -f 100 -b "hy-smi"
