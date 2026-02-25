@@ -90,12 +90,14 @@ class PipelineFeature(AbstractFeature):
 
     def validate_args(self, args):
         if args.schedule_method == "dualpipev":
+            assert args.pipeline_model_parallel_layout is None, "pipeline-model-parallel-layout shoule be None when using dualpipev"
+
             if args.delay_wgrad_compute and args.overlap_grad_reduce:
                 assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
                     "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"
 
         if args.schedule_method == "dualpipev":
-            if args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
+            if args.virtual_pipeline_model_parallel_size is not None:
                 raise AssertionError("The dualpipev and virtual_pipeline are incompatible.")
 
             layers_to_distribute = args.num_layers
@@ -135,7 +137,7 @@ class PipelineFeature(AbstractFeature):
         if args.overlap_moe_expert_parallel_comm:
             assert args.transformer_impl == "transformer_engine", \
                 "moe a2a overlap is only supported with transformer_engine implementation"
-            assert args.schedule_method == "dualpipev" or args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None, \
+            assert args.schedule_method == "dualpipev" or args.virtual_pipeline_model_parallel_size is not None, \
                 'moe a2a overlap is only supported with vpp or dualpipev'
 
         # Vocabulary parallelism.
@@ -254,7 +256,7 @@ class PipelineFeature(AbstractFeature):
         from dcu_megatron.core.distributed.data_parallel_base import _BaseDataParallel
         from dcu_megatron.core.transformer.module import Float16Module
         from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer, MultiTokenPredictionBlock
-        from dcu_megatron.core.pipeline_parallel.utils import ScheduleNode
+        from dcu_megatron.core.pipeline_parallel.utils import NoopScheduleNode, ScheduleNode
 
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
@@ -297,6 +299,9 @@ class PipelineFeature(AbstractFeature):
                                     MultiTokenPredictionBlock.backward_dw,
                                     create_dummy=True)
 
+        patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.utils.NoopScheduleNode',
+                                         [NoopScheduleNode.forward,
+                                          NoopScheduleNode.backward,])
         patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.utils.ScheduleNode',
                                          [ScheduleNode.forward,
                                           ScheduleNode._forward,

@@ -11,6 +11,24 @@ from megatron.core.pipeline_parallel.utils import stream_acquire_context, make_v
 from megatron.core.pipeline_parallel.utils import ScheduleNode as MegatronCoreScheduleNode
 
 
+class NoopScheduleNode:
+    """A placeholder node in the computation graph that simply passes through inputs and outputs.
+
+    This class is used as a no-op node in the scheduling system when a real computation node
+    is not needed but the interface must be maintained (e.g., dense layer doesn't need
+    moe_dispatch and moe_combine). It simply returns its inputs unchanged
+    in both forward and backward passes.
+    """
+
+    def forward(self, inputs, stream_wait_event=None, stream_record_event=None):
+        """Passes through inputs unchanged in the forward pass."""
+        return inputs
+
+    def backward(self, outgrads, stream_wait_event=None, stream_record_event=None):
+        """Passes through gradients unchanged in the backward pass."""
+        return outgrads
+
+
 class ScheduleNode(MegatronCoreScheduleNode):
     """Base node for fine-grained scheduling.
 

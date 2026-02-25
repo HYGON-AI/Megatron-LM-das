@@ -294,7 +294,7 @@ class GPTModel:
                 scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
                 tp_group=self.pg_collection.tp,
                 split_vocab_embedding=self.split_vocab_embedding,
-                vocab_embedding_only=(not self.pre_process),
+                vocab_embedding_only=(args.enable_vocab_parallel and not self.pre_process),
             )
 
         # dualpipev use shared embedding weight
@@ -501,7 +501,7 @@ class GPTModel:
         Returns:
             Tensor: When dualpipe is enabled, return the weights from dual_chunk, otherwise follow the original logic.
         """
-        if not self.pre_process and self.post_process and get_args().schedules_method == 'dualpipev':
+        if not self.pre_process and self.post_process and get_args().schedule_method == 'dualpipev':
             return get_shared_embedding_from_dual_chunk()
 
         if self.has_vocab_embedding or self.mtp_process:
