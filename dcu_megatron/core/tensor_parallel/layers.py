@@ -92,7 +92,8 @@ class VocabParallelEmbedding:
 
         # Allocate weights and initialize.
         args = get_args()
-        if getattr(args, "mtp_process", False) and args.schedule_method == "dualpipev":
+        from dcu_megatron.core.models.gpt.utils import get_skip_embedding_allocation
+        if get_skip_embedding_allocation(): # getattr(args, "mtp_process", False) and args.schedule_method == "dualpipev":
             self.weight = None
         else:
             if config.use_cpu_initialization:

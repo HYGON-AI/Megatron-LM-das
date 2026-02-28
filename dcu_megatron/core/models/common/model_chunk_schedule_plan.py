@@ -84,7 +84,6 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(f_input)
-                f_input = f_layer.mtp_post_process.forward(f_input)
 
         if b_layer is not None:
             b_grad = b_layer.post_attn.backward(b_grad)
@@ -340,6 +339,10 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         if b_layer is not None:
             b_grad = b_layer.core_attn.backward(b_grad)
             b_grad = b_layer.attn_qkv.backward(b_grad)
+
+        if f_layer is not None:
+            with f_layer.get_fp8_context():
+                f_input = f_layer.mtp_post_process.forward(f_input)
 
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm

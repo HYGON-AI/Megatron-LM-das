@@ -132,13 +132,6 @@ def gpt_model_postprocess(
                     hidden_states, mtp_loss_scale * mtp_loss / num_tokens
                 )
 
-    if (
-        self.mtp_process is not None
-        and getattr(self.decoder, "main_final_layernorm", None) is not None
-    ):
-        # move block main model final norms here
-        hidden_states = self.decoder.main_final_layernorm(hidden_states)
-
     sequence_parallel_override = False
     if in_inference_mode and inference_context.materialize_only_last_token_logits:
         if inference_context.is_static_batching():
@@ -286,16 +279,18 @@ class GPTModel:
         self.mtp_process = mtp_block_spec is not None
 
         if self.pre_process or self.mtp_process or self.split_vocab_embedding:
-            self.embedding = LanguageModelEmbedding(
-                config=self.config,
-                vocab_size=self.vocab_size,
-                max_sequence_length=self.max_sequence_length,
-                position_embedding_type=position_embedding_type,
-                scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
-                tp_group=self.pg_collection.tp,
-                split_vocab_embedding=self.split_vocab_embedding,
-                vocab_embedding_only=(args.enable_vocab_parallel and not self.pre_process),
-            )
+            from .utils import SkipEmbeddingAllocationContextManager
+            with SkipEmbeddingAllocationContextManager(self.mtp_process and args.schedule_method == 'dualpipev'):
+                self.embedding = LanguageModelEmbedding(
+                    config=self.config,
+                    vocab_size=self.vocab_size,
+                    max_sequence_length=self.max_sequence_length,
+                    position_embedding_type=position_embedding_type,
+                    scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
+                    tp_group=self.pg_collection.tp,
+                    split_vocab_embedding=self.split_vocab_embedding,
+                    vocab_embedding_only=(args.enable_vocab_parallel and not self.pre_process),
+                )
 
         # dualpipev use shared embedding weight
         skip_embedding_allocation = self.mtp_process and args.schedule_method == 'dualpipev'

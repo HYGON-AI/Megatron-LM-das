@@ -176,15 +176,6 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                 eps=self.config.layernorm_epsilon,
             )
 
-        # mtp require seperate layernorms for main model and mtp modules, thus move finalnorm out of block
-        if (
-            hasattr(config, "mtp_num_layers")
-            and config.mtp_num_layers is not None
-            and config.mtp_num_layers > 0
-        ):
-            self.main_final_layernorm = self.final_layernorm
-            self.final_layernorm = None
-
         # activation offload
         self.is_mtp_in_model = get_gpt_block_with_mtp()
 
@@ -450,7 +441,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     rotary_pos_emb,
                 )
             else:
-                micro_sp_idx_ = torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
+                micro_sp_idx_ = None if micro_sp_idx is None else torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
                 return tensor_parallel.checkpoint(
                     forward_func,
                     self.config.distribute_saved_activations,
@@ -459,7 +450,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
-                    micro_sp_idx_
+                    micro_sp_idx_,
                 )
 
         if self.config.recompute_method == 'uniform':

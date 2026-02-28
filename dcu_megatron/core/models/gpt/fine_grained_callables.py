@@ -721,7 +721,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     backward_dw = {
         "attn_qkv": attn_qkv_dw_funcs,
         "attn_proj": attn_proj_dw_funcs,
-        "mlp": layer.mlp.experts if is_moe else None
+        "mlp": layer.mlp.experts if is_moe else layer.mlp
     }
 
     return forward_funcs, backward_dw
@@ -824,10 +824,10 @@ def build_mtp_layer_callables_with_split_attn(layer):
     ]
 
     attn_proj_dw_funcs = [layer.transformer_layer.self_attention.linear_proj]
-    if is_moe and layer.mlp.use_shared_expert and not layer.mlp.shared_expert_overlap:
+    if is_moe and layer.transformer_layer.mlp.use_shared_expert and not layer.transformer_layer.mlp.shared_expert_overlap:
         attn_proj_dw_funcs.append(layer.transformer_layer.mlp.shared_experts)
 
-    if isinstance(layer.self_attention, MLASelfAttention):
+    if isinstance(layer.transformer_layer.self_attention, MLASelfAttention):
         attn_qkv_dw_funcs = [
             layer.transformer_layer.self_attention.linear_kv_up_proj,
             layer.transformer_layer.self_attention.linear_kv_down_proj,
