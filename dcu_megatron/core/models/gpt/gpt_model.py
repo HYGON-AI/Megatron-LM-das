@@ -1,7 +1,6 @@
 from copy import deepcopy
 from collections import OrderedDict
 from typing import Literal, Optional
-from functools import wraps
 
 import torch
 from torch import Tensor
@@ -754,13 +753,6 @@ class GPTModel:
 
         if self.config.fine_grained_activation_offloading:
             self.preprocess_for_fine_grained_offloading()
-
-        if (
-            self.config.schedule_method == "dualpipev"
-            and not self.dualpipev_first_chunk
-            and self.mtp_process
-        ):
-            self.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
 

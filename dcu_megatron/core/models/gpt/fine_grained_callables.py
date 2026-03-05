@@ -1,10 +1,10 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 from contextlib import nullcontext
 from functools import partial
 from typing import Optional
 
 import torch
 
+from megatron.training import get_args
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.multi_token_prediction import (
@@ -241,6 +241,12 @@ def build_mtp_layer_callables_without_split_attn(layer):
             offset = get_mtp_layer_offset(layer.config)
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
+            if (
+                get_args().schedule_method == "dualpipev"
+                and node.chunk_state.model.embedding.word_embeddings.weight is None
+            ):
+                from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
+                node.chunk_state.model.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
         input_ids, position_ids, decoder_input, hidden_states = layer._get_embeddings(
             input_ids=node.chunk_state.input_ids,
@@ -755,6 +761,12 @@ def build_mtp_layer_callables_with_split_attn(layer):
             offset = get_mtp_layer_offset(layer.config)
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
+            if (
+                get_args().schedule_method == "dualpipev"
+                and node.chunk_state.model.embedding.word_embeddings.weight is None
+            ):
+                from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
+                node.chunk_state.model.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
         input_ids, position_ids, decoder_input, hidden_states = layer._get_embeddings(
             input_ids=node.chunk_state.input_ids,

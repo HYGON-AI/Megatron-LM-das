@@ -28,7 +28,7 @@ def tie_word_embeddings_state_dict_wrapper(fn):
 
 
 def get_mtp_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None, model=None,
 ) -> int:
     """Get the number of MTP layers to build."""
 
@@ -38,8 +38,9 @@ def get_mtp_num_layers_to_build(
     is_last_pp_stage = pp_rank == config.pipeline_model_parallel_size - 1
 
     args = get_args()
+    dualpipev_first_chunk = getattr(model, "dualpipev_first_chunk", False) if model is not None else getattr(args, "dualpipev_first_chunk", False)
     if args.schedule_method == "dualpipev":
-        if is_first_pp_stage and not args.dualpipev_first_chunk:
+        if is_first_pp_stage and not dualpipev_first_chunk:
             return config.mtp_num_layers if config.mtp_num_layers else 0
         else:
             return 0
@@ -88,6 +89,14 @@ class MultiTokenPredictionBlock:
         Returns:
             (Tensor): The mtp loss tensor of shape [b, s].
         """
+
+        if (
+            get_args().schedule_method == "dualpipev"
+            and embedding.word_embeddings.weight is None
+        ):
+            from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
+            embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
+
         # get hidden states from previous mtp stages
         offset = get_mtp_layer_offset(self.config)
         hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))

@@ -157,10 +157,13 @@ class PipelineFeature(AbstractFeature):
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.pipeline_parallel.schedules import get_forward_backward_func_wrapper
+        from dcu_megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
 
         patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_forward_backward_func',
                                     get_forward_backward_func_wrapper,
                                     apply_wrapper=True)
+        patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.get_mtp_num_layers_to_build',
+                                    get_mtp_num_layers_to_build)
 
         if args.schedule_method == "dualpipev":
             from megatron.training.utils import print_rank_0
@@ -174,9 +177,9 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.core.transformer.transformer_layer import get_transformer_layer_offset
             from dcu_megatron.training.training import pretrain
             from dcu_megatron.core.models.gpt.gpt_model import GPTModel
+            from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
             from dcu_megatron.training.global_vars import _set_tensorboard_writer, _set_wandb_writer, _set_one_logger
             from dcu_megatron.core.models.common.language_module.language_module import LanguageModule
-            from dcu_megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
             from dcu_megatron.core.tensor_parallel.layers import VocabParallelEmbedding
             from dcu_megatron.core.transformer.multi_token_prediction import tie_word_embeddings_state_dict_wrapper
             from dcu_megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
@@ -189,7 +192,7 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch(
                 'megatron.training.utils.print_rank_last', print_rank_0)
             patch_manager.register_patch(
-                'megatron.core.distributed.finalize_model_grads._allreduce_embedding_grads', _allreduce_embedding_grads_wrapper)
+                'megatron.core.distributed.finalize_model_grads._allreduce_embedding_grad', _allreduce_embedding_grads_wrapper)
 
             # use first rank
             patch_manager.register_patch('megatron.training.training.evaluate', evaluate)
@@ -216,8 +219,6 @@ class PipelineFeature(AbstractFeature):
             # support mtp
             patch_manager.register_patch('megatron.core.models.common.language_module.language_module.LanguageModule.setup_embeddings_and_output_layer',
                                          LanguageModule.setup_embeddings_and_output_layer)
-            patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.get_mtp_num_layers_to_build',
-                                         get_mtp_num_layers_to_build)
             patch_manager.register_patch('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.__init__',
                                          VocabParallelEmbedding.__init__)
             patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.tie_word_embeddings_state_dict',
@@ -229,6 +230,9 @@ class PipelineFeature(AbstractFeature):
 
             patch_manager.register_patch('megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
                                          DistributedDataParallel._make_backward_post_hook)
+
+            patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
+                                        build_layer_callables_without_split_attn)
 
         if args.enable_vocab_parallel:
             from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper
@@ -295,6 +299,8 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionLayer.backward_dw',
                                     MultiTokenPredictionLayer.backward_dw,
                                     create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionBlock.forward',
+                                     MultiTokenPredictionBlock.forward)
         patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionBlock.backward_dw',
                                     MultiTokenPredictionBlock.backward_dw,
                                     create_dummy=True)

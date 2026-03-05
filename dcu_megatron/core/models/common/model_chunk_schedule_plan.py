@@ -84,6 +84,7 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(f_input)
+                f_input = f_layer.mtp_post_process.forward(f_input)
 
         if b_layer is not None:
             b_grad = b_layer.post_attn.backward(b_grad)
@@ -435,7 +436,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         self._model_chunk_state.attention_bias = None
 
         transformer_num_layers = model.decoder.num_layers_per_pipeline_rank
-        mtp_num_layers = get_mtp_num_layers_to_build(model.config, vp_stage=self.vp_stage)
+        mtp_num_layers = get_mtp_num_layers_to_build(model.config, vp_stage=self.vp_stage, model=model)
 
         # build preprocess
         self.pre_process = PreProcessNode(model, self._model_chunk_state, self._event, comp_stream)
