@@ -89,7 +89,7 @@ TRAINING_ARGS=(
     --micro-batch-size 1
     --global-batch-size 256
     --lr 1e-4
-    --train-iters 10
+    --train-iters 5
     --lr-decay-iters 10000
     --lr-decay-style cosine
     --min-lr 1.0e-6
@@ -116,7 +116,7 @@ LOGGING_ARGS=(
     --log-interval 1 \
     --save-interval 100000 \
     --eval-interval 10000 \
-    --eval-iters 5 \
+    --eval-iters -1 \
     #--save $CHECKPOINT_PATH \
     #--load $CHECKPOINT_PATH \
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" \

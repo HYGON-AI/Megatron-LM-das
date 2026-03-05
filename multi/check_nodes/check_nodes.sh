@@ -20,9 +20,15 @@ LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Pleas
 HOSTFILE=${1}
 GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
 HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
-PORT="25900"
+PORT="25905"
 
-# Runs GPT 567B model
+# Runs
+if (( GPUS <= 32 )); then
+    shell="gpt3/train_gpt_567B_$((GPUS / 8))nodes.sh"
+elif (( GPUS > 32 )); then
+    shell="aibenchmark/train_aibenchmark_$((GPUS / 8))nodes.sh"
+fi
+
 source ${NCCL_ENV}
 mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
@@ -31,7 +37,7 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ${MEGATRON_PATH}/examples/gpt3/train_gpt_567B_$((${GPUS} / 8))nodes.sh \
+                    ${MEGATRON_PATH}/examples/${shell} \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \

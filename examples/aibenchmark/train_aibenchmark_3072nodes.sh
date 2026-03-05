@@ -28,24 +28,34 @@ LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10
-export NVTE_OVERLAP_GRAD_REDUCE=1
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
+export GPU_MAX_HW_QUEUES=6
 
 # int8_simulation_fp8
 export NVTE_INT8_SIM_FP8_TENSORWISE=1
 export NVTE_DISABLE_NVRTC=1
 export NVTE_INT8_SIM_FP8=1
 
+num_layers=12
+num_expert=1024
+TP=2
+PP=4
+EP=512
+ETP=4
+CP=1
+DP=$((${WORLD_SIZE} / ${TP} / ${PP} / ${CP}))
+EDP=$((${WORLD_SIZE} / ${PP} / ${EP} / ${ETP}))
+GBS=$((64 * ${DP}))
+LR=9.36e-05
+MIN_LR=9.36e-06
+TRAIN_ITERS=10
+
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
+    --disable-gloo-process-groups
+    --distributed-timeout-minutes 30
 )
 
 MODEL_ARGS=(
@@ -53,9 +63,9 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 8192
     --max-position-embeddings 32768
-    --num-layers 8
+    --num-layers ${num_layers}
     --hidden-size 8192
-    --ffn-hidden-size 32768
+    --ffn-hidden-size 33144
     --num-attention-heads 64
     --init-method-std 0.01
     --attention-dropout 0.0
@@ -65,32 +75,35 @@ MODEL_ARGS=(
     --untie-embeddings-and-output-weights
     --no-masked-softmax-fusion
     --no-position-embedding
-    --rotary-base 1000000
-    --ckpt-format torch
-    --use-quantize-comm
-    --schedule-method interleaved_1f1b
-    --overlap-moe-expert-parallel-comm
-    --delay-wgrad-compute
-    --group-query-attention
-    --num-query-groups 8
+    --rotary-base 10000
+    --no-check-for-nan-in-loss-and-grad
     --fp8-format hybrid
     --fp8-recipe tensorwise 
     --fp8-param-gather
+    --cross-entropy-loss-fusion
+    --cross-entropy-fusion-impl te
+    --group-query-attention
+    --num-query-groups 64
+    --manual-gc
+    --manual-gc-interval 5
+    --use-quantize-comm
+    --use-intra-ep
+    --overlap-param-gather
+    --overlap-grad-reduce
+    --swiglu
 )
 
 MOE_ARGS=(
-    --num-experts 240
-    --moe-router-topk 4
-    --moe-router-group-topk 2
-    --moe-router-num-groups 8
+    --num-experts ${num_expert}
+    --moe-router-topk 2
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-2
     --moe-token-dispatcher-type alltoall
-    --moe-permute-fusion
-    --moe-grouped-gemm
+    --moe-router-dtype fp32
     --moe-expert-capacity-factor 1
     --moe-pad-expert-input-to-capacity
-    --moe-router-dtype fp32
+    --moe-permute-fusion
+    --moe-grouped-gemm
 )
 
 DATA_ARGS=(
@@ -101,58 +114,57 @@ DATA_ARGS=(
 )
 
 TRAINING_ARGS=(
+    --train-iters ${TRAIN_ITERS}
     --micro-batch-size 1
-    --global-batch-size 7680
-    --lr 1e-4
-    --train-iters 10
-    --lr-decay-iters 10000
+    --global-batch-size ${GBS}
+    --lr ${LR}
+    --min-lr ${MIN_LR}
+    --lr-warmup-init ${MIN_LR}
+    --lr-warmup-fraction 0.01
     --lr-decay-style cosine
-    --min-lr 1.0e-6
     --weight-decay 0.1
-    --lr-warmup-iters 2000
     --clip-grad 1.0
     --bf16
-    --overlap-param-gather
-    --overlap-grad-reduce
+    --adam-beta1 0.9
+    --adam-beta2 0.95
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 4
-    --pipeline-model-parallel-size 4
-    --expert-model-parallel-size 40
-    --expert-tensor-parallel-size 2
-    --context-parallel-size 1
-    --num-layers-per-virtual-pipeline-stage 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
+    --expert-model-parallel-size ${EP}
+    --expert-tensor-parallel-size ${ETP}
+    --context-parallel-size ${CP}
     --use-distributed-optimizer
     --sequence-parallel
 )
 
 LOGGING_ARGS=(
-    --log-throughput \
-    --log-interval 1 \
-    --save-interval 100000 \
-    --eval-interval 10000 \
-    --eval-iters 5 \
+    --log-throughput
+    --log-interval 1
+    --save-interval 100000
+    --eval-interval 10000
+    --eval-iters -1
     #--save $CHECKPOINT_PATH \
     #--load $CHECKPOINT_PATH \
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" \
-    --no-load-optim \
-    --no-load-rng \
+    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard"
+    --no-load-optim
+    --no-load-rng
     --no-save-optim
 )
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 6 8 32
+    --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_aibenchmark_240nodes_tp4-pp4-ep40-etp2-cp1-vp2
+    --profile-dir torch_prof_aibenchmark_3072nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
 HIP_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 6 8 32
+    --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 4
     --profile-step-end 5
     --use-hip-profiler
