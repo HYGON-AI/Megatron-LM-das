@@ -17,10 +17,15 @@ NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Pleas
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
 # Those variables no need to modify
-HOSTFILE="hostfile_$(basename "$0" | sed -E 's/^run_(.+)\.sh$/\1/')"
+hostfile_input=${1}
+node_num=${2}
+HOSTFILE="${hostfile_input}_slots"
+rm -f ${HOSTFILE} 
+cat ${hostfile_input} | sed -n "1,${node_num}p"|sed 's/$/ slots=8/' > ${HOSTFILE}
+
 GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
 HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
-PORT="25900"
+PORT="25905"
 
 # Runs DeepseekV3 671B model
 source ${NCCL_ENV}
@@ -38,6 +43,6 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --tokenizer_path=$TOKENIZER_MODEL_PATH \
                     --checkpoint_path=$CHECKPOINT_PATH \
                     --launch_with_binding=${LAUNCH_WITH_BINDING} \
-                    --profiling=$profiling" > log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log 2>&1
+                    --profiling=$profiling" 2>&1 | tee log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log
 
 wait

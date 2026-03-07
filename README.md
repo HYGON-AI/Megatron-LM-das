@@ -43,4 +43,10 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 from dcu_megatron import megatron_adaptor     # 新增一行代码
 ```
 + 特性介绍见[features](./features.md)文件
-+ 运行模型训练模型，可参考[gpt训练脚本](http://112.11.119.99:10068/dcutoolkit/deeplearing/dcu_megatron/-/blob/core_v0.12.0/examples/gpt3/run_gpt_567B.sh)。
++ 运行模型训练模型，可参考[deepseek训练脚本](http://112.11.119.99:10068/dcutoolkit/deeplearing/dcu_megatron/-/blob/core_v0.15.0/examples/deepseek_v3/run_deepseekv3_671B.sh)。
++ 运行命令
+
+```shell
+# num_nodes是需要运行的节点数
+bash run_deepseekv3_671B.sh hostfile_deepseekv3_671B num_nodes
+```

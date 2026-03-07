@@ -28,14 +28,7 @@ LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-
-# enable BatchLinear
 export GROUPED_GEMM_BatchLinear=1
 
 DISTRIBUTED_ARGS=(

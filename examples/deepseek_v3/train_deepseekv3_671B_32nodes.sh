@@ -28,16 +28,24 @@ LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-
-# enable BatchLinear
+export GPU_MAX_HW_QUEUES=6
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
 export NVTE_OVERLAP_GRAD_REDUCE=1
+
+num_layers=16
+num_expert=256
+TP=2
+PP=2
+EP=64
+ETP=1
+CP=1
+VP=2
+DP=$((${WORLD_SIZE} / ${TP} / ${PP} / ${CP}))
+EDP=$((${WORLD_SIZE} / ${PP} / ${EP} / ${ETP}))
+GBS=$((64 * ${DP}))
+LR=1.95e-06
+MIN_LR=1.95e-07
+TRAIN_ITERS=10
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -53,7 +61,7 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length 4096
     --max-position-embeddings 4096
-    --num-layers 16
+    --num-layers ${num_layers}
     --moe-layer-freq 1
     --hidden-size 7168
     --ffn-hidden-size 18432
@@ -95,7 +103,7 @@ MODEL_ARGS=(
 )
 
 MOE_ARGS=(
-    --num-experts 256
+    --num-experts ${num_expert}
     --moe-aux-loss-coeff 1e-4
     # --moe-enable-deepep
     # --moe-deepep-num-sms 48
@@ -119,7 +127,7 @@ MOE_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
     --split 949,50,1
@@ -128,14 +136,14 @@ DATA_ARGS=(
 )
 
 TRAINING_ARGS=(
-    --train-iters 10
+    --train-iters ${TRAIN_ITERS}
     --micro-batch-size 1
-    --global-batch-size 8192
-    --lr 3.9e-6
-    --min-lr 3.9e-7
-    --lr-decay-style cosine
-    --lr-warmup-init 3.9e-7
+    --global-batch-size ${GBS}
+    --lr ${LR}
+    --min-lr ${MIN_LR}
+    --lr-warmup-init ${MIN_LR}
     --lr-warmup-fraction 0.01
+    --lr-decay-style cosine
     --weight-decay 0.1
     --clip-grad 1.0
     --bf16
@@ -144,21 +152,19 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 2
-    --pipeline-model-parallel-size 2
-    --expert-model-parallel-size 32
-    --expert-tensor-parallel-size 1
-    --context-parallel-size 1
-    --num-layers-per-virtual-pipeline-stage 2
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
+    --expert-model-parallel-size ${EP}
+    --expert-tensor-parallel-size ${ETP}
+    --context-parallel-size ${CP}
+    --num-layers-per-virtual-pipeline-stage ${VP}
     --use-distributed-optimizer
     --sequence-parallel
     --overlap-param-gather
     --overlap-grad-reduce
+    --use-quantize-comm
     --overlap-moe-expert-parallel-comm
     --overlap-ep-comm-with-split-attn
-    --use-quantize-comm
-    # --schedule-method dualpipev
-    # --delay-wgrad-compute
 )
 
 LOGGING_ARGS=(
@@ -185,7 +191,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_deepseek671B_32nodes
+    --profile-dir torch_prof_deepseek671B_32nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}-vp${VP}
     --use-pytorch-profiler
 )
 

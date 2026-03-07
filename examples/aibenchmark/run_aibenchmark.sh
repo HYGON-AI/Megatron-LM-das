@@ -19,7 +19,7 @@ LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Pleas
 # Those variables no need to modify
 hostfile_input=${1}
 node_num=${2}
-HOSTFILE="hostfile_slots"
+HOSTFILE="${hostfile_input}_slots"
 rm -f ${HOSTFILE} 
 cat ${hostfile_input} | sed -n "1,${node_num}p"|sed 's/$/ slots=8/' > ${HOSTFILE}
 

@@ -29,24 +29,22 @@ WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GPU_MAX_HW_QUEUES=6
+export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
+export NVTE_OVERLAP_GRAD_REDUCE=1
 
-# int8_simulation_fp8
-export NVTE_INT8_SIM_FP8_TENSORWISE=1
-export NVTE_DISABLE_NVRTC=1
-export NVTE_INT8_SIM_FP8=1
-
-num_layers=12
-num_expert=512
-TP=2
-PP=4
-EP=256
-ETP=4
+num_layers=61
+num_expert=256
+TP=4
+PP=8
+EP=64
+ETP=1
 CP=1
+PP0_LAYERS=5
 DP=$((${WORLD_SIZE} / ${TP} / ${PP} / ${CP}))
 EDP=$((${WORLD_SIZE} / ${PP} / ${EP} / ${ETP}))
 GBS=$((64 * ${DP}))
-LR=1.56e-05
-MIN_LR=1.56e-06
+LR=9.75e-07
+MIN_LR=9.75e-08
 TRAIN_ITERS=10
 
 DISTRIBUTED_ARGS=(
@@ -54,63 +52,87 @@ DISTRIBUTED_ARGS=(
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
-    --disable-gloo-process-groups
-    --distributed-timeout-minutes 30
+    --distributed-timeout-minutes 60
+    --distributed-backend nccl
 )
 
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 8192
-    --max-position-embeddings 32768
+    --seq-length 4096
+    --max-position-embeddings 4096
     --num-layers ${num_layers}
-    --hidden-size 8192
-    --ffn-hidden-size 33144
-    --num-attention-heads 64
-    --init-method-std 0.01
+    --moe-layer-freq "([0]*3+[1]*58)"
+    --hidden-size 7168
+    --ffn-hidden-size 18432
+    --num-attention-heads 128
+    --init-method-std 0.02
     --attention-dropout 0.0
     --hidden-dropout 0.0
     --normalization RMSNorm
+    --norm-epsilon 1e-6
     --position-embedding-type rope
+    --swiglu
     --untie-embeddings-and-output-weights
-    --no-masked-softmax-fusion
-    --no-position-embedding
     --rotary-base 10000
-    # --no-check-for-nan-in-loss-and-grad
-    --fp8-format hybrid
-    --fp8-recipe tensorwise 
-    --fp8-param-gather
+    --use-flash-attn
+    --multi-latent-attention
+    --enable-experimental
+    --no-check-for-nan-in-loss-and-grad
     --cross-entropy-loss-fusion
     --cross-entropy-fusion-impl te
-    --group-query-attention
-    --num-query-groups 64
     --manual-gc
-    --manual-gc-interval 5
-    --use-quantize-comm
-    --use-intra-ep
-    --overlap-param-gather
-    --overlap-grad-reduce
-    --swiglu
+    --manual-gc-interval 20
+    --no-create-attention-mask-in-dataloader
+    --kv-channels 128
+    --make-vocab-size-divisible-by 3232
+    --qk-layernorm
+    --q-lora-rank 1536
+    --kv-lora-rank 512
+    --qk-head-dim 128
+    --qk-pos-emb-head-dim 64
+    --v-head-dim 128
+    --rotary-scaling-factor 40
+    --mscale 1.0
+    --mscale-all-dim 1.0
+    --use-precision-aware-optimizer
+    --main-grads-dtype fp32
+    --main-params-dtype fp32
+    --exp-avg-dtype bf16
+    --exp-avg-sq-dtype bf16
 )
 
 MOE_ARGS=(
     --num-experts ${num_expert}
-    --moe-router-topk 2
-    --moe-router-load-balancing-type aux_loss
-    --moe-aux-loss-coeff 1e-2
-    --moe-token-dispatcher-type alltoall
+    --moe-aux-loss-coeff 1e-4
+    # --moe-enable-deepep
+    # --moe-deepep-num-sms 48
+    --moe-token-dispatcher-type alltoall # flex
+    --moe-ffn-hidden-size 2048
+    --moe-shared-expert-intermediate-size 2048
+    --moe-router-topk 8
+    --moe-router-group-topk 4
+    --moe-router-num-groups 8
+    --moe-router-topk-scaling-factor 2.5
     --moe-router-dtype fp32
-    --moe-expert-capacity-factor 1
-    --moe-pad-expert-input-to-capacity
+    --moe-router-pre-softmax
+    --moe-router-score-function sigmoid
+    --moe-router-enable-expert-bias
+    --moe-router-bias-update-rate 1e-3
+    --moe-router-load-balancing-type seq_aux_loss
+    --moe-router-fusion
+    --moe-router-force-load-balancing
     --moe-permute-fusion
     --moe-grouped-gemm
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
-    --split 98,2,0
+    --split 949,50,1
+    --num-workers 6
+    --no-mmap-bin-files
 )
 
 TRAINING_ARGS=(
@@ -135,15 +157,22 @@ MODEL_PARALLEL_ARGS=(
     --expert-model-parallel-size ${EP}
     --expert-tensor-parallel-size ${ETP}
     --context-parallel-size ${CP}
+    --decoder-first-pipeline-num-layers ${PP0_LAYERS}
     --use-distributed-optimizer
     --sequence-parallel
+    --overlap-param-gather
+    --overlap-grad-reduce
+    --use-quantize-comm
 )
 
 LOGGING_ARGS=(
     --log-throughput
     --log-interval 1
-    --save-interval 100000
-    --eval-interval 10000
+    --log-memory-to-tensorboard
+    --log-validation-ppl-to-tensorboard
+    --logging-level 40
+    --save-interval 10000
+    --eval-interval 200
     --eval-iters -1
     #--save $CHECKPOINT_PATH \
     #--load $CHECKPOINT_PATH \
@@ -151,14 +180,16 @@ LOGGING_ARGS=(
     --no-load-optim
     --no-load-rng
     --no-save-optim
+    --auto-detect-ckpt-format
+    --dist-ckpt-strictness log_all
 )
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_aibenchmark_512nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
+    --profile-dir torch_prof_deepseek671B_128nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
@@ -172,8 +203,8 @@ HIP_PROFIE_ARGS=(
 
 if [ -n "${WANDB_API_KEY}" ]; then
     LOGGING_ARGS+=(
-        --wandb-project ${WANDB_PROJECT:-"GPT"}
-        --wandb-exp-name ${WANDB_NAME:-"GPT_567B"}
+        --wandb-project ${WANDB_PROJECT:-"DeepseekV3"}
+        --wandb-exp-name ${WANDB_NAME:-"DeepseekV3_671B"}
     )
 fi
 
