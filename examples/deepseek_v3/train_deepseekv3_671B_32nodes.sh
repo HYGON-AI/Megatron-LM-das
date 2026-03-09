@@ -30,7 +30,6 @@ CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GPU_MAX_HW_QUEUES=6
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
-export NVTE_OVERLAP_GRAD_REDUCE=1
 
 num_layers=16
 num_expert=256
@@ -39,13 +38,13 @@ PP=2
 EP=64
 ETP=1
 CP=1
-VP=2
+PPL="Ett|(tt|)*6ttL"
 DP=$((${WORLD_SIZE} / ${TP} / ${PP} / ${CP}))
 EDP=$((${WORLD_SIZE} / ${PP} / ${EP} / ${ETP}))
-GBS=$((64 * ${DP}))
-LR=1.95e-06
-MIN_LR=1.95e-07
-TRAIN_ITERS=10
+GBS=2048
+LR=3.9e-06
+MIN_LR=3.9e-07
+TRAIN_SAMPLES=585937500
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -130,19 +129,20 @@ DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
-    --split 949,50,1
+    --split 99,1,0
     --num-workers 6
     --no-mmap-bin-files
 )
 
 TRAINING_ARGS=(
-    --train-iters ${TRAIN_ITERS}
+    --train-samples ${TRAIN_SAMPLES}
     --micro-batch-size 1
     --global-batch-size ${GBS}
     --lr ${LR}
     --min-lr ${MIN_LR}
     --lr-warmup-init ${MIN_LR}
-    --lr-warmup-fraction 0.01
+    --lr-warmup-samples 1536000
+    --lr-decay-samples 584765624
     --lr-decay-style cosine
     --weight-decay 0.1
     --clip-grad 1.0
@@ -157,12 +157,11 @@ MODEL_PARALLEL_ARGS=(
     --expert-model-parallel-size ${EP}
     --expert-tensor-parallel-size ${ETP}
     --context-parallel-size ${CP}
-    --num-layers-per-virtual-pipeline-stage ${VP}
+    --pipeline-model-parallel-layout ${PPL}
     --use-distributed-optimizer
     --sequence-parallel
     --overlap-param-gather
     --overlap-grad-reduce
-    --use-quantize-comm
     --overlap-moe-expert-parallel-comm
     --overlap-ep-comm-with-split-attn
 )
@@ -191,7 +190,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_deepseek671B_32nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}-vp${VP}
+    --profile-dir torch_prof_deepseek671B_$((${WORLD_SIZE} / 8))nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 

@@ -28,9 +28,8 @@ LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GPU_MAX_HW_QUEUES=6
+export GPU_MAX_HW_QUEUES=4
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
-export NVTE_OVERLAP_GRAD_REDUCE=1
 
 num_layers=61
 num_expert=256
@@ -39,13 +38,13 @@ PP=8
 EP=64
 ETP=1
 CP=1
-PP0_LAYERS=5
+PPL="Et|(tt|)*30L"
 DP=$((${WORLD_SIZE} / ${TP} / ${PP} / ${CP}))
 EDP=$((${WORLD_SIZE} / ${PP} / ${EP} / ${ETP}))
-GBS=$((64 * ${DP}))
-LR=9.75e-07
-MIN_LR=9.75e-08
-TRAIN_ITERS=10
+GBS=2048
+LR=3.9e-06
+MIN_LR=3.9e-07
+TRAIN_SAMPLES=585937500
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -130,19 +129,20 @@ DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
-    --split 949,50,1
+    --split 99,1,0
     --num-workers 6
     --no-mmap-bin-files
 )
 
 TRAINING_ARGS=(
-    --train-iters ${TRAIN_ITERS}
+    --train-samples ${TRAIN_SAMPLES}
     --micro-batch-size 1
     --global-batch-size ${GBS}
     --lr ${LR}
     --min-lr ${MIN_LR}
     --lr-warmup-init ${MIN_LR}
-    --lr-warmup-fraction 0.01
+    --lr-warmup-samples 1536000
+    --lr-decay-samples 584765624
     --lr-decay-style cosine
     --weight-decay 0.1
     --clip-grad 1.0
@@ -157,12 +157,13 @@ MODEL_PARALLEL_ARGS=(
     --expert-model-parallel-size ${EP}
     --expert-tensor-parallel-size ${ETP}
     --context-parallel-size ${CP}
-    --decoder-first-pipeline-num-layers ${PP0_LAYERS}
+    --pipeline-model-parallel-layout ${PPL}
     --use-distributed-optimizer
     --sequence-parallel
     --overlap-param-gather
     --overlap-grad-reduce
-    --use-quantize-comm
+    --overlap-moe-expert-parallel-comm
+    --overlap-ep-comm-with-split-attn
 )
 
 LOGGING_ARGS=(
@@ -189,7 +190,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_deepseek671B_128nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
+    --profile-dir torch_prof_deepseek671B_$((${WORLD_SIZE} / 8))nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
