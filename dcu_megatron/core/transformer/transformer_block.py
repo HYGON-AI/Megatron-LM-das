@@ -388,7 +388,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
 
         def custom(start: int, end: int):
             def custom_forward(
-                hidden_states, attention_mask, context, context_mask, rotary_pos_emb, micro_sp_idx_
+                hidden_states, attention_mask, context, context_mask, rotary_pos_emb, micro_sp_idx_=None,
             ):
                 for index in range(start, end):
                     layer = self._get_layer(index)
