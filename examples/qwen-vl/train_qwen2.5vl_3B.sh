@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# /public/home/wangxj/Downloads/blas/hipblaslt-install-0820-fix2
-# export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/hipblaslt-install-0820-fix2/lib:$LD_LIBRARY_PATH 
 
 INITIALIZATION_ARGS=( --num-workers 2)
 

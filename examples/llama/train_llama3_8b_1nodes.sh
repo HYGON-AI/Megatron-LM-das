@@ -129,7 +129,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp1-pp2-cp1
+    --profile-dir torch_prof_llama
     --use-pytorch-profiler
 )
 

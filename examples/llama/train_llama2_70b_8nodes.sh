@@ -49,8 +49,6 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 
-#增加编译缓存
-export cache_size_limit=64
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -130,7 +128,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp4-pp8-cp1
+    --profile-dir torch_prof_llama
     --use-pytorch-profiler
 )
 

@@ -1,8 +1,5 @@
 #!/bin/bash
 
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/hipblaslt-install-0825/lib:$LD_LIBRARY_PATH 
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/rocblas-install-0825-80CU/lib:$LD_LIBRARY_PATH 
-
 INITIALIZATION_ARGS=( --num-workers 2)
 
 for para in $*
@@ -103,34 +100,15 @@ TRAINING_ARGS=(
     --overlap-grad-reduce
     --use-flash-attn
 
-    # --record-memory-history
 
     --optimizer-cpu-offload
     # --optimizer-offload-fraction 1.0
     --use-torch-optimizer-for-cpu-offload
     --use-precision-aware-optimizer
-    --main-grads-dtype bf16 # bf16
-    --main-params-dtype fp16 #fp16
+    --main-grads-dtype bf16 
+    --main-params-dtype fp16 
     
-    # --recompute-granularity full # selective
-    # # --recompute-modules # mlp或者core_attn
-    # --recompute-method block # uniform # 
-    # --recompute-num-layers 1 # 设置32,16,8,4观察一下显存
-
-    # --no-check-for-nan-in-loss-and-grad
 )
-
-# export TORCH_COMPILE_DEBUG=1
-# export NVTE_INT8_SIM_FP8_TENSORWISE_CHECK=1
-
-# export NVTE_INT8_SIM_FP8_TENSORWISE=1
-# export NVTE_DISABLE_NVRTC=1
-# export NVTE_INT8_SIM_FP8=1
-# FP8_PARALLEL_ARGS=(
-#   --fp8-format hybrid # e4m3 # 
-#   --fp8-recipe tensorwise # blockwise # 
-#   --fp8-param-gather
-# )
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 4
@@ -183,8 +161,6 @@ APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${EVAL_AND_LOGGING_ARGS[@]} \
     ${DISTRIBUTED_ARGS[@]} \
     ${INITIALIZATION_ARGS[@]} \
-    ${FP8_PARALLEL_ARGS[@]} \
-    ${TP_COMM_OVERLAP_ARGS[@]} \
     "
 
 if [[ $profiling == "torch" ]]; then

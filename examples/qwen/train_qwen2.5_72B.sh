@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# /public/home/wangxj/Downloads/blas/hipblaslt-install-0820-fix2
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/hipblaslt-install-0820-fix2/lib:$LD_LIBRARY_PATH 
-
 INITIALIZATION_ARGS=( --num-workers 2)
 
 for para in $*
@@ -61,7 +58,7 @@ DISTRIBUTED_ARGS=(
 )
 
 GPT_MODEL_ARGS=(
-    --seq-length 8192 # 4096, 8192, 16384, 32768
+    --seq-length 8192 
     --num-layers 80
     --hidden-size 8192
     --ffn-hidden-size 29568 
@@ -108,27 +105,9 @@ TRAINING_ARGS=(
     # --optimizer-offload-fraction 1.0
     --use-torch-optimizer-for-cpu-offload
     --use-precision-aware-optimizer
-    --main-grads-dtype bf16 # bf16
-    --main-params-dtype fp16 #fp16
+    --main-grads-dtype bf16 
+    --main-params-dtype fp16 
     
-    # --recompute-granularity full # selective
-    # # --recompute-modules # mlp或者core_attn
-    # --recompute-method block # uniform # 
-    # --recompute-num-layers 3 # 设置32,16,8,4观察一下显存
-
-    --no-check-for-nan-in-loss-and-grad
-)
-
-# export TORCH_COMPILE_DEBUG=1
-# export NVTE_INT8_SIM_FP8_TENSORWISE_CHECK=1
-
-# export NVTE_INT8_SIM_FP8_TENSORWISE=1
-# export NVTE_DISABLE_NVRTC=1
-# export NVTE_INT8_SIM_FP8=1
-FP8_PARALLEL_ARGS=(
-#   --fp8-format hybrid # e4m3 # 
-#   --fp8-recipe tensorwise # blockwise # 
-#   --fp8-param-gather
 )
 
 MODEL_PARALLEL_ARGS=(
@@ -182,7 +161,6 @@ APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${EVAL_AND_LOGGING_ARGS[@]} \
     ${DISTRIBUTED_ARGS[@]} \
     ${INITIALIZATION_ARGS[@]} \
-    ${FP8_PARALLEL_ARGS[@]} \
     "
 
 if [[ $profiling == "torch" ]]; then

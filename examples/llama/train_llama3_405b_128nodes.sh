@@ -49,7 +49,6 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 
-
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
@@ -58,12 +57,14 @@ DISTRIBUTED_ARGS=(
 )
 
 GPT_MODEL_ARGS=(
-    --seq-length 4096
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 11008 
-    --num-attention-heads 32
-    --max-position-embeddings 4096
+    --seq-length 8192
+    --num-layers 126
+    --hidden-size 16384
+    --ffn-hidden-size 53248
+    --num-attention-heads 128
+    --max-position-embeddings 131072
+    --group-query-attention
+    --num-query-groups 8
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
@@ -73,8 +74,8 @@ TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 256
-    --train-iters 50
+    --global-batch-size 1152
+    --train-iters 10000
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
@@ -85,10 +86,10 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --lr 3.0e-5 
+    --lr 8.0e-5 
     --lr-decay-style cosine 
-    --min-lr 3.0e-6
-    --lr-warmup-iters 1
+    --min-lr 8.0e-8
+    --lr-warmup-iters 8000
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
@@ -96,15 +97,17 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 2
-    --context-parallel-size 1
-    --use-distributed-optimizer 
+    --tensor-model-parallel-size 8
     --sequence-parallel
+    --pipeline-model-parallel-size 16
+    --decoder-first-pipeline-num-layers 7
+    --decoder-last-pipeline-num-layers 7
+    --context-parallel-size 2
+    --use-distributed-optimizer 
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type Llama3Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH} 
     --split 949,50,1

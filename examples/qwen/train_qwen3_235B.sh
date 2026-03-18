@@ -45,11 +45,11 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
+export GPU_MAX_HW_QUEUES=10 
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
 export GROUPED_GEMM_BatchLinear=1
-export NVTE_MOE_BATCHCOUNT=16 #num_experts/ep
+export NVTE_MOE_BATCHCOUNT=16 # num_experts/ep
 export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(

@@ -22,7 +22,7 @@ GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
 HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
 PORT="25900"
 
-# Runs Llama3 70B model
+# Runs Llama3 405B model
 source ${NCCL_ENV}
 mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     --allow-run-as-root \
@@ -31,7 +31,7 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    ./train_llama3_70b_$((${GPUS} / 8))nodes.sh \
+                    ./train_llama3_405b_$((${GPUS} / 8))nodes.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \

@@ -140,8 +140,8 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    # --save $CHECKPOINT_PATH
-    # --load $CHECKPOINT_PATH
+    --save $CHECKPOINT_PATH
+    --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 

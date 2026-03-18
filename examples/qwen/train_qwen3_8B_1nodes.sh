@@ -1,8 +1,5 @@
 #!/bin/bash
 
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/hipblaslt-install-0825/lib:$LD_LIBRARY_PATH 
-export LD_LIBRARY_PATH=/public/home/wangxj/Downloads/blas/rocblas-install-0825-80CU/lib:$LD_LIBRARY_PATH 
-
 INITIALIZATION_ARGS=( --num-workers 2)
 
 for para in $*
@@ -53,8 +50,6 @@ export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
 
 
-#增加编译缓存
-export cache_size_limit=64
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -64,7 +59,7 @@ DISTRIBUTED_ARGS=(
 )
 
 GPT_MODEL_ARGS=(
-    --seq-length 32768 # 4096, 8192, 16384, 32768
+    --seq-length 32768 
     --num-layers 36
     --hidden-size 4096
     --ffn-hidden-size 12288 
@@ -105,32 +100,8 @@ TRAINING_ARGS=(
     --overlap-grad-reduce
     --use-flash-attn
 
-    # --optimizer-cpu-offload
-    # # --optimizer-offload-fraction 1.0
-    # --use-torch-optimizer-for-cpu-offload
-    # --use-precision-aware-optimizer
-    # --main-grads-dtype bf16 # bf16
-    # --main-params-dtype fp16 #fp16
-    
-    # --recompute-granularity full # selective
-    # # --recompute-modules # mlp或者core_attn
-    # --recompute-method block # uniform # 
-    # --recompute-num-layers 10 # 设置32,16,8,4观察一下显存
-
-    # --no-check-for-nan-in-loss-and-grad
 )
 
-# export TORCH_COMPILE_DEBUG=1
-# export NVTE_INT8_SIM_FP8_TENSORWISE_CHECK=1
-
-# export NVTE_INT8_SIM_FP8_TENSORWISE=1
-# export NVTE_DISABLE_NVRTC=1
-# export NVTE_INT8_SIM_FP8=1
-# FP8_PARALLEL_ARGS=(
-#   --fp8-format hybrid # e4m3 # 
-#   --fp8-recipe tensorwise # blockwise # 
-#   --fp8-param-gather
-# )
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 4

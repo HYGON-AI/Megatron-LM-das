@@ -51,8 +51,6 @@ export GPU_MAX_HW_QUEUES=10
 export NVTE_DISABLE_FC2_DGRAD_OVERLAP=1
 export NVTE_NO_PIPELINE_OVERLAP=1
 
-#增加编译缓存
-export cache_size_limit=64
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -130,7 +128,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp2-pp2-cp1
+    --profile-dir torch_prof_llama
     --use-pytorch-profiler
 )
 
