@@ -1,77 +1,54 @@
-from functools import wraps
 from argparse import ArgumentParser
+import torch
 
+from megatron.training import get_args
+from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from ..feature import AbstractFeature
 
 
-def _make_backward_post_hook(original_make_backward_post_hook):
+def _make_backward_post_hook(self, param: torch.nn.Parameter):
     """
-    Patch the _make_backward_post_hook method to handle None gradients in riPipe mode.
+    Creates a backward post-hook to dispatch an all-reduce / reduce-scatter when
+    ready (i.e., when all grads in a bucket have been computed in all microbatches
+    in a batch).
     """
-    @wraps(original_make_backward_post_hook)
-    def riPipe_make_backward_post_hook(self, param):
-        """
-        Creates a backward post-hook to dispatch an all-reduce / reduce-scatter when
-        ready (i.e., when all grads in a bucket have been computed in all microbatches
-        in a batch).
-        """
-        def hook(*unused):
-            if hasattr(self, 'config') and hasattr(self.config, 'transformer_engine') and self.config.transformer_engine:
-                from megatron.core.transformer.cuda_graphs import is_graph_capturing
-                is_graph_capturing_func = is_graph_capturing
-            else:
-                from megatron.core.transformer.cuda_graphs import is_graph_capturing
-                is_graph_capturing_func = is_graph_capturing
 
-            if is_graph_capturing_func():
-                return
+    def hook(*unused):
+        if is_graph_capturing():
+            return
 
-            if param in self.param_to_bucket_group:
-                assert param.requires_grad
-                if self.ddp_config.overlap_grad_reduce:
-                    # Check if we're in recompute independent pipelining mode
-                    # In this mode, some gradients might legitimately be None during recompute
-                    from megatron.training import get_args
-                    args = get_args()
-                    if (hasattr(args, 'recompute_in_advance') and args.recompute_in_advance) or \
-                       (hasattr(args, 'recompute_in_bubble') and args.recompute_in_bubble):
-                        # In recompute independent pipelining, allow None gradients temporarily
-                        # They will be handled properly in the recompute phase
-                        # Only assert if gradient is expected to be present
-                        # Skip the assertion in this case, but handle the None gradient properly
-                        # Allow None gradients in recompute_in_advance/recompute_in_bubble mode
-                        pass
-                    else:
-                        assert (
-                            param.grad is not None
-                        ), 'param.grad being None is not safe when overlap_grad_reduce is True'
-                
-                # Only add gradient to main_grad if gradient is not None
-                if param.grad is not None and (
-                    not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
+        if param in self.param_to_bucket_group:
+            assert param.requires_grad
+            if self.ddp_config.overlap_grad_reduce:
+                args = get_args()
+                # In ripipe recompute modes, param.grad can temporarily be None
+                # when this backward hook fires, so skip the strict assertion.
+                if not (
+                    (hasattr(args, 'recompute_in_advance') and args.recompute_in_advance)
+                    or (hasattr(args, 'recompute_in_bubble') and args.recompute_in_bubble)
                 ):
-                    param.main_grad.add_(param.grad.data)
-                
-                # Set param.grad to None regardless of whether it was originally None or not
-                param.grad = None
+                    assert (
+                        param.grad is not None
+                    ), 'param.grad being None is not safe when overlap_grad_reduce is True'
+            if param.grad is not None and (
+                not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
+            ):
+                param.main_grad.add_(param.grad.data)
+            param.grad = None
 
-                # Only register grad ready if overlap_grad_reduce is True and gradient was not None
-                # However, in recompute modes, we might have None gradients that still need to be registered
-                # as "ready" to maintain proper synchronization
-                if self.ddp_config.overlap_grad_reduce:
-                    self.param_to_bucket_group[param].register_grad_ready(param)
+            if self.ddp_config.overlap_grad_reduce:
+                self.param_to_bucket_group[param].register_grad_ready(param)
 
-        return hook
-    return riPipe_make_backward_post_hook
+    return hook
 
 
 class RiPipeFeature(AbstractFeature):
 
     def __init__(self):
-        super().__init__('ripipe')  # Use a generic feature name.
+        super().__init__('schedule-method')
 
     def register_args(self, parser: ArgumentParser):
-        group = parser.add_argument_group(title=self.feature_name)
+        group = parser.add_argument_group(title='ripipe')
         group.add_argument('--recompute-in-bubble', action='store_true',
                            help='use bubble to do recompute to reduce memory')
         group.add_argument('--recompute-in-advance', action='store_true',
@@ -180,6 +157,4 @@ class RiPipeFeature(AbstractFeature):
             if getattr(args, 'recompute_in_advance', False) or getattr(args, 'recompute_in_bubble', False):
                 patch_manager.register_patch(
                     'megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
-                    _make_backward_post_hook,
-                    apply_wrapper=True
-                )
+                    _make_backward_post_hook)
