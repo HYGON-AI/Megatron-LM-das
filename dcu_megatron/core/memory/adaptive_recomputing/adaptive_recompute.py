@@ -18,6 +18,7 @@ from dcu_megatron.core.memory.adaptive_recomputing.adaptive_recompute_apply impo
 from dcu_megatron.core.memory.adaptive_recomputing.adaptive_recompute_apply import register_recursive_apply_prefetch as apply_prefetch_strategy
 from dcu_megatron.core.memory.adaptive_recomputing.adaptive_recompute_solver import get_graph_solver, GraphSolver
 from dcu_megatron.core.memory.adaptive_recomputing.swap_manager import SwapManager, get_tensor_mem_size
+from dcu_megatron.core.tensor_parallel.checkpoint_manager import get_pipeline_checkpoint_manager
 
 DTYPE_NBYTES_MAP = {"bf16": 2, "fp16": 2, "fp32": 4}
 
@@ -487,7 +488,7 @@ class AdaptiveRecompute:
                             ctx['is_recomputing_layer'] = True
                         else:
                             current_ctx['is_recomputing_layer'] = True
-                        # 遇到可重计算模块后,禁止后续子模块标记,确保只在特定层级重计算
+                        # Once a recomputable module is found, stop marking its descendants so recomputation stays at the intended level.
                         next_have_allowed_recomputing = False
             self.construct_context_recursive(next_name, module, current_ctx, next_have_allowed_recomputing)
 
@@ -551,13 +552,18 @@ class AdaptiveRecompute:
 
     def reset_modules(self):
         for m in self.checkpointed_modules:
-            # 将模块的forward方法恢复为原始版本
+            # Restore the module's forward method to its original implementation.
             m.forward = m.no_checkpoint_forward
         self.checkpointed_modules.clear()
 
         get_recompute_hook().reset_recompute_modules()
         get_swap_hook().reset_swap_manager_modules()
         SwapManager().reset_swap_manager_tensors()
+
+        # ripipe related: reset pipeline checkpoint manager
+        pipeline_checkpoint_manager = get_pipeline_checkpoint_manager()
+        if pipeline_checkpoint_manager.open_ri_pipe:
+            pipeline_checkpoint_manager.iter_fin()
 
         if (get_adaptive_recomputing_policy().check_non_oom_times == 0
                 and not get_adaptive_recomputing_policy().is_find_target_device_memory):

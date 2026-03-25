@@ -303,6 +303,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_tensor_parallel(self):
         from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.parallel_state import log_timing_wrapper
+        from ..core.tensor_parallel.random import checkpoint_wrapper
 
         # VocabParallelEmbedding
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
@@ -329,6 +330,11 @@ class CoreAdaptation(MegatronAdaptationABC):
         # reduce_from_tensor_model_parallel_region
         MegatronAdaptation.register('megatron.core.tensor_parallel.mappings.reduce_from_tensor_model_parallel_region',
                                     torch._dynamo.disable,
+                                    apply_wrapper=True)
+        
+        # checkpoint_wrapper for RiPipe
+        MegatronAdaptation.register('megatron.core.tensor_parallel.random.checkpoint',
+                                    checkpoint_wrapper,
                                     apply_wrapper=True)
         
         # NCCL time log
@@ -396,7 +402,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
                                     _compile_dependencies)
 
-        # 添加固定seed
+        # Add a fixed seed.
         MegatronAdaptation.register('megatron.training.initialize._set_random_seed',
                                     _set_random_seed)
 

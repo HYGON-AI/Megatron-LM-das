@@ -128,8 +128,7 @@ class VocabParallelEmbedding:
 
 
 def get_tensor_model_parallel_node_size(group=None):
-    """ 获取节点数
-    """
+    """Get the number of nodes in the tensor model parallel group."""
     group = get_tensor_model_parallel_group_if_none(group)
 
     hostname = socket.gethostname()

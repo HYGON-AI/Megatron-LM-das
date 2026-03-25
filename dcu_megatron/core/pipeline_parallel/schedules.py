@@ -17,6 +17,7 @@ from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 from megatron.core.timers import Timer
 
 from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
+from .ripipe_schedules import forward_backward_ripipe_pipelining
 from .fine_grained_activation_offload import fine_grained_offloading_reset
 from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
 from dcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
@@ -51,6 +52,8 @@ def get_forward_backward_func_wrapper(fn):
             return seq1f1b_forward_backward_pipelining_without_interleaving
         elif args.schedule_method == "interleaved_seq1f1b":
             return seq1f1b_forward_backward_pipelining_with_interleaving
+        elif args.schedule_method == "ripipe":
+            return forward_backward_ripipe_pipelining
         else:
             raise ValueError(f"schedule_method {args.schedule_method} is not supported")
 
