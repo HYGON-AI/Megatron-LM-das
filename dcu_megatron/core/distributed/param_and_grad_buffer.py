@@ -1,34 +1,21 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import logging
-import math
-import warnings
 from contextlib import nullcontext
-from enum import Enum
-from functools import partial
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch.distributed import _coalescing_manager
 
-from megatron.core.rerun_state_machine import get_rerun_state_machine
-
-from megatron.core.fp8_utils import is_float8tensor, modify_underlying_storage
-from megatron.core.utils import is_torch_min_version, log_on_each_pipeline_stage
+from megatron.core.utils import log_single_rank
 from megatron.core.distributed.param_and_grad_buffer import BufferType, shard_buffer
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
+from megatron.core.distributed.reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accumulation
+from megatron.core.distributed.param_and_grad_buffer import dist_reduce_scatter_func
 from megatron.training.global_vars import get_args
-from ...training.edgc_utils import Utils, append_init_error_to_csv, read_error_from_csv
 from megatron.training import get_timers
 
 logger = logging.getLogger(__name__)
-
-if is_torch_min_version("1.13.0"):
-    dist_all_gather_func = torch.distributed.all_gather_into_tensor
-    dist_reduce_scatter_func = torch.distributed.reduce_scatter_tensor
-else:
-    dist_all_gather_func = torch.distributed._all_gather_base
-    dist_reduce_scatter_func = torch.distributed._reduce_scatter_base
 
 
 class _ParamAndGradBucket:
@@ -101,19 +88,16 @@ class _ParamAndGradBucketGroup:
         self.buckets = buckets
         self.ddp_config = ddp_config
         self.timers = get_timers()
+
         if self.ddp_config.use_distributed_optimizer:
             self.intra_distributed_optimizer_instance_group = collective_group
             self.intra_distributed_optimizer_instance_size = collective_group_size
-            self.intra_distributed_optimizer_instance_rank = torch.distributed.get_rank(
-                group=collective_group
-            )
+            self.intra_distributed_optimizer_instance_rank = collective_group.rank()
         else:
             self.data_parallel_group = collective_group
 
         # State for bookkeeping: params is the set of parameters this bucket group is
-        # responsible for, params_with_grad is the set of parameters with grads
-        # available. When overlap_grad_reduce is True, communication (all-reduce
-        # or reduce-scatter) is issued when params_with_grad equals params.
+        # responsible for, param_to_bucket maps params to the corresponding bucket.
         self.param_to_bucket = {}
         self.params = set()
         for bucket in self.buckets:
@@ -126,8 +110,35 @@ class _ParamAndGradBucketGroup:
         if self.ddp_config.num_distributed_optimizer_instances > 1:
             self.inter_distributed_optimizer_instance_group = None
             self.communication_stream = None
+            assert (
+                not self.ddp_config.reduce_scatter_with_fp32_accumulation
+            ), "RS w/ FP32 accumulation not supported with num_distributed_optimizer_instances > 1"
 
-        self.reset()
+        global dist_reduce_scatter_func
+        if self.ddp_config.reduce_scatter_with_fp32_accumulation:
+            dist_reduce_scatter_func = reduce_scatter_with_fp32_accumulation
+            log_single_rank(
+                logger,
+                logging.INFO,
+                "Using reduce_scatter_with_fp32_accumulation as reduce-scatter implementation",
+            )
+
+        # per_param_grad_ready_counts is a dict mapping parameters to number of times
+        # `register_grad_ready` is called for that parameter *when
+        # self.is_last_microbatch is True*. Should be 1 for most params but could be greater
+        # than 1 if control flow passes through the same parameter multiple times. We lazily
+        # populate this in the first batch, hence the .is_first_batch attribute.
+        # When overlap_grad_reduce is True, communication (all-reduce or reduce-scatter)
+        # is issued when per_param_grad_ready_counts equals golden_per_param_grad_ready_counts.
+        # In other words, communication is dispatched as soon as all gradients in this bucket
+        # are *ready*, as marked by the backward hook.
+        # The set of keys in per_param_grad_ready_counts should be equal to `params`.
+        self.golden_per_param_grad_ready_counts = {}
+        self.per_param_grad_ready_counts = {}
+        self.is_last_microbatch = True
+        self.is_first_batch = True
+
+        # Other metadata to keep track of collectives.
         self.param_gather_handle = None
         self.param_gather_dispatched = False
         self.grad_reduce_handle = None
@@ -139,165 +150,12 @@ class _ParamAndGradBucketGroup:
         # or bucket.grad_data.
         self.cached_param_buffer_shard_list = [None] * len(self.buckets)
         self.cached_grad_buffer_shard_list = [None] * len(self.buckets)
+
         self.initial_error = False
         self.max_rank_error = 0.0
         self.min_rank_error = 0.0
 
-    def reset(self):
-        """
-        Reset metadata in bucket group in preparation for the next iteration of training.
-        """
-        self.params_with_grad = set()
-        self.is_last_microbatch = True
-
-    def check_grads(self, check_for_nan_or_inf, check_for_large):
-        """
-        Make sure norm of grads in bucket are not NaN prior to data-parallel
-        all-reduce / reduce-scatter.
-        """
-        rerun_state_machine = get_rerun_state_machine()
-        for i in range(len(self.buckets)):
-            grad_norm = self.buckets[i].grad_data.norm(p=2)
-            # check for NaN, Inf and unexpectedly large grads
-            if check_for_nan_or_inf:
-                rerun_state_machine.validate_result(
-                    result=grad_norm,
-                    rejection_func=torch.isnan,
-                    message=f"found NaN in local grad norm for bucket #{i} "
-                    f"in backward pass before data-parallel communication collective",
-                    tolerance=0.001,  # 0.1% tolerance to account for non-deterministic FA backward
-                    fatal=True,
-                )
-                rerun_state_machine.validate_result(
-                    result=grad_norm,
-                    rejection_func=torch.isinf,
-                    message=f"found Inf in local grad norm for bucket #{i} "
-                    f"in backward pass before data-parallel communication collective",
-                    tolerance=0.001,  # 0.1% tolerance to account for non-deterministic FA backward
-                    fatal=True,
-                )
-            if check_for_large:
-                rerun_state_machine.validate_result(
-                    result=grad_norm,
-                    rejection_func=partial(
-                        rerun_state_machine.is_unexpectedly_large, threshold=10, context="grads"
-                    ),
-                    message=f"found unexpected large grads in bucket #{i} "
-                    f"in backward pass before data-parallel communication collective",
-                    tolerance=0.001,  # 0.1% tolerance to account for non-deterministic FA backward
-                    fatal=False,
-                )
-
-    def start_param_sync(self, force_sync: bool = False):
-        """
-        Initiates all necessary param all-gathers for this bucket.
-
-        When ddp_config.overlap_param_gather is set to True, dispatches an asynchronous
-        communication call (unless force_sync is True). When ddp_config.overlap_param_gather
-        is set to False, makes synchronous call.
-
-        Args:
-            force_sync (bool, optional): force synchronous collective regardless of
-                other settings if true.
-        """
-        assert self.ddp_config.use_distributed_optimizer
-
-        if force_sync:
-            if self.param_gather_handle is not None:
-                self.param_gather_handle.wait()
-                self.param_gather_handle = None
-                return
-        else:
-            assert self.param_gather_handle is None
-
-        async_op = self.ddp_config.overlap_param_gather and not force_sync
-        # Coalesce communication kernels across buckets in the bucket group.
-        with _coalescing_manager(
-            self.intra_distributed_optimizer_instance_group, async_ops=async_op
-        ) as cm:
-            for idx, bucket in enumerate(self.buckets):
-                if self.cached_param_buffer_shard_list[idx] is None:
-                    self.cached_param_buffer_shard_list[idx] = shard_buffer(
-                        bucket.param_data, self.intra_distributed_optimizer_instance_size
-                    )
-                local_data_view = self.cached_param_buffer_shard_list[idx][
-                    self.intra_distributed_optimizer_instance_rank
-                ]
-                dist_all_gather_func(
-                    bucket.param_data,
-                    local_data_view,
-                    group=self.intra_distributed_optimizer_instance_group,
-                    async_op=async_op,
-                )
-        if async_op:
-            self.param_gather_handle = cm
-        else:
-            # When using `_coalescing_manager`, even if a synchronous op (async_op=False) is used,
-            # `cm` is not None, which is different from when `_coalescing_manager` is not used in
-            # which case the torch.distributed._all_gather_base() will return None. In order to
-            # maintain consistency with prior code, we need to manually set communication handle to
-            # None.
-            self.param_gather_handle = None
-        self.param_gather_dispatched = True
-
-    def finish_param_sync(self, skip_next_bucket_dispatch: bool = False):
-        """
-        Finishes param sync communication operation for this bucket. Dispatches
-        next bucket's param sync if available, unless skip_next_bucket_dispatch
-        is True.
-
-        When ddp_config.overlap_param_gather is set to True, waits for asynchronous
-        communication call to complete (and dispatches one if one is not already
-        outstanding). Throws assertion error if ddp_config.overlap_param_gather is set to
-        False.
-
-        Args:
-            skip_next_bucket_dispatch (bool, optional): if true, dispatch next
-                bucket's communication if available.
-        """
-        assert self.ddp_config.use_distributed_optimizer
-        assert self.ddp_config.overlap_param_gather
-
-        # If current bucket's param AG has not been dispatched, dispatch it now (e.g., first
-        # AG bucket in first model chunk if ddp_config.align_param_gather is False).
-        if not self.param_gather_dispatched:
-            self.start_param_sync()
-
-        if self.param_gather_handle is not None:
-            self.param_gather_handle.wait()
-            self.param_gather_handle = None
-            # Dispatch next bucket's asynchronous param AG only if it has not been dispatched yet.
-            if self.next_param_gather_bucket_group is not None and not skip_next_bucket_dispatch:
-                if self.next_param_gather_bucket_group.param_gather_dispatched:
-                    warnings.warn(
-                        "The next bucket's parameter all-gather operation has already been "
-                        "dispatched. This may be caused by a mismatch between the order of "
-                        "parameter registration and forward pass execution, which will "
-                        "hurt the communication-computation overlap performance."
-                    )
-                else:
-                    self.next_param_gather_bucket_group.start_param_sync()
-
-            # For the mxfp8_param with "reuse_grad_buf_for_mxfp8_param_ag=True",
-            # we need to copy the param_data from the shared_param/grad_buffer to param.data
-            # after the param all-gather.
-            if (
-                self.ddp_config.reuse_grad_buf_for_mxfp8_param_ag
-                and self.ddp_config.overlap_param_gather
-            ):
-                for bucket in self.buckets:
-                    for param in bucket.params:
-                        param_start, param_end = bucket.param_to_index[param]
-                        param_slice = bucket.param_data.view(-1)[param_start:param_end]
-                        param.data.copy_(param_slice.view(param.data.shape))
-                    # All-gathered params are not needed after being copied to param.data.
-                    # Zero out the param buffer (shared with grad buffer) for gradient accumulation.
-                    # We cannot zero out the entire grad buffer because one grad buffer may
-                    # correspond to multiple param buffers. If we zero out the entire grad buffer,
-                    # it would clear the data of those param buffers that have not yet completed AG.
-                    bucket.param_data.zero_()
-
-    def start_grad_sync(self):
+    def start_grad_sync(self, force_all_reduce: Optional[bool] = False):
         """
         Initiates grad sync (all-reduce or reduce-scatter) communication operations
         for all buckets in the bucket group.
@@ -307,9 +165,14 @@ class _ParamAndGradBucketGroup:
         synchronous call.
         """
         args = get_args()
+        if self.is_first_batch and self.grad_reduce_handle is not None:
+            # Make this start_grad_sync call a no-op if in first batch and collective has
+            # already been dispatched.
+            return
+
         assert (
             self.grad_reduce_handle is None
-        ), 'Should not have multiple communication calls outstanding at once'
+        ), "Should not have multiple communication calls outstanding at once"
 
         if self.ddp_config.check_for_nan_in_grad or self.ddp_config.check_for_large_grads:
             self.check_grads(
@@ -360,6 +223,7 @@ class _ParamAndGradBucketGroup:
         else:
             communication_group = self.data_parallel_group
 
+        # Coalesce communication kernels across buckets in the bucket group.
         if args.enable_dynamic_grad_comp and args.compressor is not None:
             # Coalesce communication kernels across buckets in the bucket group.
             compressed_data_list = []
@@ -386,9 +250,11 @@ class _ParamAndGradBucketGroup:
             if args.enable_dynamic_grad_comp:
                 if args.overlap_grad_reduce and args.all_reduce_time:
                     self.timers('DP_time', log_level=0).start()
+
+            grad_reduce_handle = None
             with stream_context, _coalescing_manager(communication_group, async_ops=async_op) as cm:
                 for idx, bucket in enumerate(self.buckets):
-                    if self.ddp_config.use_distributed_optimizer:
+                    if self.ddp_config.use_distributed_optimizer and not force_all_reduce:
                         if self.cached_grad_buffer_shard_list[idx] is None:
                             self.cached_grad_buffer_shard_list[idx] = shard_buffer(
                                 bucket.grad_data, self.intra_distributed_optimizer_instance_size
@@ -396,7 +262,7 @@ class _ParamAndGradBucketGroup:
                         local_data_view = self.cached_grad_buffer_shard_list[idx][
                             self.intra_distributed_optimizer_instance_rank
                         ]
-                        dist_reduce_scatter_func(
+                        grad_reduce_handle = dist_reduce_scatter_func(
                             local_data_view,
                             bucket.grad_data,
                             op=reduce_op,
@@ -404,23 +270,30 @@ class _ParamAndGradBucketGroup:
                             async_op=async_op,
                         )
                     else:
+                        if torch.distributed.get_rank() == 0 and force_all_reduce:
+                            logger.info(
+                                f"Performing reduction using all_reduce because {force_all_reduce=}"
+                            )
                         torch.distributed.all_reduce(
                             bucket.grad_data, op=reduce_op, group=communication_group, async_op=async_op
                         )
         if args.enable_dynamic_grad_comp:
             if args.overlap_grad_reduce and args.all_reduce_time:
                 self.timers('DP_time').stop()
+
         # With multiple DistOpt instances, we need to all-reduce across instances.
         if (
             self.ddp_config.use_distributed_optimizer
             and self.ddp_config.num_distributed_optimizer_instances > 1
         ):
-
             assert self.inter_distributed_optimizer_instance_group is not None
             # Create a new coalescing manager for the inter-instance all-reduce.
-            with stream_context, _coalescing_manager(
-                self.inter_distributed_optimizer_instance_group, async_ops=async_op
-            ) as cm:
+            with (
+                stream_context,
+                _coalescing_manager(
+                    self.inter_distributed_optimizer_instance_group, async_ops=async_op
+                ) as cm,
+            ):
                 for idx, bucket in enumerate(self.buckets):
                     if self.cached_grad_buffer_shard_list[idx] is None:
                         self.cached_grad_buffer_shard_list[idx] = shard_buffer(
@@ -438,7 +311,16 @@ class _ParamAndGradBucketGroup:
                     )
 
         if async_op:
-            self.grad_reduce_handle = cm
+            if self.ddp_config.reduce_scatter_with_fp32_accumulation and not force_all_reduce:
+                assert (
+                    len(self.buckets) == 1
+                ), "Only 1 bucket supported with reduce_scatter_with_fp32_accumulation=True"
+                # torch.distributed._coalescing_manager does not correctly handle calling our custom
+                # collective handle's .wait() method, so we take matters into our own hands here.
+                assert grad_reduce_handle is not None
+                self.grad_reduce_handle = grad_reduce_handle
+            else:
+                self.grad_reduce_handle = cm
         else:
             # When using `_coalescing_manager`, even if a synchronous op (async_op=False) is used,
             # `cm` is not None, which is different from when `_coalescing_manager` is not used in
@@ -447,7 +329,7 @@ class _ParamAndGradBucketGroup:
             # None.
             self.grad_reduce_handle = None
 
-    def finish_grad_sync(self):
+    def finish_grad_sync(self, force_all_reduce: Optional[bool] = False):
         """
         Finishes grad sync (all-reduce or reduce-scatter) communication operations
         for all buckets in the bucket group.
@@ -463,17 +345,24 @@ class _ParamAndGradBucketGroup:
         self.param_gather_dispatched = False
         # If overlap_grad_reduce is False, start (and finish) synchronous communication call here.
         if not self.ddp_config.overlap_grad_reduce:
-            self.start_grad_sync()
+            self.start_grad_sync(force_all_reduce=force_all_reduce)
             return
+        # If first batch, start asynchronous communication here. register_grad_ready() launches
+        # asynchronous communication only once self.golden_per_param_grad_ready_counts is
+        # populated at the end of this first batch.
+        if self.is_first_batch:
+            self.start_grad_sync(force_all_reduce=force_all_reduce)
         # When using multiple DistOpt instances, we don't need to sync here as we launch
         # communications on a separate communication stream.
         if self.ddp_config.num_distributed_optimizer_instances > 1:
             torch.cuda.default_stream().wait_stream(self.communication_stream)
             return
         assert self.grad_reduce_handle is not None, (
-            f'Communication call has not been issued for this bucket '
-            f'({len(self.params_with_grad)}/{len(self.params)} params have grad available)'
+            f"Communication call has not been issued for this bucket "
+            f"({len(self.per_param_grad_ready_counts)}/{len(self.params)} "
+            "params have grad available)"
         )
+
         if args.enable_dynamic_grad_comp:
             if (args.compressor is not None and
                     hasattr(self, '_pending_compressed_data') and
@@ -488,25 +377,6 @@ class _ParamAndGradBucketGroup:
         else:
             self.grad_reduce_handle.wait()
             self.grad_reduce_handle = None
-
-    def register_grad_ready(self, param: torch.nn.Parameter):
-        """
-        Registers grads for the passed-in param to be "ready" for grad sync.
-
-        When the number of microbatches is greater than 1, we only want to register
-        grads as ready when processing the last microbatch and ddp_config.overlap_grad_reduce
-        is True.
-        """
-        assert (
-            self.ddp_config.overlap_grad_reduce
-        ), 'register_grad_ready() should only be called when overlap_grad_reduce is True'
-        if self.is_last_microbatch:
-            assert param in self.param_to_bucket, 'Param is not in the bucket group'
-            assert param not in self.params_with_grad, 'Cannot set grad twice'
-            self.params_with_grad.add(param)
-            # If all params in bucket group have grads available, issue communication call.
-            if len(self.params_with_grad) == len(self.params):
-                self.start_grad_sync()
 
 
 class _ParamAndGradBuffer:

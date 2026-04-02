@@ -39,7 +39,6 @@ class SwappableTensor:
         self.pack_module_name = None
         self.is_firt_same_ptr_tensor = True
 
-
     def launch_d2h(self):
         if self.stat != SwappableTensorStat.DEVICE:
             return

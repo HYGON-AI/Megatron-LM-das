@@ -14,7 +14,6 @@ from megatron.core import mpu
 from megatron.core import parallel_state
 from megatron.core.utils import get_model_config
 from megatron.training.global_vars import get_args
-from ...training.edgc_utils import Utils
 from megatron.core.distributed.finalize_model_grads import (
     _allreduce_conditional_embedding_grads,
     _allreduce_non_tensor_model_parallel_grads,
@@ -23,12 +22,17 @@ from megatron.core.distributed.finalize_model_grads import (
     reset_model_temporary_tensors,
     _update_router_expert_bias
 )
+from megatron.core.pipeline_parallel.utils import get_pp_last_rank
+from megatron.core.process_groups_config import ProcessGroupCollection
+
+from ...training.edgc_utils import Utils
 
 
 def finalize_model_grads(
     model: List[torch.nn.Module],
     num_tokens: Optional[torch.Tensor] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: Optional[bool] = False,
 ):
     """
     All-reduce all model grads across DP replicas, layernorm grads for sequence parallelism,
@@ -163,7 +167,7 @@ def finalize_model_grads(
             if args.enable_dynamic_grad_comp:
                 _update_gradient_compression_state(args)
                 compressor_update(args)
-            model_chunk.finish_grad_sync()
+            model_chunk.finish_grad_sync(force_all_reduce=force_all_reduce)
         if args.enable_dynamic_grad_comp:
             if args.begin_max_rank:
                 args.begin_max_rank = False

@@ -85,4 +85,3 @@ class SwappableTensor(torch.Tensor):
 
     def get_tensor_origin_storage(self):
         return self.inner_tensor_origin_storage_size * self.inner_tensor_origin_storage_ele_size
-

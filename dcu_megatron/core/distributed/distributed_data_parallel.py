@@ -32,6 +32,8 @@ class DistributedDataParallel():
                 param.grad = None
 
                 if self.ddp_config.overlap_grad_reduce:
-                    self.param_to_bucket_group[param].register_grad_ready(param)
+                    self.param_to_bucket_group[param].register_grad_ready(
+                        param, self.force_all_reduce
+                    )
 
         return hook

@@ -165,11 +165,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         adaptor_args = get_adaptor_args()
         if adaptor_args.use_ckpt_memory_cache:
             from ..core.dist_checkpoint.strategies.filesystem_async import write_preloaded_data, preload_tensors
-            from ..core.dist_checkpoint.strategies.cached_metadata_filesystem_reader import CachedMetadataFileSystemReader
-            from ..core.dist_checkpoint.strategies.torch import get_reformulation_metadata
             from ..core.dist_checkpoint.strategies.torch import TorchDistLoadShardedStrategy
 
-            from ..core.dist_checkpoint.validation import _compute_shards_access, _validate_sharding_for_key_flattened
+            from ..core.dist_checkpoint.validation import _compute_shards_access
             from ..core.dist_checkpoint.strategies.fully_parallel import FullyParallelLoadStrategyWrapper
             from ..core.dist_checkpoint.exchange_utils import determine_main_replica_uniform_distribution
 
@@ -178,17 +176,13 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         write_preloaded_data)
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.preload_tensors',
                                         preload_tensors)
-            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.cached_metadata_filesystem_reader.CachedMetadataFileSystemReader',
-                                        CachedMetadataFileSystemReader)
-            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.get_reformulation_metadata',
-                                        get_reformulation_metadata)
-            MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
-                                        TorchDistLoadShardedStrategy)
+            MegatronAdaptation.register_cls_funcs('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
+                                                  [TorchDistLoadShardedStrategy.load,
+                                                   TorchDistLoadShardedStrategy.load_tensors_metadata,
+                                                   TorchDistLoadShardedStrategy.load_sharded_metadata,])
             #ckpt-memory-cache load norm
             MegatronAdaptation.register('megatron.core.dist_checkpointing.validation._compute_shards_access',
                                         _compute_shards_access)
-            MegatronAdaptation.register('megatron.core.dist_checkpointing.validation._validate_sharding_for_key_flattened',
-                                        _validate_sharding_for_key_flattened)
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.fully_parallel.FullyParallelLoadStrategyWrapper.apply_loading_parallelization',
                                         FullyParallelLoadStrategyWrapper.apply_loading_parallelization)
             MegatronAdaptation.register('megatron.core.dist_checkpointing.exchange_utils.determine_main_replica_uniform_distribution',
@@ -289,13 +283,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_extentions(self):
         import transformer_engine as te
 
-        from ..core.extensions.transformer_engine import TEDotProductAttentionPatch
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
-
-        if not is_te_min_version("1.10.0"):
-            # kv channels, te_min_version 1.10.0 -> 1.9.0
-            MegatronAdaptation.register('megatron.core.extensions.transformer_engine.TEDotProductAttention.__init__',
-                                        TEDotProductAttentionPatch.__init__)
 
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)

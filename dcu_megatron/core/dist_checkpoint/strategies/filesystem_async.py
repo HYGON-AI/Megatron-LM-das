@@ -71,13 +71,16 @@ def write_preloaded_data(
 
 @staticmethod
 def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List[WriteBucket]:
-    """Preload tensors in state_dict to host memory through CPU memory
+    """
+    Preloads tensors in `state_dict` to host memory via CPU memory.
+
     Args:
-        write_buckets(List): List of `WriteBucket`,
-                                which includes what to be saved in a checkpoint
+        write_buckets (List): List of `WriteBucket` objects that define what to
+            save in a checkpoint.
         non_blocking (bool, optional): knob to enable pinned D2H memcpy. Default is True.
     """
     result = []
+
     for bucket in write_buckets:
         file_name, storage_key, (bytes_data, tensor_data) = bucket
         tensor_data = [
@@ -86,5 +89,4 @@ def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List
         result.append((file_name, storage_key, (bytes_data, tensor_data)))
     if non_blocking:
         torch.cuda.synchronize()
-
     return result

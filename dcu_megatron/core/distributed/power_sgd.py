@@ -1,9 +1,8 @@
 # PowerSGD with external EFLayoutManager
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Any
-from datetime import datetime
+
 import torch
-import torch.distributed as dist
 from .param_and_grad_buffer import _ParamAndGradBucket
 from megatron.training.utils import print_rank_0
 
@@ -538,7 +537,7 @@ class PowerSGDCompressor:
 
         for (offset, shape), P_shape, Q_shape in zip(param_offsets, P_shapes, Q_shapes):
             if len(shape) == 1:
-                m = shape[0];
+                m = shape[0]
                 n = 1
             else:
                 m = shape[0] if len(shape) >= 1 else 0

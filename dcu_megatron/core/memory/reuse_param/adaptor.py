@@ -16,6 +16,7 @@ from .reuse_distrib_optimizer import (
 )
 from .reuse_optimizer import ConvertFp32BF16
 
+
 @torch.no_grad()
 def prepare_grads(self) -> bool:
     """Pre-processing gradients before the optimizer step, returns whether inf/nan is found."""
@@ -134,6 +135,7 @@ def optimizer_config_init_wrapper(init_func):
 
     return optimizer_config_init
 
+
 # distrib
 def reuse_fp32_param_distrib_optimizer_init_wrapper(init_func):
     @wraps(init_func)
@@ -230,6 +232,7 @@ def reuse_buffer_dis(self, data_parallel_world_size):
                 world_range.start - model_param_bucket_numel_per_dp * (1 + data_parallel_rank) // 2
             shard_main_param_buffer_start = bucket_offset_in_buffer + shard_fp32_param_bucket_offset
             reuse_data_ptr(shard_fp32_from_float16_group[i], model_param_buffer, shard_main_param_buffer_start)
+
 
 def reuse_fp32_param_param_and_grad_buffer_init_wrapper(init_func):
     @wraps(init_func)

@@ -1,4 +1,3 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import torch
 from megatron.core import mpu
 from torch.utils.checkpoint import detach_variable

@@ -47,7 +47,10 @@ class LanguageModule():
         ):
             self.shared_embedding_or_output_weight().shared_embedding = True
 
-        if (self.post_process or getattr(self, 'mtp_process', False)) and not self.has_vocab_embedding:
+        if (
+            (self.post_process and self.share_embeddings_and_output_weights)
+            or getattr(self, 'mtp_process', False)
+        ) and not self.has_vocab_embedding:
             # disabled the following assertion, intended behavior in vocab parallel (TODO dongcl)
             # assert not (
             #     is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(self.pp_group)

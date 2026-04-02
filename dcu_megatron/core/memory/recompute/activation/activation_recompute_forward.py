@@ -1,4 +1,3 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import torch
 import torch.nn.functional as F
 

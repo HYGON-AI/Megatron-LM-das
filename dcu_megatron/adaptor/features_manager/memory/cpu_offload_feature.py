@@ -39,7 +39,6 @@ class CPUOffloadFeature(AbstractFeature):
         from dcu_megatron.core.transformer.mlp import MLP
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
-        from dcu_megatron.core.extensions.transformer_engine import te_module_init_wrapper
         from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_wrapper
         from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
         from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput

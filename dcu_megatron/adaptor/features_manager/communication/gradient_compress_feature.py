@@ -42,8 +42,10 @@ class GradientCompressFeature(AbstractFeature):
         if args.enable_dynamic_grad_comp:
             patch_manager.register_patch('megatron.core.distributed.finalize_model_grads.finalize_model_grads',
                                         finalize_model_grads)
-            patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup',
-                                        _ParamAndGradBucketGroup)
+            patch_manager.register_cls_funcs('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup',
+                                             [_ParamAndGradBucketGroup.__init__,
+                                              _ParamAndGradBucketGroup.start_grad_sync,
+                                              _ParamAndGradBucketGroup.finish_grad_sync,])
             patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer._new_bucket',
                                         _ParamAndGradBuffer._new_bucket)
             patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucket',
