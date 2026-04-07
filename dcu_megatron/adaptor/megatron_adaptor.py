@@ -377,7 +377,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.initialize import _set_random_seed
         from ..training.training import train_step
         from ..training.training import setup_model_and_optimizer
-        from ..training.datasets import _get_ltor_masks_and_position_ids
+        # from ..training.datasets import _get_ltor_masks_and_position_ids
         from ..training.utils import get_batch_on_this_tp_rank
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
@@ -407,8 +407,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         # support sft
         MegatronAdaptation.register('megatron.training.tokenizer.sft_tokenizer.SFTTokenizer.pad',
                                     pad)
-        MegatronAdaptation.register('megatron.training.datasets.sft_dataset.SFTDataset._get_ltor_masks_and_position_ids',
-                                    _get_ltor_masks_and_position_ids)
+        # MegatronAdaptation.register('megatron.training.datasets.sft_dataset.SFTDataset._get_ltor_masks_and_position_ids',
+        #                             _get_ltor_masks_and_position_ids)
 
         # (1) dualpipev, (2) vocabulary parallelism
         MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)

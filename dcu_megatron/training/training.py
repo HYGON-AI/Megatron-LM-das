@@ -6,7 +6,8 @@ import inspect
 import logging
 import os
 import sys
-from typing import Optional
+# from typing import Optional
+from typing import Any, Optional, Dict
 
 import torch.distributed
 
@@ -51,6 +52,9 @@ except ImportError:
     CallWrapper = type(None)
 
 from megatron.core.enums import ModelType
+from megatron.core.optimizer import get_megatron_optimizer, AdamOptimizerConfig, SGDOptimizerConfig, OptimizerConfig, ParamKey
+from megatron.core.optimizer.muon import get_megatron_muon_optimizer
+from megatron.core.optimizer import get_standard_config_overrides
 from megatron.core import mpu, tensor_parallel
 from megatron.core.transformer.module import Float16Module
 
@@ -689,12 +693,184 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     return model
 
 
+# def setup_model_and_optimizer(
+#     model_provider_func,
+#     model_type,
+#     no_wd_decay_cond=None,
+#     scale_lr_cond=None,
+#     lr_mult=1.0,
+#     checkpointing_context=None,
+# ):
+#     """Setup model and optimizer."""
+#     args = get_args()
+#     timers = get_timers()
+#     one_logger = get_one_logger()
+
+#     if has_nvidia_modelopt:
+#         from megatron.post_training.checkpointing import has_modelopt_state
+#         # [ModelOpt]: Check if the checkpoint is a ModelOpt checkpoint and
+#         # set a flag to use our model provider if so.
+#         if args.load is not None and has_modelopt_state(args.load):
+#             print_rank_0(f'ModelOpt checkpoint detected')
+#             args.modelopt_enabled = True
+#         elif getattr(args, "export_kd_teacher_load", None):
+#             # For distillation ckpts without ModelOpt state
+#             args.modelopt_enabled = True
+
+#     model = get_model(model_provider_func, model_type)
+#     unwrapped_model = unwrap_model(model)
+
+#     one_logger and one_logger.log_metrics({"app_build_optimzer_start_time": one_logger_utils.get_timestamp_in_ms()})
+#     kwargs = {}
+#     for f in dataclasses.fields(OptimizerConfig):
+#         if hasattr(args, f.name):
+#             kwargs[f.name] = getattr(args, f.name)
+#     config = OptimizerConfig(**kwargs)
+#     config.timers = timers
+#     optimizer = get_megatron_optimizer(
+#         config,
+#         model,
+#         no_wd_decay_cond,
+#         scale_lr_cond,
+#         lr_mult,
+#         use_gloo_process_groups=args.enable_gloo_process_groups,
+#         # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
+#         #  to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
+#         default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
+#     )
+#     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
+#     one_logger and one_logger.log_metrics({"app_build_optimzer_finish_time": one_logger_utils.get_timestamp_in_ms()})
+
+#     if args.moe_use_upcycling:
+#         torch.distributed.barrier()
+#         assert not checkpoint_exists(args.save), (
+#             "The upcycling destination directory already exists. "
+#             "Please check if --moe-use-upcycling is mistakenly enabled. "
+#             "Upcycling should only be set for the first run when converting the dense model. "
+#             "All subsequent runs should remove this flag. "
+#         )
+#         # before changing moe related global args, save them in local variables
+#         num_experts = args.num_experts
+#         expert_model_parallel_size = args.expert_model_parallel_size
+#         moe_ffn_hidden_size = args.ffn_hidden_size
+
+#         # set dense model related args in to global args before getting dense model
+#         args.num_experts = None
+#         args.expert_model_parallel_size = 1
+#         args.ffn_hidden_size = moe_ffn_hidden_size * args.moe_upcycling_granularity
+
+#         # get dense model
+#         dense_model_for_upcycling = get_model(model_provider_func, model_type)
+
+#         # recover moe upcycling related args in global args before executing upcycling
+#         args.num_experts = num_experts
+#         args.expert_model_parallel_size = expert_model_parallel_size
+#         args.ffn_hidden_size = moe_ffn_hidden_size
+
+#         # execute upcycling
+#         _, args.num_floating_point_operations_so_far = upcycling_utils.load_and_upcycle_model(
+#             load_checkpoint,
+#             unwrapped_model,
+#             dense_model_for_upcycling,
+#             load_kwargs={
+#                 'model': dense_model_for_upcycling,
+#                 'optimizer': None,
+#                 'opt_param_scheduler': None,
+#             },
+#         )
+#         args.iteration = 1
+#         save_checkpoint(
+#             args.iteration, model, None, None, args.num_floating_point_operations_so_far
+#         )
+#         torch.distributed.barrier()
+#         del dense_model_for_upcycling
+#         if (args.fp16 or args.bf16) and optimizer is not None:
+#             optimizer.reload_model_params()
+#         print_rank_0(f'Upcycled checkpoint saved to {args.save}')
+
+#     if (
+#             args.load is not None or args.pretrained_checkpoint is not None
+#     ) and not args.moe_use_upcycling:
+#         one_logger and one_logger.log_metrics(
+#             {'load_checkpoint_start_time': one_logger_utils.get_timestamp_in_ms()}
+#         )
+#         timers('load-checkpoint', log_level=0).start(barrier=True)
+
+#         args.iteration, args.num_floating_point_operations_so_far = load_checkpoint(
+#             model,
+#             optimizer,
+#             opt_param_scheduler,
+#             checkpointing_context=checkpointing_context,
+#             skip_load_to_model_and_opt=HAVE_FSDP2
+#                                        and getattr(args, "use_torch_fsdp2", False)
+#                                        and args.ckpt_format == "torch_dist",
+#         )
+#         timers('load-checkpoint').stop(barrier=True)
+#         timers.log(['load-checkpoint'])
+#         one_logger and one_logger.log_metrics(
+#             {
+#                 'load_checkpoint_finish_time': one_logger_utils.get_timestamp_in_ms(),
+#                 'load_checkpoint_time': timers('load-checkpoint').active_time(),
+#             }
+#         )
+#         if args.iteration != 0 and args.enable_dynamic_grad_comp:
+#             args.is_loading_checkpoint = True
+#             args.latest_iteration = args.iteration
+#             Utils.loss = read_data_from_csv(args.loss_path, args.latest_iteration)
+#             Utils.mapped_rank = read_data_from_csv(args.mapped_rank_path, args.latest_iteration)
+
+#         if is_rank0():
+#             # iter——log写文件
+#             iter_log_path = os.path.join(args.load, 'last_ckpt_iter_log.txt')
+#             try:
+#                 with open(iter_log_path, 'r') as f:
+#                     content = f.read()
+#                     current_time = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+#                     updated_iter_log = current_time + content[20:]
+#                     print_rank_0(f"{updated_iter_log}")
+#             except FileNotFoundError:
+#                 pass
+
+#     else:
+#         args.iteration = 0
+#         args.num_floating_point_operations_so_far = 0
+
+#     # get model without FP16 and/or DDP wrappers
+#     if (
+#             args.iteration == 0
+#             and len(unwrapped_model) == 1
+#             and hasattr(unwrapped_model[0], 'init_state_dict_from_bert')
+#     ):
+#         print_rank_0("Initializing ICT from pretrained BERT model")
+#         unwrapped_model[0].init_state_dict_from_bert()
+#         if args.fp16:
+#             optimizer.reload_model_params()
+
+#     # Convert checkpoint format.
+#     if args.ckpt_convert_format is not None:
+#         load_ckpt_format = args.ckpt_format
+#         args.ckpt_format = args.ckpt_convert_format
+#         args.save = os.path.join(args.ckpt_convert_save, args.ckpt_convert_format)
+#         update_use_dist_ckpt(args)
+
+#         save_checkpoint(
+#             args.iteration,
+#             model,
+#             optimizer,
+#             opt_param_scheduler,
+#             args.num_floating_point_operations_so_far,
+#             preprocess_common_state_dict_fn=preprocess_common_state_dict,
+#         )
+
+#         print_rank_0("> converted checkpoint: %s -> %s." % (load_ckpt_format, args.ckpt_format))
+#         torch.distributed.barrier()
+#         exit()
+
+#     return model, optimizer, opt_param_scheduler
+
 def setup_model_and_optimizer(
     model_provider_func,
     model_type,
-    no_wd_decay_cond=None,
-    scale_lr_cond=None,
-    lr_mult=1.0,
     checkpointing_context=None,
 ):
     """Setup model and optimizer."""
@@ -702,39 +878,38 @@ def setup_model_and_optimizer(
     timers = get_timers()
     one_logger = get_one_logger()
 
-    if has_nvidia_modelopt:
-        from megatron.post_training.checkpointing import has_modelopt_state
-        # [ModelOpt]: Check if the checkpoint is a ModelOpt checkpoint and
-        # set a flag to use our model provider if so.
-        if args.load is not None and has_modelopt_state(args.load):
-            print_rank_0(f'ModelOpt checkpoint detected')
-            args.modelopt_enabled = True
-        elif getattr(args, "export_kd_teacher_load", None):
-            # For distillation ckpts without ModelOpt state
-            args.modelopt_enabled = True
-
-    model = get_model(model_provider_func, model_type)
+    wrap_with_ddp = not args.skip_train
+    model = get_model(model_provider_func, model_type, wrap_with_ddp=wrap_with_ddp)
     unwrapped_model = unwrap_model(model)
 
     one_logger and one_logger.log_metrics({"app_build_optimzer_start_time": one_logger_utils.get_timestamp_in_ms()})
-    kwargs = {}
-    for f in dataclasses.fields(OptimizerConfig):
-        if hasattr(args, f.name):
-            kwargs[f.name] = getattr(args, f.name)
-    config = OptimizerConfig(**kwargs)
-    config.timers = timers
-    optimizer = get_megatron_optimizer(
-        config,
-        model,
-        no_wd_decay_cond,
-        scale_lr_cond,
-        lr_mult,
-        use_gloo_process_groups=args.enable_gloo_process_groups,
-        # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
-        #  to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
-        default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
-    )
-    opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
+    if args.skip_train:
+        optimizer, opt_param_scheduler = None, None
+    else:
+        config, config_overrides = get_megatron_optimizer_config(args)
+        config.timers = timers
+
+        if 'muon' not in config.optimizer:
+            # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
+            # to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
+            # default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
+            optimizer = get_megatron_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                dump_param_to_param_group_map=args.dump_param_to_param_group_map,
+            )
+        else:
+            optimizer = get_megatron_muon_optimizer(
+                config,
+                model,
+                config_overrides=config_overrides,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer='dist' in config.optimizer,
+            )
+        opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
+
     one_logger and one_logger.log_metrics({"app_build_optimzer_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
     if args.moe_use_upcycling:
@@ -785,7 +960,7 @@ def setup_model_and_optimizer(
         print_rank_0(f'Upcycled checkpoint saved to {args.save}')
 
     if (
-            args.load is not None or args.pretrained_checkpoint is not None
+        args.load is not None or args.pretrained_checkpoint is not None
     ) and not args.moe_use_upcycling:
         one_logger and one_logger.log_metrics(
             {'load_checkpoint_start_time': one_logger_utils.get_timestamp_in_ms()}
@@ -798,8 +973,8 @@ def setup_model_and_optimizer(
             opt_param_scheduler,
             checkpointing_context=checkpointing_context,
             skip_load_to_model_and_opt=HAVE_FSDP2
-                                       and getattr(args, "use_torch_fsdp2", False)
-                                       and args.ckpt_format == "torch_dist",
+            and getattr(args, "use_torch_fsdp2", False)
+            and args.ckpt_format == "torch_dist",
         )
         timers('load-checkpoint').stop(barrier=True)
         timers.log(['load-checkpoint'])
@@ -809,33 +984,15 @@ def setup_model_and_optimizer(
                 'load_checkpoint_time': timers('load-checkpoint').active_time(),
             }
         )
-        if args.iteration != 0 and args.enable_dynamic_grad_comp:
-            args.is_loading_checkpoint = True
-            args.latest_iteration = args.iteration
-            Utils.loss = read_data_from_csv(args.loss_path, args.latest_iteration)
-            Utils.mapped_rank = read_data_from_csv(args.mapped_rank_path, args.latest_iteration)
-
-        if is_rank0():
-            # iter——log写文件
-            iter_log_path = os.path.join(args.load, 'last_ckpt_iter_log.txt')
-            try:
-                with open(iter_log_path, 'r') as f:
-                    content = f.read()
-                    current_time = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-                    updated_iter_log = current_time + content[20:]
-                    print_rank_0(f"{updated_iter_log}")
-            except FileNotFoundError:
-                pass
-
     else:
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0
 
     # get model without FP16 and/or DDP wrappers
     if (
-            args.iteration == 0
-            and len(unwrapped_model) == 1
-            and hasattr(unwrapped_model[0], 'init_state_dict_from_bert')
+        args.iteration == 0
+        and len(unwrapped_model) == 1
+        and hasattr(unwrapped_model[0], 'init_state_dict_from_bert')
     ):
         print_rank_0("Initializing ICT from pretrained BERT model")
         unwrapped_model[0].init_state_dict_from_bert()
@@ -863,6 +1020,34 @@ def setup_model_and_optimizer(
         exit()
 
     return model, optimizer, opt_param_scheduler
+
+
+def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
+    """Return a Megatron optimizer config object from Megatron's arguments."""
+
+    config = None
+    if args.optimizer == 'adam' or 'muon' in args.optimizer:
+        # TODO(deyuf): Muon needs both adam + muon but get() only receive one config
+        # So for now we keep using adam config that's back compat with old way
+        kwargs = {}
+        for f in dataclasses.fields(AdamOptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        config = AdamOptimizerConfig(**kwargs)
+    elif args.optimizer == 'sgd':
+        kwargs = {}
+        for f in dataclasses.fields(SGDOptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        config = SGDOptimizerConfig(**kwargs)
+    else:
+        raise ValueError("Invalid optimizer type!")
+
+    # Construct the appropriate config_overrides object. This default handles many cases, but
+    #  can be added to as needed by the user, or replaced entirely with a custom override.
+    config_overrides = get_standard_config_overrides(config=config)
+
+    return config, config_overrides
 
 
 def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func):
@@ -1505,6 +1690,7 @@ def train(
         config,
         checkpointing_context,
         non_loss_data_func,
+        inference_model=None,
 ):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
