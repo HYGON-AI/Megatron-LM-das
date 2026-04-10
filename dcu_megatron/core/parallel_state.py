@@ -1,6 +1,5 @@
 import time
 import inspect
-import warnings
 from functools import wraps
 from collections import defaultdict
 from datetime import timedelta
@@ -204,6 +203,7 @@ def initialize_model_parallel_wrapper(fn):
         use_sharp: bool = False,
         context_parallel_size: int = 1,
         hierarchical_context_parallel_sizes: Optional[List[int]] = None,
+        hybrid_context_parallel: bool = False,
         expert_model_parallel_size: int = 1,
         num_distributed_optimizer_instances: int = 1,
         expert_tensor_parallel_size: Optional[int] = None,
@@ -215,6 +215,7 @@ def initialize_model_parallel_wrapper(fn):
         create_gloo_process_groups: bool = True,
         high_priority_stream_groups: Optional[List[str]] = None,
         sharp_enabled_group: Optional[str] = None,
+        create_all_gather_group: Optional[bool] = False,
     ) -> None:
         fn(
             tensor_model_parallel_size=tensor_model_parallel_size,
@@ -224,6 +225,7 @@ def initialize_model_parallel_wrapper(fn):
             use_sharp=use_sharp,
             context_parallel_size=context_parallel_size,
             hierarchical_context_parallel_sizes=hierarchical_context_parallel_sizes,
+            hybrid_context_parallel=hybrid_context_parallel,
             expert_model_parallel_size=expert_model_parallel_size,
             num_distributed_optimizer_instances=num_distributed_optimizer_instances,
             expert_tensor_parallel_size=expert_tensor_parallel_size,
@@ -235,6 +237,7 @@ def initialize_model_parallel_wrapper(fn):
             create_gloo_process_groups=create_gloo_process_groups,
             high_priority_stream_groups=high_priority_stream_groups,
             sharp_enabled_group=sharp_enabled_group,
+            create_all_gather_group=create_all_gather_group,
         )
 
         global _LM_HEAD_MODEL_PARALLEL_GROUP

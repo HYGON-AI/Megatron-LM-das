@@ -18,8 +18,6 @@ from megatron.core.models.common.model_chunk_schedule_plan import TransformerLay
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan as MegatronTransformerModelChunkSchedulePlan
 from megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
 
-from dcu_megatron.core.pipeline_parallel import fine_grained_offloading_set_last_layer
-
 
 F_DISPATCH_B_MLP_SYNC_EVENT = None
 B_MLP_B_DISPATCH_SYNC_EVENT = torch.cuda.Event()
@@ -475,8 +473,6 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            if f_layer.layer.config.fine_grained_activation_offloading:
-                fine_grained_offloading_set_last_layer(i == f_num_layers - 1)
             torch.cuda.nvtx.range_push(f"layer_{i}f")
             f_input, _ = layer_schedule_plan_cls.run(f_layer, None, f_input=f_input)
             torch.cuda.nvtx.range_pop()

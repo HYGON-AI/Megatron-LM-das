@@ -93,6 +93,7 @@ class _Llama3Tokenizer(MegatronLegacyTokenizer):
     def eod(self):
         return self.eod_id
 
+
 class _Qwen2Tokenizer(MegatronLegacyTokenizer):
     def __init__(self, vocab_file, merge_file,extra_vocab_size=0):
         super().__init__(vocab_file, merge_file)

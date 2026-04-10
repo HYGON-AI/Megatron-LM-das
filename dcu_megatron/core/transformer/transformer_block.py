@@ -29,37 +29,6 @@ from megatron.core.utils import (
 )
 from megatron.core.transformer.transformer_layer import BaseTransformerLayer
 
-from dcu_megatron.core.pipeline_parallel import (
-    fine_grained_offloading_set_last_layer,
-)
-
-
-GPTBlockWithMTP = False
-
-def get_gpt_block_with_mtp():
-    global GPTBlockWithMTP
-    return GPTBlockWithMTP
-
-
-def set_gpt_block_with_mtp(gpt_block_with_mtp):
-    global GPTBlockWithMTP
-    GPTBlockWithMTP = gpt_block_with_mtp
-
-
-class GPTBlockWithMTPContextManager:
-    """A reusable context manager for switch GPTBlockWithMTP"""
-
-    def __init__(self, gpt_block_with_mtp):
-        self.gpt_block_with_mtp = gpt_block_with_mtp
-
-    def __enter__(self):
-        self.origin_gpt_block_with_mtp = get_gpt_block_with_mtp()
-        set_gpt_block_with_mtp(self.gpt_block_with_mtp)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        set_gpt_block_with_mtp(self.origin_gpt_block_with_mtp)
-
 
 def _get_block_submodules(
     config: TransformerConfig,
@@ -112,7 +81,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
         post_layer_norm: bool = True,
         pre_process: bool = True,
         post_process: bool = True,
-        pg_collection: ProcessGroupCollection = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
         noop_block: bool = False,
         force_layer_norm: bool = False,
@@ -122,6 +91,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
+        self.tp_group = pg_collection.tp
 
         pp_group = self.pg_collection.pp if hasattr(self.pg_collection, 'pp') else None
         pp_rank = get_pg_rank(pp_group)
@@ -176,9 +146,6 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                 eps=self.config.layernorm_epsilon,
             )
 
-        # activation offload
-        self.is_mtp_in_model = get_gpt_block_with_mtp()
-
     def forward(
         self,
         hidden_states: Union[Tensor, WrappedTensor],
@@ -193,10 +160,11 @@ class TransformerBlock(MegatronCoreTransformerBlock):
         inference_context: Optional[BaseInferenceContext] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         sequence_len_offset: Optional[Tensor] = None,
+        padding_mask: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
-        micro_sp_idx=None,
         dynamic_inference_decode_only: Optional[bool] = None,
+        micro_sp_idx=None,
     ):
         """
         Perform the forward pass through the transformer block.
@@ -303,7 +271,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                     use_inner_quantization_context=use_inner_quantization_context,
-                    micro_sp_idx=micro_sp_idx
+                    padding_mask=padding_mask,
+                    micro_sp_idx=micro_sp_idx,
                 )
             else:
                 for l_no, layer in enumerate(self.layers):
@@ -322,11 +291,6 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     else:
                         inner_quantization_context = nullcontext()
 
-                    if self.config.fine_grained_activation_offloading:
-                        fine_grained_offloading_set_last_layer(
-                            False if self.is_mtp_in_model else l_no == self.num_layers_per_pipeline_rank - 1
-                        )
-
                     with self.offload_context, inner_quantization_context:
                         hidden_states, context = layer(
                             hidden_states=hidden_states,
@@ -341,7 +305,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                             inference_context=inference_context,
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset,
-                            micro_sp_idx=micro_sp_idx
+                            padding_mask=padding_mask,
+                            micro_sp_idx=micro_sp_idx,
                         )
 
                     if (
@@ -382,13 +347,20 @@ class TransformerBlock(MegatronCoreTransformerBlock):
         attention_bias: Tensor,
         packed_seq_params: PackedSeqParams,
         use_inner_quantization_context: bool,
+        padding_mask: Optional[Tensor] = None,
         micro_sp_idx=None,
     ):
         """Forward method with activation checkpointing."""
 
         def custom(start: int, end: int):
             def custom_forward(
-                hidden_states, attention_mask, context, context_mask, rotary_pos_emb, micro_sp_idx_=None,
+                hidden_states,
+                attention_mask,
+                context,
+                context_mask,
+                rotary_pos_emb,
+                padding_mask=None,
+                micro_sp_idx_=None,
             ):
                 for index in range(start, end):
                     layer = self._get_layer(index)
@@ -419,7 +391,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                             attention_bias=attention_bias,
                             inference_context=None,
                             packed_seq_params=packed_seq_params,
-                            micro_sp_idx=micro_sp_idx_
+                            padding_mask=padding_mask,
+                            micro_sp_idx=micro_sp_idx_,
                         )
                 return hidden_states, context
 
@@ -439,6 +412,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
+                    padding_mask,
                 )
             else:
                 micro_sp_idx_ = None if micro_sp_idx is None else torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
@@ -450,6 +424,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
+                    padding_mask,
                     micro_sp_idx_,
                 )
 

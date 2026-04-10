@@ -221,10 +221,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_transformers(self):
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
-        from ..core.transformer.attention import attention_init_wrapper, SelfAttention
-        from ..core.transformer.moe.experts import te_grouped_mlp_init_wrapper
-        from ..core.transformer.transformer_layer import transformer_layer_init_wrapper
-        from ..core.transformer.mlp import mlp_init_wrapper
+        from ..core.transformer.attention import attention_init_wrapper, self_attention_get_query_key_value_tensors_wrapper
         from ..core.transformer.moe.experts import TEGroupedMLP
 
         # Transformer config, add new params
@@ -237,7 +234,8 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     moe_layer_forward_wrapper)
         # use_qk_norm
         MegatronAdaptation.register('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
-                                    SelfAttention.get_query_key_value_tensors)
+                                    self_attention_get_query_key_value_tensors_wrapper,
+                                    apply_wrapper=True)
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
@@ -245,20 +243,11 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
                                     attention_init_wrapper,
                                     apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.__init__',
-                                    te_grouped_mlp_init_wrapper,
-                                    apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.transformer_layer.TransformerLayer.__init__',
-                                    transformer_layer_init_wrapper,
-                                    apply_wrapper=True)
-        MegatronAdaptation.register('megatron.core.transformer.mlp.MLP.__init__',
-                                    mlp_init_wrapper,
-                                    apply_wrapper=True)
 
         from ..core.transformer.attention import Attention
         from ..core.transformer.transformer_block import TransformerBlock
         from ..core.transformer.transformer_layer import TransformerLayer
-        from ..core.transformer.multi_latent_attention import MultiLatentAttention
+        from ..core.transformer.multi_latent_attention import multi_latent_attention_forward_wrapper
 
         MegatronAdaptation.register(
             'megatron.core.transformer.transformer_block.TransformerBlock._checkpointed_forward',
@@ -271,7 +260,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.forward',
                                     Attention.forward)
         MegatronAdaptation.register('megatron.core.transformer.multi_latent_attention.MultiLatentAttention.forward',
-                                    MultiLatentAttention.forward)
+                                    multi_latent_attention_forward_wrapper,
+                                    apply_wrapper=True)
 
     def patch_core_tokenizers(self):
         from ..core.tokenizers.text.utils.build_tokenizer import build_tokenizer_wrapper
@@ -370,14 +360,13 @@ class CoreAdaptation(MegatronAdaptationABC):
                                         apply_wrapper=True)
 
     def patch_training(self):
-        from ..training.tokenizer import build_tokenizer_wrapper, pad
+        from ..training.tokenizer import build_tokenizer_wrapper, SFTTokenizer
         from ..training.initialize import _initialize_distributed
         from ..training.initialize import _compile_dependencies
         from ..training.training import train
         from ..training.initialize import _set_random_seed
         from ..training.training import train_step
         from ..training.training import setup_model_and_optimizer
-        # from ..training.datasets import _get_ltor_masks_and_position_ids
         from ..training.utils import get_batch_on_this_tp_rank
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
@@ -406,9 +395,7 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # support sft
         MegatronAdaptation.register('megatron.training.tokenizer.sft_tokenizer.SFTTokenizer.pad',
-                                    pad)
-        # MegatronAdaptation.register('megatron.training.datasets.sft_dataset.SFTDataset._get_ltor_masks_and_position_ids',
-        #                             _get_ltor_masks_and_position_ids)
+                                    SFTTokenizer.pad)
 
         # (1) dualpipev, (2) vocabulary parallelism
         MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
@@ -455,14 +442,14 @@ class LegacyAdaptation(MegatronAdaptationABC):
     def patch_legacy_models(self):
         from ..legacy.model.transformer import (
             parallel_mlp_init_wrapper,
-            ParallelAttentionPatch,
+            ParallelAttention,
             parallel_attention_init_wrapper,
-            ParallelTransformerLayerPatch,
-            ParallelTransformerPatch
+            ParallelTransformerLayer,
+            ParallelTransformer
         )
         from ..legacy.model.utils import get_norm
-        from ..legacy.model.language_model import TransformerLanguageModelPatch
-        from ..legacy.model.gpt_model import GPTModelPatch
+        from ..legacy.model.language_model import TransformerLanguageModel
+        from ..legacy.model.gpt_model import GPTModel
 
         # ParallecMLP
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelMLP.__init__',
@@ -474,7 +461,7 @@ class LegacyAdaptation(MegatronAdaptationABC):
                                     parallel_attention_init_wrapper,
                                     apply_wrapper=True)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelAttention.forward',
-                                    ParallelAttentionPatch.forward)
+                                    ParallelAttention.forward)
 
         # rms_norm.RMSNorm
         MegatronAdaptation.register('megatron.legacy.model.rms_norm.RMSNorm.forward',
@@ -484,15 +471,15 @@ class LegacyAdaptation(MegatronAdaptationABC):
                                     get_norm)
 
         MegatronAdaptation.register('megatron.legacy.model.language_model.TransformerLanguageModel.forward',
-                                    TransformerLanguageModelPatch.forward)
+                                    TransformerLanguageModel.forward)
         MegatronAdaptation.register('megatron.legacy.model.gpt_model.GPTModel.forward',
-                                    GPTModelPatch.forward)
+                                    GPTModel.forward)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelTransformerLayer.forward',
-                                    ParallelTransformerLayerPatch.forward)
+                                    ParallelTransformerLayer.forward)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelTransformer.forward',
-                                    ParallelTransformerPatch.forward)
+                                    ParallelTransformer.forward)
         MegatronAdaptation.register('megatron.legacy.model.transformer.ParallelTransformer._checkpointed_forward',
-                                    ParallelTransformerPatch._checkpointed_forward)
+                                    ParallelTransformer._checkpointed_forward)
 
 
 MegatronAdaptation.execute()
