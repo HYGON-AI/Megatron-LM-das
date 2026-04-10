@@ -5,15 +5,11 @@ import torch
 from torch import Tensor
 
 from megatron.training import get_args
+from megatron.core.transformer.enums import LayerType
 from megatron.core import InferenceParams, parallel_state
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.pipeline_parallel.utils import is_vp_last_stage
 from megatron.core.transformer.multi_token_prediction import get_mtp_layer_offset
-
-from dcu_megatron.core.pipeline_parallel import (
-    fine_grained_offloading_set_last_layer,
-)
 
 
 def tie_word_embeddings_state_dict_wrapper(fn):
@@ -32,12 +28,8 @@ def get_mtp_num_layers_to_build(
 ) -> int:
     """Get the number of MTP layers to build."""
 
-    if pp_rank is None:
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-    is_first_pp_stage = pp_rank == 0
-    is_last_pp_stage = pp_rank == config.pipeline_model_parallel_size - 1
-
     args = get_args()
+    is_first_pp_stage = pp_rank == 0
     dualpipev_first_chunk = getattr(model, "dualpipev_first_chunk", False) if model is not None else getattr(args, "dualpipev_first_chunk", False)
     if args.schedule_method == "dualpipev":
         if is_first_pp_stage and not dualpipev_first_chunk:
@@ -45,11 +37,22 @@ def get_mtp_num_layers_to_build(
         else:
             return 0
 
-    vp_size = config.virtual_pipeline_model_parallel_size
-    if is_vp_last_stage(vp_stage=vp_stage, vp_size=vp_size) and is_last_pp_stage:
-        return config.mtp_num_layers if config.mtp_num_layers else 0
+    if config.pipeline_model_parallel_layout is not None:
+        # If we have a custom PP layout, get the number of mtp layers in the layout array.
+        num_layers_to_build = config.pipeline_model_parallel_layout.get_num_layers_to_build(
+            layer_type=LayerType.mtp, vp_stage=vp_stage
+        )
+        assert num_layers_to_build == config.mtp_num_layers or num_layers_to_build == 0, (
+            f"Currently, we only support put all of MTP layers on the last pipeline stage, "
+            f"so the number of MTP layers to build ({num_layers_to_build}) must match "
+            f"mtp_num_layers ({config.mtp_num_layers}) or be 0."
+        )
     else:
-        return 0
+        if parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage):
+            num_layers_to_build = config.mtp_num_layers if config.mtp_num_layers else 0
+        else:
+            num_layers_to_build = 0
+    return num_layers_to_build
 
 
 class MultiTokenPredictionLayer:
@@ -65,16 +68,16 @@ class MultiTokenPredictionBlock:
         position_ids: Tensor,
         hidden_states: Tensor,
         attention_mask: Tensor,
-        context: Tensor = None,
-        context_mask: Tensor = None,
-        rotary_pos_emb: Tensor = None,
-        rotary_pos_cos: Tensor = None,
-        rotary_pos_sin: Tensor = None,
-        attention_bias: Tensor = None,
-        inference_params: InferenceParams = None,
-        packed_seq_params: PackedSeqParams = None,
-        sequence_len_offset: Tensor = None,
-        extra_block_kwargs: dict = None,
+        context: Optional[Tensor] = None,
+        context_mask: Optional[Tensor] = None,
+        rotary_pos_emb: Optional[Tensor] = None,
+        rotary_pos_cos: Optional[Tensor] = None,
+        rotary_pos_sin: Optional[Tensor] = None,
+        attention_bias: Optional[Tensor] = None,
+        inference_params: Optional[InferenceParams] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+        sequence_len_offset: Optional[Tensor] = None,
+        extra_block_kwargs: Optional[dict] = None,
         embedding=None,
     ) -> Tensor:
         """
@@ -98,13 +101,10 @@ class MultiTokenPredictionBlock:
             embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
         # get hidden states from previous mtp stages
-        offset = get_mtp_layer_offset(self.config)
+        offset = get_mtp_layer_offset(self.config, self.vp_stage)
         hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))
         hidden_states = hidden_states_list[offset]
         for layer_number in range(len(self.layers)):
-            if self.config.fine_grained_activation_offloading:
-                fine_grained_offloading_set_last_layer(layer_number == len(self.layers) - 1)
-
             (hidden_states, input_ids, position_ids) = self.layers[layer_number](
                 input_ids=input_ids,
                 position_ids=position_ids,

@@ -4,6 +4,7 @@ from typing import Union
 from functools import wraps
 from megatron.training.arguments import add_megatron_arguments
 from megatron.core.msc_utils import MultiStorageClientFeature
+from megatron.training.utils import warn_rank_0
 
 from dcu_megatron.adaptor.features_manager import ADAPTOR_FEATURES
 
@@ -71,7 +72,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     if not args.enable_msc:
         MultiStorageClientFeature.disable()
         assert MultiStorageClientFeature.is_enabled() is False
-        print('WARNING: The MSC feature is disabled.')
+        warn_rank_0('WARNING: The MSC feature is disabled.')
 
     return args
 

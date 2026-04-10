@@ -1,12 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
-
-from abc import ABC, abstractmethod
-from typing import Callable, Optional
-
 import torch
-from torch.autograd import Variable
 
-from megatron.core import parallel_state
 from megatron.core.pipeline_parallel.utils import stream_acquire_context, make_viewless
 from megatron.core.pipeline_parallel.utils import ScheduleNode as MegatronCoreScheduleNode
 
@@ -120,23 +113,14 @@ class ScheduleNode(MegatronCoreScheduleNode):
             for g in output_grad:
                 if g is not None:
                     g.record_stream(self.stream)
+                    # Manually trigger the memory release of dgrad tensor
+                    # to avoid delayed garbage collection. If
+                    # delay_grads_release is True, dgrad is last used in
+                    # wgrad compute and skip the release here.
+                    if self.manual_release_grads and not self.delay_grads_release:
+                        g.untyped_storage().resize_(0)
 
         grads = self.get_grad()
         self._release_state()
 
         return grads
-
-
-class VppContextManager:
-    """A reusable context manager for switch vpp stage"""
-
-    def __init__(self, vpp_rank):
-        self.vpp_rank = vpp_rank
-
-    def __enter__(self):
-        self.origin_vpp_rank = parallel_state.get_virtual_pipeline_model_parallel_rank()
-        parallel_state.set_virtual_pipeline_model_parallel_rank(self.vpp_rank)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        parallel_state.set_virtual_pipeline_model_parallel_rank(self.origin_vpp_rank)
