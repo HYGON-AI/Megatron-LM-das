@@ -54,36 +54,10 @@ def transformer_config_post_init_wrapper(post_init_func):
         if self.recompute_granularity == 'selective':
             if len(self.recompute_modules) > 0:
                 modules_set = set(self.recompute_modules)
-                assert not ('moe' in modules_set and ('experts' in modules_set or 'router' in modules_set)), (
-                    "'moe' cannot be used together with 'experts' or 'router' in recompute_modules. "
-                    "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
-                )
-
-        # offload activations
-        if self.fine_grained_activation_offloading:
-            assert (
-                not self.cpu_offloading
-            ), "offload_activation can not be used with cpu_offloading"
-
-        if self.offload_modules is None:
-            self.offload_modules = ["core_attn"]
-
-        if len(self.offload_modules) > 0:
-            allowed_modules = {
-                "attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "expert_fc2",
-                "shared_fc1", "shared_fc2", "moe_act"
-            }
-            invalid_modules = set(self.offload_modules) - allowed_modules
-            assert not invalid_modules, (
-                f'Invalid choices for offload_modules: {invalid_modules}. '
-                f'Allowed modules are: {allowed_modules}'
-            )
-
-            if "attn_proj" in self.offload_modules and "core_attn" not in self.offload_modules:
-                raise ValueError(
-                    "attn_proj cannot be set to offload_modules alone without core_attn "
-                    "because the input of attn_proj is the output of core_attn, "
-                    "which is needed in core_attn.backward()."
-                )
+                if 'experts' in modules_set or 'router' in modules_set:
+                    assert 'moe' not in modules_set, (
+                        "'moe' cannot be used together with 'experts' or 'router' in recompute_modules. "
+                        "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
+                    )
 
     return wrapper

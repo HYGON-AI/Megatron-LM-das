@@ -52,7 +52,9 @@ def get_gpt_layer_with_flux_spec(
     qk_l2_norm: Optional[bool] = False,
     use_te_op_fuser: Optional[bool] = False,  # pylint: disable=unused-argument
     use_kitchen: bool = False,  # pylint: disable=unused-argument
-    use_te_activation_func: bool = False, # pylint: disable=unused-argument
+    use_te_activation_func: bool = False,  # pylint: disable=unused-argument
+    use_kitchen_attention: bool = False,  # pylint: disable=unused-argument
+    kitchen_attention_backend: str = "sdpa",  # pylint: disable=unused-argument
 ) -> ModuleSpec:
     """Use this spec to use flux modules (required for fp8 training).
 
@@ -61,6 +63,7 @@ def get_gpt_layer_with_flux_spec(
         num_experts (int, optional): Number of experts. Defaults to None.
         moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
         qk_layernorm (bool, optional): To use layernorm for queries/keys. Defaults to False.
+        multi_latent_attention (bool, optional): To use MLA. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
         moe_use_legacy_grouped_gemm (bool, optional): Force use the legacy GroupedMLP.
                                                       Defaults to False.

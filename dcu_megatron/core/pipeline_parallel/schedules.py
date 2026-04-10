@@ -1,6 +1,5 @@
 import contextlib
 from functools import wraps
-from typing import Callable, Iterator, List, Optional, Union
 
 import torch
 
@@ -18,7 +17,6 @@ from megatron.core.timers import Timer
 
 from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
 from .ripipe_schedules import forward_backward_ripipe_pipelining
-from .fine_grained_activation_offload import fine_grained_offloading_reset
 from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
 from dcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
@@ -56,45 +54,6 @@ def get_forward_backward_func_wrapper(fn):
             return forward_backward_ripipe_pipelining
         else:
             raise ValueError(f"schedule_method {args.schedule_method} is not supported")
-
-    return wrapper
-
-
-def forward_backward_pipelining_wrapper(fn):
-    @wraps(fn)
-    def wrapper(
-        *,
-        forward_step_func,
-        data_iterator: Union[Iterator, List[Iterator]],
-        model: Union[torch.nn.Module, List[torch.nn.Module]],
-        num_microbatches: int,
-        seq_length: int,
-        micro_batch_size: int,
-        decoder_seq_length: Optional[int] = None,
-        forward_only: bool = False,
-        collect_non_loss_data: bool = False,
-        first_val_step: Optional[bool] = None,
-        adjust_tensor_shapes_fn: Optional[Callable] = None,
-    ):
-
-        args = get_args()
-
-        if not forward_only and args.fine_grained_activation_offloading:
-            fine_grained_offloading_reset()
-
-        return fn(
-            forward_step_func=forward_step_func,
-            data_iterator=data_iterator,
-            model=model,
-            num_microbatches=num_microbatches,
-            seq_length=seq_length,
-            micro_batch_size=micro_batch_size,
-            decoder_seq_length=decoder_seq_length,
-            forward_only=forward_only,
-            collect_non_loss_data=collect_non_loss_data,
-            first_val_step=first_val_step,
-            adjust_tensor_shapes_fn=adjust_tensor_shapes_fn
-        )
 
     return wrapper
 
@@ -145,7 +104,9 @@ def forward_step_calc_loss(
         if get_args().enable_vocab_parallel:
             output_tensor = output_tensor.transpose(0, 1).contiguous()
 
-        if not collect_non_loss_data:
+        if loss_func is None:
+            forward_data_store.append(output_tensor)
+        elif not collect_non_loss_data:
             outputs = loss_func(output_tensor)
             if len(outputs) == 3:
                 output_tensor, num_tokens, loss_reduced = outputs
@@ -187,7 +148,7 @@ def forward_step_calc_loss(
         if config.calculate_per_token_loss:
             MoEAuxLossAutoScaler.set_loss_scale(loss_scale)
         else:
-            MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+            MoEAuxLossAutoScaler.set_loss_scale(loss_scale * cp_group_size / num_microbatches)
 
     # Set the loss scale for Multi-Token Prediction (MTP) loss.
     if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:

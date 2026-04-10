@@ -175,7 +175,7 @@ class PipelineFeature(AbstractFeature):
             )
             from dcu_megatron.training.training import evaluate
             from dcu_megatron.core.transformer.transformer_layer import get_transformer_layer_offset
-            from dcu_megatron.training.training import pretrain
+            from dcu_megatron.training.training import build_train_valid_test_data_iterators_wrapper
             from dcu_megatron.core.models.gpt.gpt_model import GPTModel
             from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
             from dcu_megatron.training.global_vars import _set_tensorboard_writer, _set_wandb_writer, _set_one_logger
@@ -201,7 +201,9 @@ class PipelineFeature(AbstractFeature):
                 'megatron.core.transformer.transformer_layer.get_transformer_layer_offset', get_transformer_layer_offset)
 
             # support dualpipev, two data iterators
-            patch_manager.register_patch('megatron.training.training.pretrain', pretrain)
+            patch_manager.register_patch('megatron.training.training.build_train_valid_test_data_iterators',
+                                         build_train_valid_test_data_iterators_wrapper,
+                                         apply_wrapper=True)
 
             # (1) introduce an attribute dualpipev_first_chunk. (2) remove embedding when using dualpipev
             patch_manager.register_patch(

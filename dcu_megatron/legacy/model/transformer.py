@@ -11,7 +11,6 @@ from megatron.core import tensor_parallel
 from megatron.core.utils import deprecate_inference_params
 from megatron.legacy.model.enums import AttnType
 from megatron.core.models.common.embeddings import apply_rotary_pos_emb
-from megatron.legacy.model.module import MegatronModule
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.legacy.model.transformer import bias_dropout_add_fused_inference, bias_dropout_add_fused_train, get_bias_dropout_add
 from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_attn_varlen_backward
@@ -257,6 +256,7 @@ class FlashSeqSelfAttention(torch.nn.Module):
             output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
             return output.contiguous()
 
+
 def parallel_attention_init_wrapper(fn):
     @wraps(fn)
     def wrapper(self, *args, **kwargs):
@@ -275,7 +275,7 @@ def parallel_attention_init_wrapper(fn):
     return wrapper
 
 
-class ParallelAttentionPatch(MegatronModule):
+class ParallelAttention():
     """Parallel self-attention layer abstract class.
 
     Self-attention layer takes input with size [s, b, h]
@@ -433,6 +433,7 @@ class ParallelAttentionPatch(MegatronModule):
                 self.num_attention_heads_per_partition // self.num_query_groups_per_partition,
                 dim = 2
             )
+
         args = get_args()
         from dcu_megatron.core.pipeline_parallel.seq1f1b.sp_utils import get_splits
         # apply relative positional encoding (rotary embedding)
@@ -485,7 +486,7 @@ class ParallelAttentionPatch(MegatronModule):
         return output, bias
 
 
-class ParallelTransformerLayerPatch(MegatronModule):
+class ParallelTransformerLayer():
     """A single transformer layer.
 
         Transformer layer takes input with size [s, b, h] and returns an
@@ -493,24 +494,13 @@ class ParallelTransformerLayerPatch(MegatronModule):
     """
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, enc_dec_attn_mask=None,
-                retriever_input=None,
-                retriever_output=None,
-                retriever_attn_mask=None,
                 inference_context=None,
                 rotary_pos_emb=None,
-                micro_sp_idx=None,
                 *,
-                inference_params=None):
+                inference_params=None,
+                micro_sp_idx=None,):
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
-        # Update the params in case the retro param changes during inference
-        # TODO: better redesign with inference param
-        args = get_args()
-        if args.retro_add_retriever:
-            self.retro_num_neighbors = args.retro_num_neighbors
-            self.retro_chunk_length = args.retro_chunk_length
-            self.retro_retrieved_length = \
-                args.retro_num_retrieved_chunks * args.retro_chunk_length
 
         # hidden_states: [s, b, h]
 
@@ -523,7 +513,8 @@ class ParallelTransformerLayerPatch(MegatronModule):
                 norm_output,
                 attention_mask,
                 inference_context=inference_context,
-                rotary_pos_emb=rotary_pos_emb, micro_sp_idx=micro_sp_idx)
+                rotary_pos_emb=rotary_pos_emb,
+                micro_sp_idx=micro_sp_idx)
 
         # Residual connection.
         if self.apply_residual_connection_post_norm:
@@ -572,24 +563,6 @@ class ParallelTransformerLayerPatch(MegatronModule):
                     norm_input,
                     norm_output,
                     bias_dropout_add_func)
-        elif self.layer_type == LayerType.retro_encoder:
-            norm_input, norm_output = \
-                self.retro_encoder_cross_attention(
-                    retriever_output,
-                    norm_input,
-                    norm_output,
-                    bias_dropout_add_func)
-        elif self.layer_type in (LayerType.retro_decoder,
-                                 LayerType.retro_decoder_with_retriever):
-            retriever_output, norm_input, norm_output = \
-                self.retro_decoder_cross_attention(
-                    retriever_input,
-                    retriever_output,
-                    retriever_attn_mask,
-                    norm_input,
-                    norm_output,
-                    inference_context,
-                    bias_dropout_add_func)
         else:
             raise Exception("Unsupported layer type, '%s'." %
                             self.layer_type.name)
@@ -631,13 +604,10 @@ class ParallelTransformerLayerPatch(MegatronModule):
                                               training=self.training)
             output = residual + self.drop_path(out)
 
-        if self.layer_type == LayerType.retro_decoder_with_retriever:
-            return output, retriever_output
-        else:
-            return output
+        return output
 
 
-class ParallelTransformerPatch(MegatronModule):
+class ParallelTransformer():
 
     def _checkpointed_forward(self, hidden_states, attention_mask,
                               encoder_output, enc_dec_attn_mask,
@@ -673,7 +643,7 @@ class ParallelTransformerPatch(MegatronModule):
                         hidden_states, attention_mask, encoder_output,
                         enc_dec_attn_mask, **te_forward_kwargs)
                 else:
-                    micro_sp_idx = torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
+                    micro_sp_idx = None if micro_sp_idx is None else torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
                     hidden_states = tensor_parallel.checkpoint(
                         custom(l, l + self.recompute_num_layers),
                         self.distribute_saved_activations,
@@ -698,7 +668,7 @@ class ParallelTransformerPatch(MegatronModule):
                             hidden_states, attention_mask, encoder_output,
                             enc_dec_attn_mask, **te_forward_kwargs)
                     else:
-                        micro_sp_idx = torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
+                        micro_sp_idx = None if micro_sp_idx is None else torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
                         hidden_states = tensor_parallel.checkpoint(
                             custom(l, l + 1),
                             self.distribute_saved_activations,
@@ -711,7 +681,7 @@ class ParallelTransformerPatch(MegatronModule):
                             hidden_states, attention_mask, encoder_output,
                             enc_dec_attn_mask, **te_forward_kwargs)
                     else:
-                        micro_sp_idx = torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
+                        micro_sp_idx = None if micro_sp_idx is None else torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
                         hidden_states = custom(l, l + 1)(
                             hidden_states, attention_mask,
                             encoder_output, enc_dec_attn_mask,
@@ -721,12 +691,8 @@ class ParallelTransformerPatch(MegatronModule):
 
         return hidden_states
 
-
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, enc_dec_attn_mask=None,
-                retriever_input=None,
-                retriever_output=None,
-                retriever_attn_mask=None,
                 inference_context=None,
                 rotary_pos_emb=None,
                 *,
@@ -813,9 +779,6 @@ class ParallelTransformerPatch(MegatronModule):
                             forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
                     else:
                         forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
-                        forward_kwargs['retriever_input'] = retriever_input
-                        forward_kwargs['retriever_output'] = retriever_output
-                        forward_kwargs['retriever_attn_mask'] = retriever_attn_mask
                         forward_kwargs['micro_sp_idx'] = micro_sp_idx
 
                     for index in range(self.num_layers):
@@ -825,14 +788,6 @@ class ParallelTransformerPatch(MegatronModule):
                             hidden_states,
                             attention_mask,
                             **forward_kwargs)
-
-                        # First Retro decoder layer returns both hidden_states
-                        # and retriever_output. Make retriever_output available
-                        # to subsequence Retro layers.
-                        if isinstance(hidden_states, tuple):
-                            assert len(hidden_states) == 2
-                            hidden_states, retriever_output = hidden_states
-                            forward_kwargs["retriever_output"] = retriever_output
 
                 # Skip counter update for eval and activation checkpointing
                 if torch.is_grad_enabled() and self.training:
