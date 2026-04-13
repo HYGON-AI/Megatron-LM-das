@@ -1,4 +1,3 @@
-import os
 from argparse import ArgumentParser
 
 from ..feature import AbstractFeature
@@ -34,14 +33,9 @@ class CPUOffloadFeature(AbstractFeature):
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
         from dcu_megatron.core.transformer.attention import Attention
-        from dcu_megatron.core.transformer.multi_latent_attention import MultiLatentAttention
         from dcu_megatron.core.transformer.moe.experts import TEGroupedMLP
-        from dcu_megatron.core.transformer.mlp import MLP
-        from dcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from dcu_megatron.core.transformer.transformer_block import TransformerBlock
-        from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_wrapper
         from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
-        from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
         from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
 
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.preprocess_for_fine_grained_offloading',
@@ -54,35 +48,15 @@ class CPUOffloadFeature(AbstractFeature):
 
         patch_manager.register_patch('megatron.core.transformer.attention.Attention.forward',
                                      Attention.forward)
-        patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MultiLatentAttention.forward',
-                                     MultiLatentAttention.forward)
 
         patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                      TEGroupedMLP.forward)
-
-        patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_with_interleaving',
-                                     forward_backward_pipelining_wrapper,
-                                     apply_wrapper=True)
-
-        patch_manager.register_patch('megatron.core.transformer.mlp.MLP.forward',
-                                     MLP.forward)
-        patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_without_interleaving',
-                                     forward_backward_pipelining_wrapper,
-                                     apply_wrapper=True)
-
-        patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer._forward_attention',
-                                     TransformerLayer._forward_attention)
 
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.forward',
                                      TransformerBlock.forward)
 
         patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionBlock.forward',
                                      MultiTokenPredictionBlock.forward)
-
-        patch_manager.register_cls_funcs('megatron.core.tensor_parallel.random.CheckpointWithoutOutput',
-                                         [CheckpointWithoutOutput.checkpoint,
-                                          CheckpointWithoutOutput._recompute],
-                                         create_dummy=True)
 
         patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
                                      build_layer_callables_without_split_attn)

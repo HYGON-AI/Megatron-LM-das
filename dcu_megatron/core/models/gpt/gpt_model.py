@@ -31,7 +31,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.models.gpt.gpt_model import GPTModel as MegatronCoreGPTModel
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
 
-from dcu_megatron.core.transformer.transformer_block import TransformerBlock, GPTBlockWithMTPContextManager
+from dcu_megatron.core.transformer.transformer_block import TransformerBlock
 from dcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
 from dcu_megatron.core.tensor_parallel import VocabParallelOutput
 
@@ -89,7 +89,7 @@ def gpt_model_postprocess(
     if not self.post_process:
         return hidden_states
 
-    if self.mtp_process:
+    if self.config.mtp_num_layers is not None:
         mtp_labels = labels.clone()
         hidden_states_list = torch.chunk(hidden_states, 1 + self.config.mtp_num_layers, dim=0)
         hidden_states = hidden_states_list[0]
@@ -104,9 +104,19 @@ def gpt_model_postprocess(
                 runtime_gather_output=runtime_gather_output,
             )
             # Calc loss for the current Multi-Token Prediction (MTP) layers.
-            mtp_labels, _ = roll_tensor(mtp_labels, shifts=-1, dims=-1, cp_group=self.cp_group)
+            mtp_labels, _ = roll_tensor(
+                mtp_labels,
+                shifts=-1,
+                dims=-1,
+                cp_group=self.cp_group,
+                packed_seq_params=packed_seq_params,
+            )
             loss_mask, num_tokens = roll_tensor(
-                loss_mask, shifts=-1, dims=-1, cp_group=self.cp_group
+                loss_mask,
+                shifts=-1,
+                dims=-1,
+                cp_group=self.cp_group,
+                packed_seq_params=packed_seq_params,
             )
             mtp_loss = self.compute_language_model_loss(mtp_labels, mtp_logits)
             mtp_loss = loss_mask * mtp_loss
@@ -132,6 +142,7 @@ def gpt_model_postprocess(
                 )
 
     sequence_parallel_override = False
+
     if in_inference_mode and inference_context.materialize_only_last_token_logits:
         if inference_context.is_static_batching():
             hidden_states = hidden_states[-1:, :, :]
@@ -140,8 +151,6 @@ def gpt_model_postprocess(
                 # Perform the sequence parallel gather here instead of after the output layer
                 # because we need to slice the last token logits from the full view of the
                 # packed logits across all requests.
-                # TODO(ksanthanam): Make the equivalent change in the `MambaModel` code after
-                # merging in !3722.
                 hidden_states = gather_from_sequence_parallel_region(
                     hidden_states, group=self.pg_collection.tp
                 )
@@ -149,7 +158,7 @@ def gpt_model_postprocess(
                 sequence_parallel_override = True
 
             # Reshape [B, 1, H] to [1, B, H] → extract each sample’s true last‐token hidden
-            # state ([B, H]) → unsqueeze back to [1, B, H]
+            # state ([B, H]) → unsqueeze back to [B, 1, H]
             # (so that the output layer, which expects S×B×H, receives only the final token)
             hidden_states = inference_context.last_token_logits(
                 hidden_states.squeeze(1).unsqueeze(0)
@@ -355,18 +364,17 @@ class GPTModel:
         self.rotary_pos_emb_cache = {}
 
         # Transformer.
-        with GPTBlockWithMTPContextManager(self.mtp_process):
-            self.decoder = TransformerBlock(
-                config=self.config,
-                spec=transformer_layer_spec,
-                pre_process=self.pre_process,
-                post_process=self.post_process,
-                pg_collection=self.pg_collection,
-                vp_stage=vp_stage,
-                noop_block=self.noop_block,
-                force_layer_norm=self.include_layer_norm,
-                post_layer_norm=not get_args().enable_vocab_parallel,
-            )
+        self.decoder = TransformerBlock(
+            config=self.config,
+            spec=transformer_layer_spec,
+            pre_process=self.pre_process,
+            post_process=self.post_process,
+            pg_collection=self.pg_collection,
+            vp_stage=vp_stage,
+            noop_block=self.noop_block,
+            force_layer_norm=self.include_layer_norm,
+            post_layer_norm=not get_args().enable_vocab_parallel,
+        )
 
         if self.mtp_process:
             self.mtp = MultiTokenPredictionBlock(

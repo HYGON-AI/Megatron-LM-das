@@ -1,15 +1,60 @@
 """Megatron initialization."""
+import os
 import random
 import time
 import numpy as np
 import torch
-import warnings
 
 from datetime import timedelta
+from functools import wraps
 
 from megatron.training import get_args
 from megatron.training import inprocess_restart
 from megatron.core import mpu, tensor_parallel
+from megatron.core.utils import is_torch_min_version
+from megatron.training.utils import print_rank_0, warn_rank_0
+
+
+def initialize_megatron_wrapper(initialize_megatron_func):
+    @wraps(initialize_megatron_func)
+    def wrapper(
+        extra_args_provider=None,
+        args_defaults={},
+        ignore_unknown_args=False,
+        allow_no_cuda=False,
+        skip_mpu_initialization=False,
+        get_embedding_ranks=None,
+        get_position_embedding_ranks=None,
+        parsed_args=None,
+        store=None,
+    ):
+
+        initialize_megatron_func(
+            extra_args_provider=extra_args_provider,
+            args_defaults=args_defaults,
+            ignore_unknown_args=ignore_unknown_args,
+            allow_no_cuda=allow_no_cuda,
+            skip_mpu_initialization=skip_mpu_initialization,
+            get_embedding_ranks=get_embedding_ranks,
+            get_position_embedding_ranks=get_position_embedding_ranks,
+            parsed_args=parsed_args,
+            store=store,
+        )
+
+        args = get_args()
+        def _initialize_additional_paths_and_state(args):
+            args.is_loading_checkpoint = False
+            args.latest_iteration = 0
+            log_dir = args.collect_log_path
+            os.makedirs(log_dir, exist_ok=True)
+            args.loss_path = os.path.join(log_dir, 'loss.csv')
+            mapped_rank_filename = f"mapped_rank_{torch.distributed.get_rank()}.csv"
+            args.mapped_rank_path = os.path.join(log_dir, mapped_rank_filename)
+
+        if args.enable_dynamic_grad_comp:
+            _initialize_additional_paths_and_state(args)
+
+    return wrapper
 
 
 def _compile_dependencies():
@@ -48,13 +93,10 @@ def _compile_dependencies():
     )
     # Print a warning.
     if not ((args.fp16 or args.bf16) and custom_kernel_constraint and args.masked_softmax_fusion):
-        if args.rank == 0:
-            print(
-                "WARNING: constraints for invoking optimized"
-                " fused softmax kernel are not met. We default"
-                " back to unfused kernel invocations.",
-                flush=True,
-            )
+        warn_rank_0(
+            "Constraints for invoking optimized fused softmax kernel are not met. "
+            "We default back to unfused kernel invocations."
+        )
 
     # Always build on rank zero first.
     if torch.distributed.get_rank() == 0:
@@ -85,18 +127,13 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
     device_count = torch.cuda.device_count()
     if torch.distributed.is_initialized():
 
-        if args.rank == 0:
-            print(
-                "torch distributed is already initialized, " "skipping initialization ...",
-                flush=True,
-            )
+        print_rank_0("torch distributed is already initialized, skipping initialization ...")
         args.rank = torch.distributed.get_rank()
         args.world_size = torch.distributed.get_world_size()
 
     else:
 
-        if args.rank == 0:
-            print("> initializing torch distributed ...", flush=True)
+        print_rank_0("> initializing torch distributed ...")
         # Manually set the device ids.
         if device_count > 0:
             torch.cuda.set_device(args.local_rank)
@@ -117,6 +154,12 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
             'init_method': args.dist_url,
             'timeout': timedelta(minutes=args.distributed_timeout_minutes),
         }
+        if args.fake_process_group:
+            assert is_torch_min_version("2.3.0"), "Fake process group is only supported with PyTorch 2.3.0 and above."
+            from torch.testing._internal.distributed.fake_pg import FakeStore
+            store = FakeStore()
+            init_process_group_kwargs['backend'] = 'fake'
+            init_process_group_kwargs['store'] = store
 
         torch.distributed.init_process_group(**init_process_group_kwargs)
         inprocess_restart.maybe_force_nccl_backend_init(device_id)
@@ -135,6 +178,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 use_sharp=args.use_sharp,
                 context_parallel_size=args.context_parallel_size,
                 hierarchical_context_parallel_sizes=args.hierarchical_context_parallel_sizes,
+                hybrid_context_parallel=args.hybrid_context_parallel,
                 expert_model_parallel_size=args.expert_model_parallel_size,
                 num_distributed_optimizer_instances=args.num_distributed_optimizer_instances,
                 expert_tensor_parallel_size=args.expert_tensor_parallel_size,
@@ -146,16 +190,16 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 create_gloo_process_groups=args.enable_gloo_process_groups,
                 high_priority_stream_groups=args.high_priority_stream_groups,
                 sharp_enabled_group=args.sharp_enabled_group,
+                create_all_gather_group=args.create_all_gather_group,
             )
-            if args.rank == 0:
-                print(
-                    f"> initialized tensor model parallel with size "
-                    f"{mpu.get_tensor_model_parallel_world_size()}"
-                )
-                print(
-                    f"> initialized pipeline model parallel with size "
-                    f"{mpu.get_pipeline_model_parallel_world_size()}"
-                )
+            print_rank_0(
+                f"> initialized tensor model parallel with size "
+                f"{mpu.get_tensor_model_parallel_world_size()}"
+            )
+            print_rank_0(
+                f"> initialized pipeline model parallel with size "
+                f"{mpu.get_pipeline_model_parallel_world_size()}"
+            )
 
 
 def _set_random_seed(

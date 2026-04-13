@@ -25,9 +25,9 @@ class RecomputeActivationFeature(AbstractFeature):
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.memory.recompute.activation.adaptor import dcu_activation_recompute_forward
-        from dcu_megatron.core.transformer.transformer import parallel_transformer_layer_init_wrapper
+        from dcu_megatron.core.transformer.transformer_layer import transformer_layer_init_wrapper
 
         if getattr(args, self.feature_name, None):
             patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.__init__',
-                                          parallel_transformer_layer_init_wrapper)
+                                          transformer_layer_init_wrapper)
             patch_manager.register_patch('megatron.core.transformer.mlp.MLP.forward', dcu_activation_recompute_forward)

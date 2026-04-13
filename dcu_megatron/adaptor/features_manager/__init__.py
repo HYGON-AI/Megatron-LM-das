@@ -5,7 +5,7 @@ from .optimizer.optimizer_feature import OptimizerFeature
 from .communication.gradient_compress_feature import GradientCompressFeature
 from .communication.quantize_comm_feature import QuantizeCommFeature
 from .memory.swap_attention_feature import SwapAttentionFeature
-from .memory.cpu_offload_feature import CPUOffloadFeature
+# from .memory.cpu_offload_feature import CPUOffloadFeature
 from .recompute.activation_function import RecomputeActivationFeature
 
 ADAPTOR_FEATURES = [
@@ -16,6 +16,6 @@ ADAPTOR_FEATURES = [
     GradientCompressFeature(),
     QuantizeCommFeature(),
     SwapAttentionFeature(),
-    CPUOffloadFeature(),
+    # CPUOffloadFeature(),
     RecomputeActivationFeature(),
 ]

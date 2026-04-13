@@ -1,11 +1,9 @@
 from typing import Optional
 from megatron.core.utils import deprecate_inference_params
 from megatron.core.inference.contexts import BaseInferenceContext
-from megatron.legacy.model.module import MegatronModule
 
 
-
-class TransformerLanguageModelPatch(MegatronModule):
+class TransformerLanguageModel():
     """Transformer language model.
 
     Args:
@@ -26,9 +24,6 @@ class TransformerLanguageModelPatch(MegatronModule):
         dec_input_ids=None,
         dec_position_ids=None,
         dec_attn_mask=None,
-        retriever_input_ids=None,
-        retriever_position_ids=None,
-        retriever_attn_mask=None,
         enc_dec_attn_mask=None,
         tokentype_ids=None,
         inference_context=None,
@@ -37,7 +32,7 @@ class TransformerLanguageModelPatch(MegatronModule):
         output_enc_hidden=False,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
-        micro_sp_idx=None
+        micro_sp_idx=None,
     ):
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -49,14 +44,6 @@ class TransformerLanguageModelPatch(MegatronModule):
             )
         else:
             encoder_input = None
-
-        # Retriever embedding.
-        if self.add_retriever and self.pre_process:
-            retriever_input = self.embedding(
-                retriever_input_ids, retriever_position_ids, tokentype_ids=tokentype_ids
-            )
-        else:
-            retriever_input = None
 
         # Rotary positional embeddings
         rotary_pos_emb = None
@@ -72,11 +59,9 @@ class TransformerLanguageModelPatch(MegatronModule):
                 encoder_output = self.encoder(
                     encoder_input,
                     enc_attn_mask,
-                    retriever_input=retriever_input,
-                    retriever_attn_mask=retriever_attn_mask,
                     inference_context=inference_context,
                     rotary_pos_emb=rotary_pos_emb,
-                    micro_sp_idx=micro_sp_idx
+                    micro_sp_idx=micro_sp_idx,
                 )
             else:
                 encoder_output = self.encoder_hidden_state

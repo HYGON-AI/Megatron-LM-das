@@ -36,7 +36,7 @@ class GradientCompressFeature(AbstractFeature):
         from dcu_megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup, _ParamAndGradBuffer, \
             _ParamAndGradBucket
         from dcu_megatron.training.training import save_checkpoint_and_time_wrapper
-        from dcu_megatron.training.training import pretrain
+        from dcu_megatron.training.initialize import initialize_megatron_wrapper
 
         # edgc相关功能函数替换
         if args.enable_dynamic_grad_comp:
@@ -54,5 +54,7 @@ class GradientCompressFeature(AbstractFeature):
             patch_manager.register_patch('megatron.training.training.save_checkpoint_and_time',
                                         save_checkpoint_and_time_wrapper,
                                         apply_wrapper=True)
-            patch_manager.register_patch('megatron.training.training.pretrain',
-                                        pretrain)
+
+            patch_manager.register_patch('megatron.training.initialize.initialize_megatron',
+                                        initialize_megatron_wrapper,
+                                        apply_wrapper=True)

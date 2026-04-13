@@ -2,32 +2,31 @@ import contextlib
 from typing import Optional, Tuple, Union
 from functools import wraps
 
+from sympy import im
 import torch
 import transformer_engine as te
 from torch import Tensor
+from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_attn_varlen_backward
+
 from megatron.training import get_args
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+    FineGrainedActivationOffloadingInterface as off_interface,
+)
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.typed_torch import apply_module
 from megatron.core.utils import (
     deprecate_inference_params,
     is_fa_min_version,
-    is_te_min_version,
+    is_using_quantization_scales,
     nvtx_range_pop,
     nvtx_range_push,
-    divide,
-    get_pg_size,
 )
 
-from abc import ABC
-from megatron.core.transformer.attention import SelfAttentionSubmodules, CrossAttentionSubmodules
-from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.spec_utils import ModuleSpec, build_module
-from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_attn_varlen_backward
-from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
@@ -37,33 +36,7 @@ try:
 except ImportError:
     rearrange = None
 
-try:
-    import transformer_engine  # pylint: disable=unused-import
-
-    HAVE_TE = True
-    from megatron.core.extensions.transformer_engine import (
-        SplitAlongDim,
-        TELinear,
-        set_save_original_input,
-    )
-except ImportError:
-    HAVE_TE = False
-    SplitAlongDim, TELinear, set_save_original_input = None, None, None
-
-try:
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward
-    from flashattn_hopper.flash_attn_interface import (
-        flash_attn_with_kvcache as flash_attn3_with_kvcache,
-    )
-
-    HAVE_FA3 = True
-except:
-    HAVE_FA3 = False
-
-try:
-    from megatron.core.extensions.transformer_engine import SplitAlongDim
-except ImportError:
-    SplitAlongDim = None
+from megatron.core.transformer.attention import HAVE_FA3
 
 try:
     from transformer_engine.pytorch.attention.rope import apply_fused_qkv_rotary_pos_emb
@@ -71,13 +44,6 @@ try:
     HAVE_FUSED_QKV_ROPE = True
 except ImportError:
     HAVE_FUSED_QKV_ROPE = False
-
-from dcu_megatron.core.pipeline_parallel import (
-    fine_grained_offloading_group_commit,
-    fine_grained_offloading_group_start,
-    get_fine_grained_offloading_context,
-)
-from .utils import get_delay_release_qkv_linear_tensor
 
 
 def attention_init_wrapper(attention_init_func):
@@ -89,8 +55,8 @@ def attention_init_wrapper(attention_init_func):
         layer_number,
         attn_mask_type,
         attention_type,
-        cp_comm_type=None,
-        pg_collection=None,
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
     ):
         attention_init_func(
             self,
@@ -103,31 +69,12 @@ def attention_init_wrapper(attention_init_func):
             pg_collection=pg_collection,
         )
 
-        # if (self.offload_qkv_linear or self.offload_attn_proj) and not HAVE_OFFLOAD_CONTENT_MANAGER:
-        #     raise ImportError(f"fail to import ActivationOffloadContextManager")
-
         args = get_args()
         if args.pipe_sp_splits != 1:
             self.core_attention_flash = FlashSeqSelfAttention(
                 causal=True, softmax_scale=self.config.softmax_scale, attention_dropout=self.config.attention_dropout
             )
-        else:
-            self.split_qkv = False
 
-            self.offload_qkv_linear = (
-                    config.fine_grained_activation_offloading
-                    and "qkv_linear" in config.offload_modules
-            )
-
-            self.offload_core_attention = (
-                    config.fine_grained_activation_offloading
-                    and "core_attn" in config.offload_modules
-            )
-
-            self.offload_attn_proj = (
-                    config.fine_grained_activation_offloading
-                    and "attn_proj" in config.offload_modules
-            )
     return wrapper
 
 
@@ -317,7 +264,7 @@ class Attention():
         *,
         inference_params: Optional[BaseInferenceContext] = None,
         micro_sp_idx=None,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Perform a forward pass through the attention module.
 
@@ -342,7 +289,6 @@ class Attention():
             (Tuple[Tensor, Tensor]) Attention output and bias.
 
         """
-
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
         no_rope = (
@@ -408,25 +354,31 @@ class Attention():
                 self.config.fused_single_qkv_rope and split_qkv
             ), "fused_single_qkv_rope requested but not available/supported for the config."
 
-        if self.offload_qkv_linear:
-            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
-        with get_fine_grained_offloading_context(self.offload_qkv_linear):
+        with off_interface(self.offload_qkv_linear, hidden_states, "qkv_linear") as hidden_states:
             qkv_output = self.get_query_key_value_tensors(
-                hidden_states, key_value_states, split_qkv=split_qkv
+                hidden_states,
+                key_value_states,
+                split_qkv=split_qkv,
+                output_gate=self.config.attention_output_gate,
             )
         if self.offload_qkv_linear:
-            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
-            qkv_output = fine_grained_offloading_group_commit(
-                *qkv_output,
-                name="qkv_linear",
-                forced_released_tensors=[hidden_states],
-                delay_release_module=delay_release_module
+            # `qkv_output` may be a tuple; commit supports tuple/list and will keep structure.
+            qkv_output = off_interface.group_commit(
+                qkv_output, name="qkv_linear", forced_released_tensors=[]
             )
         attn_mask_type = self.attn_mask_type
         block_table = None
+        gate = None
         if split_qkv:
-            query, key, value = qkv_output
+            if self.config.attention_output_gate:
+                query, key, value, gate = qkv_output
+            else:
+                query, key, value = qkv_output
+            mixed_qkv = qkv_split_arg_list = None
         else:
+            assert (
+                not self.config.attention_output_gate
+            ), "attention_output_gate is not supported for unsplit mixed_qkv tensor."
             mixed_qkv, qkv_split_arg_list = qkv_output
         nvtx_range_pop(suffix="qkv")
 
@@ -468,7 +420,7 @@ class Attention():
         if (
             in_decode_mode
             and self.config.cuda_graph_impl == "local"
-            and self.config.cuda_graph_scope != "full_iteration"
+            and CudaGraphScope.full_iteration not in self.config.cuda_graph_scope
             and inference_context.is_static_batching()
         ):
             raise ValueError(f"CUDA graphs must use flash decode with static batching!")
@@ -488,11 +440,12 @@ class Attention():
                 )
             )
 
-        if packed_seq_params is not None:
+        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             query = query.squeeze(1)
             key = key.squeeze(1)
             value = value.squeeze(1)
         nvtx_range_pop(suffix="adjust_key_value")
+
         args = get_args()
         # ================================================
         # relative positional embedding (rotary embedding)
@@ -515,7 +468,7 @@ class Attention():
                 q_pos_emb = q_pos_emb[start:end]
                 k_pos_emb = k_pos_emb[start:end]
 
-            if packed_seq_params is not None:
+            if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
                 if packed_seq_params.cu_seqlens_q_padded is not None:
                     cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
                 else:
@@ -579,9 +532,6 @@ class Attention():
                 packed_seq_params=packed_seq_params,
             )
         else:
-            if self.offload_core_attention and self.training:
-                query = fine_grained_offloading_group_start(query, name="core_attn")
-
             if inference_context is None or inference_context.is_static_batching():
                 if args.pipe_sp_splits != 1:
                     q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous()
@@ -590,8 +540,10 @@ class Attention():
                     core_attn_out = rearrange(core_attn_out, 'b s h d -> s b (h d)').contiguous()
                 else:
                     # Static batching attention kernel.
-                    with get_fine_grained_offloading_context(self.offload_core_attention):
-                        core_attn_out = self.core_attention(
+                    with off_interface(
+                        self.offload_core_attention and self.training, query, "core_attn"
+                    ) as query:
+                        core_attn_out = apply_module(self.core_attention)(
                             query,
                             key,
                             value,
@@ -617,12 +569,19 @@ class Attention():
                     cu_kv_lengths,
                     kv_lengths,
                     block_table,
+                    inference_context.is_decode_only(),
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
-            if self.offload_core_attention and self.training:
-                core_attn_out, = fine_grained_offloading_group_commit(core_attn_out, name="core_attn", forced_released_tensors=[query, key, value])
+                # Clear the outputs for padding tokens when using quantization scales
+                # to avoid corrupting amax calculations
+                if is_using_quantization_scales(self.config):
+                    core_attn_out[inference_context.padding_slice] = 0.0
 
+            if self.offload_core_attention and self.training:
+                core_attn_out = off_interface.group_commit(
+                    core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
+                )
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
@@ -631,19 +590,22 @@ class Attention():
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
         nvtx_range_pop(suffix="core_attention")
 
+        # Output gate
+        if gate is not None:
+            nvtx_range_push(suffix="output_gate")
+            core_attn_out = self._apply_output_gate(core_attn_out, gate)
+            nvtx_range_pop(suffix="output_gate")
+
         # =================
         # Output. [sq, b, h]
         # =================
-
         nvtx_range_push(suffix="linear_proj")
-
-        if self.offload_attn_proj and self.training:
-            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
-        with get_fine_grained_offloading_context(self.offload_attn_proj):
+        with off_interface(self.offload_attn_proj, core_attn_out, "attn_proj") as core_attn_out:
             output, bias = self.linear_proj(core_attn_out)
-        if self.offload_attn_proj and self.training:
-            output, bias = fine_grained_offloading_group_commit(output, bias, name="attn_proj", forced_released_tensors=[core_attn_out])
-
+        if self.offload_attn_proj:
+            output = off_interface.group_commit(
+                output, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias
@@ -736,19 +698,17 @@ class Attention():
                 self.config.fused_single_qkv_rope and self.split_qkv
             ), "fused_single_qkv_rope requested but not available/supported for the config."
 
-        if self.offload_qkv_linear:
-            hidden_states = fine_grained_offloading_group_start(hidden_states, name="qkv_linear")
-        with get_fine_grained_offloading_context(self.offload_qkv_linear):
+        with off_interface(self.offload_qkv_linear, hidden_states, "qkv_linear") as hidden_states:
             qkv_output = self.get_query_key_value_tensors(
-                hidden_states, key_value_states, split_qkv=self.split_qkv
+                hidden_states,
+                key_value_states,
+                split_qkv=self.split_qkv,
+                output_gate=self.config.attention_output_gate,
             )
         if self.offload_qkv_linear:
-            delay_release_module = "qkv_linear" if get_delay_release_qkv_linear_tensor() else None
-            (qkv_output,) = fine_grained_offloading_group_commit(
-                qkv_output,
-                name="qkv_linear",
-                forced_released_tensors=[hidden_states],
-                delay_release_module=delay_release_module
+            # `qkv_output` may be a tuple; commit supports tuple/list and will keep structure.
+            qkv_output = off_interface.group_commit(
+                qkv_output, name="qkv_linear", forced_released_tensors=[]
             )
         nvtx_range_pop(suffix="qkv")
 
@@ -793,8 +753,15 @@ class Attention():
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
         if self.split_qkv:
-            query, key, value = qkv_output
+            if self.config.attention_output_gate:
+                query, key, value, gate = qkv_output
+            else:
+                query, key, value = qkv_output
+            mixed_qkv = qkv_split_arg_list = None
         else:
+            assert (
+                not self.config.attention_output_gate
+            ), "attention_output_gate is not supported for unsplit mixed_qkv tensor."
             mixed_qkv, qkv_split_arg_list = qkv_output
 
         no_rope = (
@@ -858,7 +825,7 @@ class Attention():
         if (
             in_decode_mode
             and self.config.cuda_graph_impl == "local"
-            and self.config.cuda_graph_scope != "full_iteration"
+            and CudaGraphScope.full_iteration not in self.config.cuda_graph_scope
             and inference_context.is_static_batching()
         ):
             raise ValueError(f"CUDA graphs must use flash decode with static batching!")
@@ -880,7 +847,7 @@ class Attention():
                 )
             )
 
-        if packed_seq_params is not None:
+        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             query = query.squeeze(1)
             key = key.squeeze(1)
             value = value.squeeze(1)
@@ -895,7 +862,7 @@ class Attention():
         ):
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
-            if packed_seq_params is not None:
+            if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
                 if packed_seq_params.cu_seqlens_q_padded is not None:
                     cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
                 else:
@@ -959,13 +926,12 @@ class Attention():
                 packed_seq_params=packed_seq_params,
             )
         else:
-            if self.offload_core_attention and self.training:
-                query = fine_grained_offloading_group_start(query, name="core_attn")
-
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
-                with get_fine_grained_offloading_context(self.offload_core_attention):
-                    core_attn_out = self.core_attention(
+                with off_interface(
+                    self.offload_core_attention and self.training, query, "core_attn"
+                ) as query:
+                    core_attn_out = apply_module(self.core_attention)(
                         query,
                         key,
                         value,
@@ -991,14 +957,19 @@ class Attention():
                     cu_kv_lengths,
                     kv_lengths,
                     block_table,
+                    inference_context.is_decode_only(),
                 )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
+                # Clear the outputs for padding tokens when using quantization scales
+                # to avoid corrupting amax calculations
+                if is_using_quantization_scales(self.config):
+                    core_attn_out[inference_context.padding_slice] = 0.0
+
             if self.offload_core_attention and self.training:
-                (core_attn_out,) = fine_grained_offloading_group_commit(
+                core_attn_out = off_interface.group_commit(
                     core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
                 )
-
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
@@ -1006,6 +977,12 @@ class Attention():
             # note that batch is a dummy dimension in the packed case
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
         nvtx_range_pop(suffix="core_attention")
+
+        # Output gate
+        if gate is not None:
+            nvtx_range_push(suffix="output_gate")
+            core_attn_out = self._apply_output_gate(core_attn_out, gate)
+            nvtx_range_pop(suffix="output_gate")
 
         return core_attn_out
 
@@ -1015,75 +992,26 @@ class Attention():
         # =================
 
         nvtx_range_push(suffix="linear_proj")
-        offload_context = contextlib.nullcontext()
-        if self.offload_attn_proj and self.training:
-            core_attn_out = fine_grained_offloading_group_start(core_attn_out, name="attn_proj")
-        with get_fine_grained_offloading_context(self.offload_attn_proj):
+        with off_interface(self.offload_attn_proj, core_attn_out, "attn_proj") as core_attn_out:
             output, bias = self.linear_proj(core_attn_out)
-        if self.offload_attn_proj and self.training:
-            output, bias = fine_grained_offloading_group_commit(
-                output, bias, name="attn_proj", forced_released_tensors=[core_attn_out]
+        if self.offload_attn_proj:
+            output = off_interface.group_commit(
+                output, name="attn_proj", forced_released_tensors=[core_attn_out]
             )
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias
 
 
-class SelfAttention:
-    def get_query_key_value_tensors(self, hidden_states, key_value_states=None, split_qkv=True):
-        """
-        Derives `query`, `key` and `value` tensors from `hidden_states`. If `split_qkv=False`, then
-        the unsplit mixed_qkv tensor is returned.
-        """
-        # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
-        mixed_qkv, _ = self.linear_qkv(hidden_states)
-
-        # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
-        new_tensor_shape = mixed_qkv.size()[:-1] + (
-            self.num_query_groups_per_partition,
-            (
-                (self.num_attention_heads_per_partition // self.num_query_groups_per_partition + 2)
-                * self.hidden_size_per_attention_head
-            ),
+def self_attention_get_query_key_value_tensors_wrapper(func):
+    @wraps(func)
+    def wrapper(self, hidden_states, key_value_states=None, split_qkv=True):
+        query, key, value = func(
+            self,
+            hidden_states=hidden_states,
+            key_value_states=key_value_states,
+            split_qkv=split_qkv,
         )
-        mixed_qkv = mixed_qkv.view(*new_tensor_shape)
-
-        split_arg_list = [
-            (
-                self.num_attention_heads_per_partition
-                // self.num_query_groups_per_partition
-                * self.hidden_size_per_attention_head
-            ),
-            self.hidden_size_per_attention_head,
-            self.hidden_size_per_attention_head,
-        ]
-
-        # Return unsplit mixed_qkv and split_arg_list
-        if not split_qkv:
-            return mixed_qkv, split_arg_list
-
-        if SplitAlongDim is not None:
-
-            # [sq, b, ng, (np/ng + 2) * hn]
-            # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
-            (query, key, value) = SplitAlongDim(mixed_qkv, 3, split_arg_list)
-        else:
-
-            # [sq, b, ng, (np/ng + 2) * hn]
-            # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
-            (query, key, value) = torch.split(mixed_qkv, split_arg_list, dim=3)
-
-        # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
-        query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
-
-        if self.q_layernorm is not None:
-            query = self.q_layernorm(query)
-
-        if self.k_layernorm is not None:
-            key = self.k_layernorm(key)
-
-        if self.config.test_mode:
-            self.run_realtime_tests()
 
         if self.config.use_qk_norm:
             qk_norm = te.pytorch.RMSNorm(normalized_shape=query.shape[-1]).cuda()
@@ -1091,3 +1019,5 @@ class SelfAttention:
             key = qk_norm(key).type_as(key)
 
         return query, key, value
+
+    return wrapper
