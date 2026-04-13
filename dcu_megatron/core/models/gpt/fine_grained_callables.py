@@ -32,7 +32,6 @@ from dcu_megatron.core.pipeline_parallel import (
     PipelineOffloadManager,
     fine_grained_offloading_group_commit,
     fine_grained_offloading_group_start,
-    get_fine_grained_offloading_context,
 )
 
 
