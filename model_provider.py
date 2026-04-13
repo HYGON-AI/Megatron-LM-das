@@ -1,5 +1,3 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-
 """Common functions used in train_*.py and pretrain_*.py scripts."""
 
 from typing import Callable, Optional, Union
@@ -8,11 +6,10 @@ import torch
 
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.mamba import MambaModel
-from megatron.training import get_args, print_rank_0
+from megatron.training import get_args
 
 try:
-    from megatron.post_training.model_provider import model_provider as model_provider_modelopt
-
+    from megatron.post_training.model_builder import modelopt_gpt_mamba_builder
     has_nvidia_modelopt = True
 except ImportError:
     has_nvidia_modelopt = False
@@ -23,10 +20,7 @@ import megatron.legacy.model  # isort: skip
 
 
 def model_provider(
-    model_builder: Callable,
-    pre_process=True,
-    post_process=True,
-    vp_stage: Optional[int] = None,
+    model_builder: Callable, pre_process=True, post_process=True, vp_stage: Optional[int] = None, config=None, pg_collection=None,
     split_vocab_embedding=False,
     noop_block=False,
     include_layer_norm=False,
@@ -40,14 +34,10 @@ def model_provider(
         pre_process (bool, optional): Set to true if you need to compute embedings. Defaults to True.
         post_process (bool, optional): Set to true if you need to compute output logits/loss. Defaults to True.
 
-
     Returns:
         Union[GPTModel, megatron.legacy.model.GPTModel, MambaModel]: The returned model
     """
     args = get_args()
-
-    if has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False):  # [ModelOpt]
-        return model_provider_modelopt(pre_process, post_process)
 
     if args.record_memory_history:
         torch.cuda.memory._record_memory_history(
@@ -71,12 +61,13 @@ def model_provider(
 
         torch._C._cuda_attach_out_of_memory_observer(oom_observer)
 
+    if has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False):
+        # [ModelOpt]: Use custom builder + spec when modelopt is enabled
+        model_builder = modelopt_gpt_mamba_builder
+
     return model_builder(
-        args,
-        pre_process,
-        post_process,
-        vp_stage,
-        split_vocab_embedding=split_vocab_embedding,
-        noop_block=noop_block,
-        include_layer_norm=include_layer_norm,
-    )
+            args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection,
+            split_vocab_embedding=split_vocab_embedding,
+            noop_block=noop_block,
+            include_layer_norm=include_layer_norm,
+        )
