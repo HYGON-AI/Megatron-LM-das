@@ -10,7 +10,7 @@ if get_adaptor_args().schedule_method == "dualpipev":
         fine_grained_offloading_set_last_layer,
     )
 else:
-    from .fine_grained_activation_offload import (
+    from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
         PipelineOffloadManager,
         fine_grained_offloading_group_commit,
         fine_grained_offloading_group_start,

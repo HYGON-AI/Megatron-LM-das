@@ -1005,12 +1005,13 @@ class Attention():
 
 def self_attention_get_query_key_value_tensors_wrapper(func):
     @wraps(func)
-    def wrapper(self, hidden_states, key_value_states=None, split_qkv=True):
+    def wrapper(self, hidden_states, key_value_states=None, split_qkv=True, output_gate=False):
         query, key, value = func(
             self,
             hidden_states=hidden_states,
             key_value_states=key_value_states,
             split_qkv=split_qkv,
+            output_gate=output_gate,
         )
 
         if self.config.use_qk_norm:

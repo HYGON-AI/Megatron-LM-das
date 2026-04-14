@@ -108,7 +108,7 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
     to_empty_if_meta_device,
 )
-from .global_vars import (
+from megatron.training.global_vars import (
     get_args,
     get_signal_handler,
     get_timers,

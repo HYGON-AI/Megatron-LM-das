@@ -136,6 +136,7 @@ def seq1f1b_forward_backward_pipelining_with_interleaving(
     adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
     p2p_communicator: Optional[P2PCommunicator] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: bool = False,
 ):
     """Run interleaved 1F1B schedule (model split into model chunks), with
     communication between pipeline stages as needed.
@@ -1214,6 +1215,7 @@ def seq1f1b_forward_backward_pipelining_with_interleaving(
         config.finalize_model_grads_func(
             model, total_num_tokens if config.calculate_per_token_loss else None,
             pg_collection=pg_collection,
+            force_all_reduce=force_all_reduce,
         )
 
     # Restore config.grad_sync_func and config.param_sync_func.
@@ -1281,6 +1283,7 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
     adjust_tensor_shapes_fn: Optional[Callable] = None,
     p2p_communicator: Optional[P2PCommunicator] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: bool = False,
 ):
     global_args = get_args()
 
@@ -1644,6 +1647,7 @@ def seq1f1b_forward_backward_pipelining_without_interleaving(
         config.finalize_model_grads_func(
             [model], total_num_tokens if config.calculate_per_token_loss else None,
             pg_collection=pg_collection,
+            force_all_reduce=force_all_reduce,
         )
 
     if config.timers is not None:
