@@ -10,6 +10,12 @@ from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_r
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
+from megatron.core.transformer.moe.experts import GroupedMLP
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.training.global_vars import get_args
+
+import primus_turbo.pytorch as pt
 
 
 class TEGroupedMLP():
@@ -139,3 +145,134 @@ class TEGroupedMLP():
         output_bias = None
 
         return output, output_bias
+
+
+class PrimusTurboGroupedMLP(GroupedMLP):
+    def __init__(
+        self,
+        num_local_experts: int,
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        args = get_args()
+
+        super().__init__(
+            num_local_experts,
+            config,
+            pg_collection,
+        )
+        self.use_primus_fused_act_with_probs = args.use_primus_fused_act_with_probs
+
+        self.grouped_gemm = pt.ops.grouped_gemm
+
+        if self.use_primus_fused_act_with_probs:
+            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+
+            if self.config.activation_func == F.silu:
+                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
+            elif self.config.activation_func == F.gelu:
+                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+
+            def _activation_func_with_probs(x, probs, tokens_per_experts):
+                assert x.ndim == 2
+                assert probs.ndim == 1
+                num_tokens = x.shape[0]
+                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+                return turbo_fused_act_with_probs(x, probs, row_mask)
+
+            self.activation_func_with_probs = _activation_func_with_probs
+
+    def forward(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+    ):
+        """Forward step of the GroupedMLP."""
+        if self.activation_recompute:
+            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+
+        if self.config.moe_apply_probs_on_input:
+            assert (
+                self.config.moe_router_topk == 1
+            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
+            original_dtype = permuted_local_hidden_states.dtype
+            permuted_local_hidden_states = permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
+            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
+            # Probs already applied, so reset to 1.
+            permuted_probs = torch.ones_like(permuted_probs)
+
+        gemm_kargs = [dict(), dict()]
+
+        if permuted_local_hidden_states.nelement() != 0:
+            # Reshape the weights for the grouped GEMMs.
+            w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
+            w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
+
+            tokens_per_expert = tokens_per_expert.to(w1.device)
+            assert w1.is_contiguous(), "w1 must be contiguous"
+            assert w2.is_contiguous(), "w2 must be contiguous"
+
+            fc1_output = self.grouped_gemm(
+                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
+            )
+            if self.activation_recompute:
+                if self.use_primus_fused_act_with_probs:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs,
+                        fc1_output,
+                        permuted_probs,
+                        tokens_per_expert,
+                    )
+                else:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                    )
+
+                fc2_output = self.grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                )
+                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
+            else:
+                if self.use_primus_fused_act_with_probs:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs.unsqueeze(-1)
+                    )
+                fc2_output = self.grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                )
+        else:
+            # No token is allocated for local experts.
+            assert torch.count_nonzero(tokens_per_expert) == 0
+            # Make sure params of experts still have gradients even given zero tokens.
+            assert (
+                not self.patch_zero_bubble and not self.patch_primus_pipeline
+            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
+            w1 = self.weight1.view(self.config.hidden_size, -1)
+            w2 = self.weight2.view(-1, self.config.hidden_size)
+            h = torch.matmul(permuted_local_hidden_states, w1)
+            if self.activation_recompute:
+                if self.use_primus_fused_act_with_probs:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
+                    )
+                fc2_output = torch.matmul(h, w2)
+                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
+            else:
+                if self.use_primus_fused_act_with_probs:
+                    h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
+                else:
+                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
+                fc2_output = torch.matmul(h, w2)
+
+        return fc2_output, None

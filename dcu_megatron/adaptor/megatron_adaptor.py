@@ -431,6 +431,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     gpt_builder_wrapper,
                                     apply_wrapper=True)
 
+
 class LegacyAdaptation(MegatronAdaptationABC):
     """
         Adaptations for models in legacy structure.
