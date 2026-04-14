@@ -138,6 +138,22 @@ def get_tensor_model_parallel_node_size(group=None):
     return num_nodes
 
 
+def prepare_input_tensor_for_wgrad_compute(input_tensor):
+    """Ensure grad_output is stored in a contiguous buffer."""
+    # Doing gather + slicing during the NeMo forward pass can make this tensor
+    # not be contiguous. PyTorch only checks if the tensor is contiguous, and only
+    # clones it if it's not contiguous:
+    # https://github.com/pytorch/pytorch/blob/c47cf9bc7f9e02f649ab4ed53fe4d35732c92ab6/torch/_refs/__init__.py#L2761
+    input_tensor = input_tensor.contiguous()
+    # Convert the tensor shapes to 2D for execution compatibility
+    if input_tensor.dim() == 3:
+        input_tensor = input_tensor.view(
+            input_tensor.shape[0] * input_tensor.shape[1], input_tensor.shape[2]
+        )
+
+    return input_tensor
+
+
 class AGLinear(torch.autograd.Function):
     @staticmethod
     @custom_fwd
@@ -193,7 +209,7 @@ class AGLinear(torch.autograd.Function):
                         allocate_output_on_init=False,
                     )
 
-            output = torch.empty((sequence_len * tp_group.size(), weight.shape[0]),
+            output = torch.empty((sequence_len * batch_size * tp_group.size(), weight.shape[0]),
                                  dtype=input.dtype,
                                  device=torch.cuda.current_device())
             output = fw_ag_gemm_op.forward(
@@ -656,9 +672,9 @@ class LinearRS(torch.autograd.Function):
                 total_grad_output = bw_ag_gemm_op.gather_input()
             else:
                 total_grad_output = grad_output
-            total_grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                total_grad_output, input
-            )
+
+            total_grad_output = prepare_input_tensor_for_wgrad_compute(total_grad_output)
+            total_input = prepare_input_tensor_for_wgrad_compute(input)
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
