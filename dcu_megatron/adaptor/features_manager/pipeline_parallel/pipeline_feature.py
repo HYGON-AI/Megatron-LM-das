@@ -184,6 +184,7 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.core.transformer.multi_token_prediction import tie_word_embeddings_state_dict_wrapper
             from dcu_megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
             from dcu_megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
+            from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload_dualpipev import FineGrainedActivationOffloadingInterface
 
             patch_manager.register_patch(
                 'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
@@ -236,6 +237,9 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
                                         build_layer_callables_without_split_attn)
 
+            patch_manager.register_patch('megatron.core.pipeline_parallel.fine_grained_activation_offload.FineGrainedActivationOffloadingInterface.init_chunk_handler',
+                                        FineGrainedActivationOffloadingInterface.init_chunk_handler)
+
         if args.enable_vocab_parallel:
             from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper
             from dcu_megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
@@ -267,9 +271,6 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
                                     create_dummy=True)
-        if args.schedule_method == "dualpipev" or args.overlap_ep_comm_with_split_attn:
-            patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
-                                        GPTModel.build_schedule_plan)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.backward_dw',
                                     GPTModel.backward_dw,
                                     create_dummy=True)
