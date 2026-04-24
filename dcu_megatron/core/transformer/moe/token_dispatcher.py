@@ -1,6 +1,5 @@
 from typing import List, Optional
 
-import primus_turbo.pytorch as pt
 import torch
 
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -30,6 +29,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             config (TransformerConfig): Configuration for the transformer model.
             pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
+        import primus_turbo.pytorch as pt
+
         super().__init__(config=config, pg_collection=pg_collection)
 
         assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"

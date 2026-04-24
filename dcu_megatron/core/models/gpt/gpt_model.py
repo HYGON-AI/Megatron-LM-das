@@ -11,6 +11,9 @@ from megatron.core.config_logger import has_config_logger_enabled, log_config_to
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.models.common.embeddings import YarnRotaryEmbedding
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+    FineGrainedActivationOffloadingInterface as off_interface,
+)
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import (
@@ -458,42 +461,26 @@ class GPTModel:
 
     def preprocess_for_fine_grained_offloading(self):
         """Preprocess for fine-grained activation offloading."""
-
-        args = get_args()
-
-        num_layers = self.decoder.num_layers_per_pipeline_rank
-        if self.mtp_process:
-            num_layers = num_layers + self.config.mtp_num_layers
-
-        if args.schedule_method == "dualpipev":
-            from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload_dualpipev import (
-                fine_grained_offloading_init_chunk_handler,
-            )
-            fine_grained_offloading_init_chunk_handler(
+        if get_args().schedule_method == "dualpipev":
+            off_interface.init_chunk_handler(
                 getattr(self, 'dualpipev_first_chunk', True),
                 min_offloaded_tensor_size=self.config.min_offloaded_tensor_size,
             )
         else:
-            from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload import (
-                fine_grained_offloading_init_chunk_handler,
-            )
-            # last_stage_is_loss = (pp_rank == pp_size - 1) and self.config.last_vp_stage_is_loss
-            # TODO: will be an issue when dense layer is placed  across different pipeline stages
-            fine_grained_offloading_init_chunk_handler(
+            off_interface.init_chunk_handler(
                 vp_size=self.config.virtual_pipeline_model_parallel_size,
                 vp_stage=self.vp_stage,
                 min_offloaded_tensor_size=self.config.min_offloaded_tensor_size,
             )
-
         if self.disable_param_offloading:
             for param in self.decoder.parameters():
-                param.offloading_activation = False
+                off_interface.mark_not_offloadable(param)
             if self.mtp_process:
                 for param in self.mtp.parameters():
-                    param.offloading_activation = False
+                    off_interface.mark_not_offloadable(param)
             if self.post_process:
                 for param in self.output_layer.parameters():
-                    param.offloading_activation = False
+                    off_interface.mark_not_offloadable(param)
             self.disable_param_offloading = False
 
     def shared_embedding_or_output_weight(self) -> Tensor:
@@ -564,7 +551,7 @@ class GPTModel:
 
         from ..common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
 
-        if get_args().fine_grained_activation_offloading:
+        if self.config.fine_grained_activation_offloading:
             self.preprocess_for_fine_grained_offloading()
 
         return TransformerModelChunkSchedulePlan(

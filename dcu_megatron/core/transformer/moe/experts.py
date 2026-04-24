@@ -15,8 +15,6 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
 
-import primus_turbo.pytorch as pt
-
 
 class TEGroupedMLP():
     def forward(
@@ -154,6 +152,8 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        import primus_turbo.pytorch as pt
+
         args = get_args()
 
         super().__init__(
