@@ -172,8 +172,14 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     """
 
     is_moe = isinstance(layer.mlp, MoELayer)
-    enable_deepep = layer.config.moe_enable_deepep
-
+    enable_deepep = (
+        layer.config.moe_token_dispatcher_type == "flex"
+        and layer.config.moe_flex_dispatcher_backend == "deepep"
+    )
+    enable_hybridep = (
+        layer.config.moe_token_dispatcher_type == "flex"
+        and layer.config.moe_flex_dispatcher_backend == "hybridep"
+    )
 
     def submodule_attention_qkv_forward(
         node: ScheduleNode,
@@ -182,27 +188,16 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         # Residual connection.
         residual = hidden_states
 
-        if layer.offload_attn_norm:
-            hidden_states = fine_grained_offloading_group_start(hidden_states, name="attn_norm")
-
         # Optional Input Layer norm
         if layer.recompute_input_layernorm:
             layer.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            with get_fine_grained_offloading_context(layer.offload_attn_norm):
+            with off_interface(layer.offload_attn_norm, hidden_states, "attn_norm") as hidden_states:
                 input_layernorm_output = layer.input_layernorm_checkpoint.checkpoint(
                     layer.input_layernorm, hidden_states
                 )
         else:
-            with get_fine_grained_offloading_context(layer.offload_attn_norm):
+            with off_interface(layer.offload_attn_norm, hidden_states, "attn_norm") as hidden_states:
                 input_layernorm_output = layer.input_layernorm(hidden_states)
-
-        if layer.offload_attn_norm:
-            input_layernorm_output, = fine_grained_offloading_group_commit(
-                input_layernorm_output,
-                name="attn_norm",
-                forced_released_tensors=[hidden_states],
-                delay_release_module="attn_norm",
-            )
 
         # Self attention.
         qkv_output = layer.self_attention.compute_qkv(
@@ -261,25 +256,18 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             )
         nvtx_range_pop(suffix="self_attn_bda")
 
+        # Delay the offload of the attention norm until after the self_attn_bda has been computed
+        # because the residual is needed in the self_attn_bda.
         if layer.offload_attn_norm:
-            cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-            release_func = cur_forward_chunk.module_release_func_map.pop("attn_norm", None)
-            if release_func is not None:
-                release_func()
-                del release_func
-
-        if layer.offload_qkv_linear:
-            cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-            release_func = cur_forward_chunk.module_release_func_map.pop("qkv_linear", None)
-            if release_func is not None:
-                release_func()
-                del release_func
+            hidden_states = off_interface.group_commit(
+                hidden_states, name="attn_norm", forced_released_tensors=[residual]
+            )
 
         node.layer_state.attn_residual = None
 
         return hidden_states
 
-    def _submodule_attention_postprocess_router_compound_forward(
+    def _submodule_attention_proj_router_compound_forward(
         node: ScheduleNode,
         core_attn_out,
     ):
@@ -292,32 +280,25 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             core_attn_out,
         )
 
-        if layer.offload_mlp_norm:
-            hidden_states = fine_grained_offloading_group_start(hidden_states, name="mlp_norm")
-
         # Optional Layer norm post the cross-attention.
         if layer.recompute_pre_mlp_layernorm:
             layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            with get_fine_grained_offloading_context(layer.offload_mlp_norm):
+            with off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm") as hidden_states:
                 pre_mlp_layernorm_output = layer.pre_mlp_norm_checkpoint.checkpoint(
                     layer.pre_mlp_layernorm, hidden_states
                 )
         else:
-            with get_fine_grained_offloading_context(layer.offload_mlp_norm):
+            with off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm") as hidden_states:
                 pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states)
 
-        if layer.offload_mlp_norm:
-            pre_mlp_layernorm_output, = fine_grained_offloading_group_commit(
-                pre_mlp_layernorm_output,
-                name="mlp_norm",
-                forced_released_tensors=[hidden_states],
-                delay_release_module="mlp_norm",
-            )
+        probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
+        local_tokens, probs = layer.mlp.preprocess(
+            pre_mlp_layernorm_output, probs, routing_map
+        )
 
-        permutated_local_input_tokens, probs, pre_mlp_layernorm_output = layer.mlp.router_and_preprocess(pre_mlp_layernorm_output)
         outputs = [
             hidden_states,
-            permutated_local_input_tokens,
+            local_tokens,
             probs,
             pre_mlp_layernorm_output,
         ]
@@ -334,7 +315,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             pre_mlp_layernorm_output,
         ]
         if layer.mlp.moe_layer_recompute:
-            if layer.config.fp8:
+            if layer.config.fp8 or self.config.fp4:
                 shared_expert_output = te_checkpoint(
                     custom_forward,
                     False,
@@ -365,16 +346,17 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             local_tokens,
             probs,
             pre_mlp_layernorm_output,
-        ) = _submodule_attention_postprocess_router_compound_forward(
+        ) = _submodule_attention_proj_router_compound_forward(
             node,
             core_attn_out,
         )
 
         shared_expert_output = _submodule_shared_expert_forward(node, pre_mlp_layernorm_output)
 
-        # detached here
+        # Detach here for mlp_bda residual connection
         node.layer_state.residual = node.detach(hidden_states)
         if layer.mlp.use_shared_expert and not layer.mlp.shared_expert_overlap:
+            # Detach here for shared expert connection in moe_combine
             node.layer_state.shared_expert_output = node.detach(shared_expert_output)
 
         return local_tokens, probs
@@ -386,7 +368,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         Dispatches tokens to the experts based on the router output.
         """
         token_dispatcher = layer.mlp.token_dispatcher
-        if enable_deepep:
+        if enable_deepep or enable_hybridep:
             # update token_probs to be the detached version, prevents
             # backward graph from connecting to attn submodule
             token_dispatcher._comm_manager.token_probs = probs
@@ -403,13 +385,13 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         def custom_forward(
             dispatched_input, permuted_probs
         ):
-            expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs, None)
+            expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs)
             assert mlp_bias is None, f"mlp_bias is not supported for {type(layer.mlp.token_dispatcher)}"
             return expert_output
 
         dispatched_probs = node.layer_state.dispatched_probs
         token_dispatcher = layer.mlp.token_dispatcher
-        if enable_deepep:
+        if enable_deepep or enable_hybridep::
             # update dispatched_probs to be detached version, prevents
             # backward graph from connecting to dispatch submodule
             token_dispatcher._comm_manager.dispatched_probs = dispatched_probs
@@ -456,12 +438,9 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         # with another microbatch's computation and expose the communication.
         """
         residual = node.layer_state.residual
-
-        shared_expert_output = None
-        if layer.mlp.use_shared_expert and not layer.mlp.shared_expert_overlap:
-            shared_expert_output = node.layer_state.shared_expert_output
-
-        output = layer.mlp.combine(output, shared_expert_output)
+        shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
+        output = layer.mlp.combine(output)
+        output = layer.mlp.postprocess(output, shared_expert_output)
         mlp_output_with_bias = (output, None)
 
         with layer.bias_dropout_add_exec_handler():
@@ -469,12 +448,12 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
                 mlp_output_with_bias, residual, layer.hidden_dropout
             )
 
+        # Delay the offload of the mlp norm until after the mlp_bda has been computed
+        # because the residual is needed in the mlp_bda.
         if layer.offload_mlp_norm:
-            cur_forward_chunk = PipelineOffloadManager.get_instance().cur_forward_chunk()
-            release_func = cur_forward_chunk.module_release_func_map.pop("mlp_norm", None)
-            if release_func is not None:
-                release_func()
-                del release_func
+            hidden_states = off_interface.group_commit(
+                hidden_states, name="mlp_norm", forced_released_tensors=[residual]
+            )
 
         output = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
@@ -487,6 +466,12 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         # release tensor reference after use
         node.layer_state.residual = None
         node.layer_state.shared_expert_output = None
+
+        # final layer norm from decoder
+        final_layernorm = node.chunk_state.model.decoder.final_layernorm
+        if not node.is_mtp and final_layernorm and node.is_last_layer:
+            output = final_layernorm(output)
+            output = make_viewless_tensor(inp=output, requires_grad=True, keep_graph=True)
         return output
 
     def mlp_wrapper(node: ScheduleNode, *args, **kwargs):
@@ -554,15 +539,7 @@ def build_mtp_layer_callables_with_split_attn(layer):
     def submodule_mtp_attn_qkv_forward(node, hidden_states):
         # MTP Block Preprocess
         if node.is_first_layer:
-            # Final layer norm from Decoder
-            final_layernorm = node.chunk_state.model.decoder.final_layernorm
-            if final_layernorm:
-                hidden_states = final_layernorm(hidden_states)
-                hidden_states = make_viewless_tensor(
-                    inp=hidden_states, requires_grad=True, keep_graph=True
-                )
-                hidden_states = node.detach(hidden_states)
-            offset = get_mtp_layer_offset(layer.config)
+            offset = get_mtp_layer_offset(layer.config, node.chunk_state.model.vp_stage)
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
             if (
