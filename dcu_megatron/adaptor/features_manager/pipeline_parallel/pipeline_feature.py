@@ -271,9 +271,6 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
                                     create_dummy=True)
-        if args.schedule_method == "dualpipev" or args.overlap_ep_comm_with_split_attn:
-            patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
-                                        GPTModel.build_schedule_plan)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.backward_dw',
                                     GPTModel.backward_dw,
                                     create_dummy=True)

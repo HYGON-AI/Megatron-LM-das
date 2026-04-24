@@ -43,8 +43,6 @@ class CPUOffloadFeature(AbstractFeature):
                                      create_dummy=True)
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.__init__',
                                      GPTModel.__init__)
-        patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
-                                     GPTModel.build_schedule_plan)
 
         patch_manager.register_patch('megatron.core.transformer.attention.Attention.forward',
                                      Attention.forward)

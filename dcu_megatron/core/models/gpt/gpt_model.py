@@ -506,67 +506,6 @@ class GPTModel:
             return self.output_layer.weight
         return None
 
-    def build_schedule_plan(
-        self,
-        input_ids: Tensor,
-        position_ids: Tensor,
-        attention_mask: Tensor,
-        decoder_input: Tensor = None,
-        labels: Tensor = None,
-        inference_context: BaseInferenceContext = None,
-        packed_seq_params: PackedSeqParams = None,
-        extra_block_kwargs: dict = None,
-        runtime_gather_output: Optional[bool] = None,
-        inference_params: Optional[BaseInferenceContext] = None,
-        loss_mask: Optional[Tensor] = None,
-    ):
-        """Builds a computation schedule plan for the model.
-
-        This function creates a schedule plan for a model chunk, including
-        preprocessing, transformer layers, and postprocessing.
-        The schedule plan is used to optimize computation and memory usage
-        in distributed environments.
-
-        Args:
-            input_ids (Tensor): Input token IDs.
-            position_ids (Tensor): Position IDs.
-            attention_mask (Tensor): Attention mask.
-            decoder_input (Tensor, optional): Decoder input tensor. Defaults to None.
-            labels (Tensor, optional): Labels for loss computation. Defaults to None.
-            inference_context (BaseInferenceContext, optional):
-                Inference context. Defaults to None.
-            packed_seq_params (PackedSeqParams, optional):
-                Parameters for packed sequences. Defaults to None.
-            extra_block_kwargs (dict, optional):
-                Additional keyword arguments for blocks. Defaults to None.
-            runtime_gather_output (Optional[bool], optional):
-                Whether to gather output at runtime. Defaults to None.
-            inference_params (InferenceParams, optional):
-                Parameters for inference. Defaults to None.
-            loss_mask (Optional[Tensor], optional): Loss mask. Defaults to None.
-
-        Returns:
-            TransformerModelChunkSchedulePlan: The model chunk schedule plan.
-        """
-
-        from ..common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
-
-        if self.config.fine_grained_activation_offloading:
-            self.preprocess_for_fine_grained_offloading()
-
-        return TransformerModelChunkSchedulePlan(
-            self,
-            input_ids,
-            position_ids,
-            attention_mask,
-            decoder_input,
-            labels,
-            packed_seq_params,
-            extra_block_kwargs,
-            runtime_gather_output,
-            loss_mask,
-        )
-
     def backward_dw(self):
         self.decoder.backward_dw()
 
@@ -580,6 +519,7 @@ class GPTModel:
         decoder_input: Tensor = None,
         inference_context: BaseInferenceContext = None,
         packed_seq_params: PackedSeqParams = None,
+        padding_mask: Optional[Tensor] = None,
     ):
         """Preprocesses inputs for the transformer decoder.
 
@@ -596,7 +536,20 @@ class GPTModel:
         if decoder_input is not None:
             pass
         elif self.pre_process:
+            if padding_mask is not None:
+                assert padding_mask.shape == input_ids.shape, (
+                    f"padding_mask shape {padding_mask.shape} does not match "
+                    f"input_ids shape {input_ids.shape}"
+                )
             decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
+            if padding_mask is not None and self.config.sequence_parallel:
+                padding_mask = (
+                    tensor_parallel.scatter_to_sequence_parallel_region(
+                        padding_mask.transpose(0, 1).contiguous()
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                )
         else:
             # intermediate stage of pipeline
             # decoder will get hidden_states from encoder.input_tensor
@@ -649,13 +602,19 @@ class GPTModel:
                     rotary_seq_len,
                     packed_seq=packed_seq_params is not None
                     and packed_seq_params.qkv_format == 'thd',
+                    cp_group=packed_seq_params.cp_group if packed_seq_params is not None else None,
                 )
         elif self.position_embedding_type == 'yarn':
             if self.training or not self.config.flash_decode:
                 rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
                     inference_context, self.decoder, decoder_input, self.config, packed_seq_params
                 )
-                rotary_pos_emb, _ = self.rotary_pos_emb(rotary_seq_len)
+                rotary_pos_emb, _ = self.rotary_pos_emb(
+                    rotary_seq_len,
+                    packed_seq=packed_seq_params is not None
+                    and packed_seq_params.qkv_format == 'thd',
+                    cp_group=packed_seq_params.cp_group if packed_seq_params is not None else None,
+                )
             else:
                 raise NotImplementedError(
                     "Flash decoding uses precomputed cos and sin for RoPE, not implemented in "
@@ -663,7 +622,11 @@ class GPTModel:
                 )
         elif self.position_embedding_type == 'mrope' and not self.config.multi_latent_attention:
             if self.training or not self.config.flash_decode:
-                rotary_pos_emb = self.rotary_pos_emb(position_ids, self.mrope_section)
+                rotary_pos_emb = self.rotary_pos_emb(
+                    position_ids,
+                    self.mrope_section,
+                    cp_group=packed_seq_params.cp_group if packed_seq_params is not None else None,
+                )
             else:
                 # Flash decoding uses precomputed cos and sin for RoPE
                 raise NotImplementedError(
@@ -676,27 +639,34 @@ class GPTModel:
             and (
                 (
                     self.config.cuda_graph_impl == "local"
-                    and self.config.cuda_graph_scope != "full_iteration"
+                    and CudaGraphScope.full_iteration not in self.config.cuda_graph_scope
                 )
                 or self.config.flash_decode
             )
-            and rotary_pos_cos is not None
             and inference_context.is_static_batching()
         ):
             current_batch_size = input_ids.shape[0]
             sequence_len_offset = torch.tensor(
                 [inference_context.sequence_len_offset] * current_batch_size,
                 dtype=torch.int32,
-                device=rotary_pos_cos.device,  # Co-locate this with the rotary tensors
+                device=torch.cuda.current_device(),
             )
         else:
             sequence_len_offset = None
 
-        # Wrap decoder_input to allow the decoder (TransformerBlock) to delete the
-        # reference held by this caller function, enabling early garbage collection for
-        # inference. Skip wrapping if decoder_input is logged after decoder completion.
-        if in_inference_mode and not has_config_logger_enabled(self.config):
-            decoder_input = WrappedTensor(decoder_input)
+        if in_inference_mode:
+            # Clear the outputs for padding tokens when using dynamic batching with
+            # quantization scales to avoid corrupting amax calculations
+            if inference_context.is_dynamic_batching() and is_using_quantization_scales(
+                self.config
+            ):
+                decoder_input[inference_context.padding_slice] = 0.0
+
+            # Wrap decoder_input to allow the decoder (TransformerBlock) to delete the
+            # reference held by this caller function, enabling early garbage collection for
+            # inference. Skip wrapping if decoder_input is logged after decoder completion.
+            if not has_config_logger_enabled(self.config):
+                decoder_input = WrappedTensor(decoder_input)
 
         preproc_output = (
             decoder_input,
@@ -704,6 +674,7 @@ class GPTModel:
             rotary_pos_cos,
             rotary_pos_sin,
             sequence_len_offset,
+            padding_mask,
         )
         if rotary_pos_cos_sin is not None:
             # only in the case of flashinfer fused rope will we
@@ -729,7 +700,8 @@ class GPTModel:
         *,
         inference_params: Optional[BaseInferenceContext] = None,
         loss_mask: Optional[Tensor] = None,
-        micro_sp_idx=None
+        padding_mask: Optional[Tensor] = None,
+        micro_sp_idx=None,
     ) -> Tensor:
         """Forward function of the GPT Model This function passes the input tensors
         through the embedding layer, and then the decoder and finally into the post
@@ -740,6 +712,9 @@ class GPTModel:
         Args:
             runtime_gather_output (bool): Gather output at runtime. Default None means
                 `parallel_output` arg in the constructor will be used.
+            padding_mask (Tensor, optional): Padding mask for MoE routing.
+                Shape [bsz, seq_length]. True = padding (exclude), False = valid (include).
+                Only used for MoE layers to exclude padding tokens from routing computations.
         """
 
         if self.has_vocab_embedding and (not self.pre_process):
@@ -757,13 +732,19 @@ class GPTModel:
             decoder_input=decoder_input,
             inference_context=inference_context,
             packed_seq_params=packed_seq_params,
+            padding_mask=padding_mask,
         )
 
-        (decoder_input, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, sequence_len_offset) = (
-            preproc_output[:5]
-        )
+        (
+            decoder_input,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            sequence_len_offset,
+            padding_mask,
+        ) = preproc_output[:6]
 
-        rotary_pos_cos_sin = preproc_output[5] if len(preproc_output) == 6 else None
+        rotary_pos_cos_sin = preproc_output[6] if len(preproc_output) == 7 else None
 
         # Run decoder.
         hidden_states = self.decoder(
@@ -776,6 +757,7 @@ class GPTModel:
             rotary_pos_cos_sin=rotary_pos_cos_sin,
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
+            padding_mask=padding_mask,
             micro_sp_idx=micro_sp_idx,
             **(extra_block_kwargs or {}),
         )
