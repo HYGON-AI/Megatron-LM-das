@@ -157,6 +157,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         self.patch_core_tokenizers()
         self.patch_core_extentions()
         self.patch_tensor_parallel()
+        self.patch_pipeline_parallel()
         self.patch_training()
         self.patch_miscellaneous()
         self.patch_core_dist_checkpointing()
@@ -358,6 +359,13 @@ class CoreAdaptation(MegatronAdaptationABC):
             MegatronAdaptation.register('torch.distributed.irecv',
                                         log_timing_wrapper,
                                         apply_wrapper=True)
+
+    def patch_pipeline_parallel(self):
+        from ..core.pipeline_parallel.utils import set_ideal_affinity_for_current_gpu
+
+        # replace set_ideal_affinity_for_current_gpu with a no-op func
+        MegatronAdaptation.register("megatron.core.pipeline_parallel.utils.set_ideal_affinity_for_current_gpu",
+                                    set_ideal_affinity_for_current_gpu)
 
     def patch_training(self):
         from ..training.tokenizer import build_tokenizer_wrapper, SFTTokenizer

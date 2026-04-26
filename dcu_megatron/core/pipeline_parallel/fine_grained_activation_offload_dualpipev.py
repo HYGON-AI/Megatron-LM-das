@@ -2,12 +2,11 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.num_microbatches_calculator import get_num_microbatches
-from megatron.core.pipeline_parallel.fine_grained_activation import (
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     debug_rank,
     GPUTensorPool,
     ChunkOffloadHandler,
 )
-from megatron.core.pipeline_parallel.fine_grained_activation import PipelineOffloadManager as MegatronCorePipelineOffloadManager
 
 
 def get_backward_chunk_order(num_microbatches):
@@ -35,7 +34,7 @@ def get_backward_chunk_order(num_microbatches):
     return order
 
 
-class PipelineOffloadManager(MegatronCorePipelineOffloadManager):
+class PipelineOffloadManagerDualpipeV():
     """
     Singleton manager for coordinating activation offloading across pipeline stages.
     Manages chunk handlers, synchronizes GPU-CPU transfers,
@@ -55,7 +54,7 @@ class PipelineOffloadManager(MegatronCorePipelineOffloadManager):
         # Cache OffloadChunkHandler objects for each virtual pipeline stage and each forward pass.
         self._cached_chunks_forward = []
         # Cache OffloadChunkHandler objects for each virtual pipeline stage and each backward pass.
-        self._cached_chunks_backward = [None] * get_num_microbatches()
+        self._cached_chunks_backward = [None] * 2 * get_num_microbatches()
         # Index of the current backward chunk in the cached chunks backward.
         self._cached_chunks_index_backward = 0
         # Index of the current forward chunk in the cached chunks forward.
@@ -80,6 +79,7 @@ class PipelineOffloadManager(MegatronCorePipelineOffloadManager):
             for idx, chunk_idx in enumerate(self._backward_chunk_order):
                 if chunk_idx == target_chunk_idx and self._cached_chunks_backward[idx] is None:
                     self._cached_chunks_backward[idx] = handler
+                    break
 
     def init_model_chunk_offload_handler(
         self, is_first_chunk, min_offloaded_tensor_size=1024 * 1024
@@ -108,6 +108,7 @@ class FineGrainedActivationOffloadingInterface:
     @staticmethod
     def init_chunk_handler(is_first_chunk, min_offloaded_tensor_size):
         """Initialize the chunk handler, called at the start of a microbatch forward pass."""
+        from megatron.core.pipeline_parallel.fine_grained_activation_offload import PipelineOffloadManager
         PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
             is_first_chunk, min_offloaded_tensor_size
         )

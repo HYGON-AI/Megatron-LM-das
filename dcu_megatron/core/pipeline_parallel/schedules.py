@@ -24,7 +24,7 @@ from dcu_megatron.core.parallel_state import get_dualpipe_chunk
 
 def get_forward_backward_func_wrapper(fn):
     @wraps(fn)
-    def wrapper():
+    def wrapper(pp_size=None, vp_size=None):
         """Retrieves the appropriate forward_backward function given the
         configuration of parallel_state.
 
@@ -43,7 +43,7 @@ def get_forward_backward_func_wrapper(fn):
                 )
                 return forward_backward_pipelining_with_vocab_parallel
 
-            return fn()
+            return fn(pp_size=pp_size, vp_size=vp_size)
         elif args.schedule_method == "dualpipev":
             return forward_backward_pipelining_with_cutinhalf
         elif args.schedule_method == "seq1f1b":

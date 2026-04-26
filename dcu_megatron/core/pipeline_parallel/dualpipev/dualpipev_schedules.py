@@ -5,6 +5,9 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+    FineGrainedActivationOffloadingInterface as off_interface,
+)
 from megatron.core.utils import (
     get_attr_wrapped_model,
     get_model_config,
@@ -17,7 +20,6 @@ from megatron.core.pipeline_parallel.schedules import (
     check_first_val_step,
     finish_embedding_wgrad_compute
 )
-from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.pipeline_parallel.utils import (
     set_streams,
     is_pp_first_stage,
@@ -461,6 +463,7 @@ def forward_backward_pipelining_with_cutinhalf(
     adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
     p2p_communicator: Optional[P2PCommunicator] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: Optional[bool] = False,
 ):
     config = get_model_config(model[0])
     if p2p_communicator is None and pg_collection is None:
@@ -528,18 +531,6 @@ def forward_backward_pipelining_with_cutinhalf(
 
     config = get_model_config(model[0])
     config.batch_p2p_comm = False
-
-    if (
-        not forward_only
-        and config.overlap_moe_expert_parallel_comm
-    ):
-        set_streams()
-
-    if not forward_only and config.fine_grained_activation_offloading:
-        from dcu_megatron.core.pipeline_parallel.fine_grained_activation_offload_dualpipev import (
-            fine_grained_offloading_reset,
-        )
-        fine_grained_offloading_reset()
 
     # Needed only when gradients are finalized in M-Core
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -688,6 +679,8 @@ def forward_backward_pipelining_with_cutinhalf(
         block_level_wgrad_compute=False,
     ):
         """Helper method to run combined forward and backward step"""
+
+        set_streams()
         # forward prepare
         fwd_input_tensor = None
         fwd_microbatch_id = None
@@ -1216,8 +1209,14 @@ def forward_backward_pipelining_with_cutinhalf(
         # data parallelism, layernorm all-reduce for sequence parallelism, and
         # embedding all-reduce for pipeline parallelism).
         config.finalize_model_grads_func(
-            model, total_num_tokens if config.calculate_per_token_loss else None
+            model,
+            total_num_tokens if config.calculate_per_token_loss else None,
+            pg_collection=pg_collection,
+            force_all_reduce=force_all_reduce,
         )
+
+    if not forward_only and config.fine_grained_activation_offloading:
+        off_interface.reset()
 
     # Restore config.grad_sync_func and config.param_sync_func.
     if forward_only:

@@ -4,6 +4,10 @@ from megatron.core.pipeline_parallel.utils import stream_acquire_context, make_v
 from megatron.core.pipeline_parallel.utils import ScheduleNode as MegatronCoreScheduleNode
 
 
+def set_ideal_affinity_for_current_gpu():
+    pass
+
+
 class NoopScheduleNode:
     """A placeholder node in the computation graph that simply passes through inputs and outputs.
 
