@@ -1293,7 +1293,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         stride: int = 1,
         keep_master_weight_for_test: bool = False,
         is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
+        tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 

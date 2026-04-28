@@ -238,6 +238,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
+                                    TEGroupedMLP.bias_act_func)
         # (1) cpu offload. (2) seq1f1b
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
                                     attention_init_wrapper,
@@ -263,7 +265,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
 
     def patch_core_tokenizers(self):
-        from ..core.tokenizers.text.utils.build_tokenizer import build_tokenizer_wrapper
+        from ..core.tokenizers.utils.build_tokenizer import build_tokenizer_wrapper
 
         MegatronAdaptation.register('megatron.core.tokenizers.text.utils.build_tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
@@ -278,7 +280,6 @@ class CoreAdaptation(MegatronAdaptationABC):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
 
     def patch_tensor_parallel(self):
-        from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.parallel_state import log_timing_wrapper
         from ..core.tensor_parallel.random import checkpoint_wrapper
 
@@ -286,10 +287,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
-
-        # VocabParallelCrossEntropy
-        MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy.VocabParallelCrossEntropy.calculate_predicted_logits',
-                                    VocabParallelCrossEntropy.calculate_predicted_logits)
         # _VocabParallelCrossEntropy
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
                                     remove_origin_wrappers=True)        

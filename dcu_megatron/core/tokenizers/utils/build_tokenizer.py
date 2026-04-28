@@ -9,9 +9,10 @@ from dcu_megatron.training.tokenizer.tokenizer import (
     _Qwen2VLTokenizer,
 )
 
+
 def build_tokenizer_wrapper(build_tokenizer_func):
     @wraps(build_tokenizer_func)
-    def wrapper(args):
+    def wrapper(args, **kwargs):
         extra_tokenizer_types = {
             "Llama3Tokenizer",
             "QwenTokenizer",
@@ -40,6 +41,6 @@ def build_tokenizer_wrapper(build_tokenizer_func):
 
             return tokenizer
 
-        return build_tokenizer_func(args)
+        return build_tokenizer_func(args, **kwargs)
 
     return wrapper

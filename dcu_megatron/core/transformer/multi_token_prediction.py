@@ -58,7 +58,12 @@ def get_mtp_num_layers_to_build(
 class MultiTokenPredictionLayer:
     def backward_dw(self):
         self.eh_proj.backward_dw()
-        self.transformer_layer.backward_dw()
+        if (
+            hasattr(self, "mtp_model_layer")
+            and hasattr(self.mtp_model_layer, "backward_dw")
+            and callable(self.mtp_model_layer.backward_dw)
+        ):
+            self.mtp_model_layer.backward_dw()
 
 
 class MultiTokenPredictionBlock:
@@ -104,8 +109,9 @@ class MultiTokenPredictionBlock:
         offset = get_mtp_layer_offset(self.config, self.vp_stage)
         hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))
         hidden_states = hidden_states_list[offset]
-        for layer_number in range(len(self.layers)):
-            (hidden_states, input_ids, position_ids) = self.layers[layer_number](
+        for iteration in range(self.config.mtp_num_layers):
+            layer_idx = 0 if self.mtp_use_repeated_layer else iteration
+            (hidden_states, input_ids, position_ids) = self.layers[layer_idx](
                 input_ids=input_ids,
                 position_ids=position_ids,
                 hidden_states=hidden_states,

@@ -14,9 +14,56 @@ from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
+from megatron.core.typed_torch import apply_module
 
 
 class TEGroupedMLP():
+    def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
+        """
+        Applies bias and activation function to the output of linear_fc1.
+        """
+        if self.config.use_te_activation_func:
+            if bias_parallel is not None:
+                intermediate_parallel = intermediate_parallel + bias_parallel
+            intermediate_parallel = self.activation_func(intermediate_parallel)
+            if permuted_probs is not None:
+                original_dtype = intermediate_parallel.dtype
+                intermediate_parallel = intermediate_parallel * permuted_probs
+                intermediate_parallel = intermediate_parallel.to(original_dtype)
+        elif self.config.bias_activation_fusion:
+            if self.activation_func == F.silu and self.config.gated_linear_unit:
+                # dtype is handled inside the fused kernel
+                intermediate_parallel = weighted_bias_swiglu_impl(
+                    intermediate_parallel,
+                    bias_parallel,
+                    permuted_probs,
+                    self.config.activation_func_fp8_input_store,
+                )
+            elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
+                intermediate_parallel = weighted_bias_quick_geglu_impl(
+                    intermediate_parallel,
+                    bias_parallel,
+                    permuted_probs,
+                    self.config.activation_func_fp8_input_store,
+                    self.config.glu_linear_offset,
+                    self.config.activation_func_clamp_value,
+                )
+            else:
+                raise ValueError("Only support fusion of swiglu and quick_gelu in TEGroupedMLP.")
+        elif (
+            self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
+        ):
+            assert bias_parallel is None, "Bias is not supported with fused weighted squared relu."
+            intermediate_parallel = weighted_squared_relu_impl(
+                intermediate_parallel, permuted_probs
+            )
+        else:
+            from dcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
+
+            intermediate_parallel = fused_bias_gelu(self, intermediate_parallel, permuted_probs)
+
+        return intermediate_parallel
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -34,7 +81,7 @@ class TEGroupedMLP():
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        tokens_per_expert = tokens_per_expert.tolist()
+        tokens_per_expert: list[int] = tokens_per_expert.tolist()
         if self.config.fp8 or self.config.fp4:
             actual_tokens_per_expert = tokens_per_expert
             permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
@@ -59,7 +106,7 @@ class TEGroupedMLP():
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
-            fc1_output, bias_parallel = self.linear_fc1(
+            fc1_output, bias_parallel = apply_module(self.linear_fc1)(
                 permuted_local_hidden_states, tokens_per_expert
             )
         if self.offload_expert_fc1:
@@ -69,62 +116,17 @@ class TEGroupedMLP():
                 forced_released_tensors=[permuted_local_hidden_states],
             )
 
-        def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
-            if self.config.use_te_activation_func:
-                if bias_parallel is not None:
-                    intermediate_parallel = intermediate_parallel + bias_parallel
-                intermediate_parallel = self.activation_func(intermediate_parallel)
-                if permuted_probs is not None:
-                    original_dtype = intermediate_parallel.dtype
-                    intermediate_parallel = intermediate_parallel * permuted_probs
-                    intermediate_parallel = intermediate_parallel.to(original_dtype)
-            elif self.config.bias_activation_fusion:
-                if self.activation_func == F.silu and self.config.gated_linear_unit:
-                    # dtype is handled inside the fused kernel
-                    intermediate_parallel = weighted_bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        permuted_probs,
-                        self.config.activation_func_fp8_input_store,
-                    )
-                elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
-                    intermediate_parallel = weighted_bias_quick_geglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        permuted_probs,
-                        self.config.activation_func_fp8_input_store,
-                        self.config.glu_linear_offset,
-                        self.config.activation_func_clamp_value,
-                    )
-                else:
-                    raise ValueError(
-                        "Only support fusion of swiglu and quick_gelu in TEGroupedMLP."
-                    )
-            elif (
-                self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
-            ):
-                assert bias_parallel is None
-                intermediate_parallel = weighted_squared_relu_impl(
-                    intermediate_parallel, permuted_probs
-                )
-            else:
-                from dcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
-
-                intermediate_parallel = fused_bias_gelu(self, intermediate_parallel, permuted_probs)
-
-            return intermediate_parallel
-
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = self.activation_checkpoint.checkpoint(
-                    bias_act_func, fc1_output, bias_parallel, permuted_probs
+                    self.bias_act_func, fc1_output, bias_parallel, permuted_probs
                 )
         else:
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
+                bias_act_output = self.bias_act_func(fc1_output, bias_parallel, permuted_probs)
 
-        output, output_bias = self.linear_fc2(bias_act_output, tokens_per_expert)
+        output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 
