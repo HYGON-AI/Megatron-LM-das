@@ -162,7 +162,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_dist_checkpointing(self):
         adaptor_args = get_adaptor_args()
         if adaptor_args.use_ckpt_memory_cache:
-            from ..core.dist_checkpoint.strategies.filesystem_async import write_preloaded_data, preload_tensors
+            from ..core.dist_checkpoint.strategies.filesystem_async import FileSystemWriterAsync
             from ..core.dist_checkpoint.strategies.torch import TorchDistLoadShardedStrategy
 
             from ..core.dist_checkpoint.validation import _compute_shards_access
@@ -171,9 +171,9 @@ class CoreAdaptation(MegatronAdaptationABC):
 
             # ckpt-memory-cache
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.write_preloaded_data',
-                                        write_preloaded_data)
+                                        FileSystemWriterAsync.write_preloaded_data)
             MegatronAdaptation.register('megatron.core.dist_checkpointing.strategies.filesystem_async.FileSystemWriterAsync.preload_tensors',
-                                        preload_tensors)
+                                        FileSystemWriterAsync.preload_tensors)
             MegatronAdaptation.register_cls_funcs('megatron.core.dist_checkpointing.strategies.torch.TorchDistLoadShardedStrategy',
                                                   [TorchDistLoadShardedStrategy.load,
                                                    TorchDistLoadShardedStrategy.load_tensors_metadata,
@@ -214,7 +214,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.models.common.embeddings.language_model_embedding.LanguageModelEmbedding.forward',
                                     LanguageModelEmbedding.forward)
         MegatronAdaptation.register('megatron.core.models.gpt.gpt_model.GPTModel.shared_embedding_or_output_weight',
-                                    GPTModel.shared_embedding_or_output_weight)
+                                    GPTModel.shared_embedding_or_output_weight,
+                                    create_dummy=True)
 
     def patch_core_transformers(self):
         from ..core.transformer.transformer_config import transformer_config_post_init_wrapper

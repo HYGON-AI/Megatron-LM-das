@@ -1,8 +1,6 @@
 from contextlib import nullcontext
-from typing import Optional
 
 import torch
-from torch import Tensor
 
 from megatron.training import get_args
 from megatron.core.enums import Fp8Recipe
@@ -11,12 +9,9 @@ from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.pipeline_parallel.utils import (
     NoopScheduleNode,
     get_comm_stream,
-    get_comp_stream,
 )
-from megatron.core.models.common.model_chunk_schedule_plan import ModelChunkState
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan as MegatronTransformerLayerSchedulePlan
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan as MegatronTransformerModelChunkSchedulePlan
-from megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
 
 
 F_DISPATCH_B_MLP_SYNC_EVENT = None

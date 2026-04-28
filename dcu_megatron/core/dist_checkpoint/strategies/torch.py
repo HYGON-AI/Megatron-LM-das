@@ -35,8 +35,12 @@ from megatron.core.dist_checkpointing.strategies.torch import (
 class TorchDistLoadShardedStrategy():
     """Basic load strategy for the PyT Distributed format."""
 
-
-    def load(self, sharded_state_dict: ShardedStateDict, checkpoint_dir: Path) -> StateDict:
+    def load(
+        self,
+        sharded_state_dict: ShardedStateDict,
+        checkpoint_dir: Path,
+        async_strategy: str = "nvrx",
+    ) -> StateDict:
         """Translates MCore ShardedTensors to PyT ShardedTensors & loads from PyT Distributed fmt.
 
         Args:
@@ -64,19 +68,22 @@ class TorchDistLoadShardedStrategy():
         )
         pyt_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, True)
         # Load PyT Distributed format
-        fsr = CachedMetadataFileSystemReader(checkpoint_dir)
+        fsr = CachedMetadataFileSystemReader(checkpoint_dir, cache_metadata=self.cache_metadata)
         checkpoint.load_state_dict(
             pyt_state_dict,
             fsr,
             planner=MCoreLoadPlanner(
                 shapes_validation_sharded_tensors=flexible_shape_sharded_tensors,
                 allow_shape_mismatch_sharded_tensors=allow_shape_mismatch_sharded_tensors,
+                flatten_state_dict=False,
+                flatten_sharded_tensors=False,
             ),
         )
 
-        self.cached_global_metadata = (
-            fsr.read_metadata()
-        )  # no storage interaction thanks to caching
+        if self.cache_metadata:
+            self.cached_global_metadata = (
+                fsr.read_metadata()
+            )  # no storage interaction thanks to caching
 
         pyt_state_dict = cast(
             Dict[str, Union[TorchShardedTensor, List[io.BytesIO]]], pyt_state_dict

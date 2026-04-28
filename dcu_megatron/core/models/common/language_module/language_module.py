@@ -2,7 +2,10 @@ import logging
 
 import torch
 
-from megatron.core import parallel_state
+from megatron.core.pipeline_parallel.utils import (
+    is_pp_first_stage,
+    is_vp_first_stage,
+)
 from megatron.training.utils import unwrap_model
 
 
@@ -13,13 +16,39 @@ class LanguageModule():
         This function initalizes word embeddings in the final stage when we are
         using pipeline parallelism and sharing word embeddings, and sets up param
         attributes on the embedding and output layers.
+
+        Parameter attributes set:
+        - `is_embedding_or_output_parameter`: True for embedding + output layer weights.
+          Used by decoupled_lr, Muon optimizer, and other Megatron features.
+        - `is_embedding_parameter`: True for MuP "embedding-class" parameters.
+          Used by MuP for table-8 style optimizer grouping (base LR/eps for vector-like params).
         """
 
-        # Set `is_embedding_or_output_parameter` attribute.
-        if self.has_vocab_embedding:
+        # Mark embedding and output layer for decoupled_lr and other features.
+        # This is the original Megatron attribute used by decoupled_lr, Muon, FSDP, etc.
+        if self.has_vocab_embedding and hasattr(self, 'embedding'):
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
-        if self.post_process and self.output_layer.weight is not None:
+        if (
+            self.post_process
+            and hasattr(self, 'output_layer')
+            and self.output_layer.weight is not None
+        ):
             self.output_layer.weight.is_embedding_or_output_parameter = True
+
+        # Mark embedding-class parameters for MuP optimizer grouping.
+        # Under MuP table-8-style grouping, embeddings/output use base LR/eps while
+        # hidden matrix-like params use width-scaled LR/eps.
+        mtp_process = getattr(self, 'mtp_process', False)
+        if self.config.use_mup and (self.pre_process or mtp_process) and hasattr(self, 'embedding'):
+            for param in self.embedding.parameters():
+                param.is_embedding_parameter = True
+        if (
+            self.config.use_mup
+            and self.post_process
+            and hasattr(self, 'output_layer')
+            and self.output_layer.weight is not None
+        ):
+            self.output_layer.weight.is_embedding_parameter = True
 
         # If share_embeddings_and_output_weights is True, we need to maintain duplicated
         # embedding weights in post processing stage. If use Multi-Token Prediction (MTP),
@@ -61,6 +90,9 @@ class LanguageModule():
             weight.data.fill_(0)
             weight.shared = True
             weight.shared_embedding = True
+            # Keep optimizer grouping consistent for tied embedding/output copies.
+            if self.config.use_mup:
+                weight.is_embedding_parameter = True
 
         # Parameters are shared between the word embeddings layers, and the
         # heads at the end of the model. In a pipelined setup with more than
@@ -78,7 +110,7 @@ class LanguageModule():
         # Ensure that first and last stages have the same initial parameter
         # values.
         if torch.distributed.is_initialized():
-            if self._is_in_embd_group():
+            if self._is_in_embd_group() and not self.config.init_model_with_meta_device:
                 weight = self.shared_embedding_or_output_weight()
                 weight.data = weight.data.cuda()
                 torch.distributed.all_reduce(weight.data, group=self.embd_group)
