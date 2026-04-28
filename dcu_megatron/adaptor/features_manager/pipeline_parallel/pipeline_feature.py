@@ -2,8 +2,7 @@ import os
 import re
 
 from argparse import ArgumentParser
-from megatron.core import parallel_state
-from megatron.core.utils import is_te_min_version, is_torch_min_version
+from megatron.core.utils import is_te_min_version
 
 from ..feature import AbstractFeature
 
@@ -215,7 +214,8 @@ class PipelineFeature(AbstractFeature):
                 GPTModel.__init__)
             patch_manager.register_patch(
                 'megatron.core.models.gpt.gpt_model.GPTModel.shared_embedding_or_output_weight',
-                GPTModel.shared_embedding_or_output_weight)
+                GPTModel.shared_embedding_or_output_weight,
+                create_dummy=True)
 
             # set _GLOBAL_TENSORBOARD_WRITER, _GLOBAL_WANDB_WRITER, _GLOBAL_ONE_LOGGER
             patch_manager.register_patch('megatron.training.global_vars._set_tensorboard_writer', _set_tensorboard_writer)

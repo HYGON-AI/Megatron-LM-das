@@ -35,15 +35,15 @@ class _ParamAndGradBucket:
     """
 
     def __init__(
-            self,
-            params: List[torch.nn.Parameter],
-            param_data: Optional[torch.Tensor],
-            grad_data: torch.Tensor,
-            offset: int,
-            numel_unpadded: int,
-            gradient_scaling_factor: float,
-            bucket_id: int,
-            components: Optional[List[Tuple[torch.nn.Parameter, int, torch.Size]]] = None,
+        self,
+        params: List[torch.nn.Parameter],
+        param_data: Optional[torch.Tensor],
+        grad_data: torch.Tensor,
+        offset: int,
+        numel_unpadded: int,
+        gradient_scaling_factor: float,
+        bucket_id: int,
+        components: Optional[List[Tuple[torch.nn.Parameter, int, torch.Size]]] = None,
     ):
         self.params_list = params
         self.params = set(params)
