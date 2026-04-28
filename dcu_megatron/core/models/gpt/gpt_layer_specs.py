@@ -48,13 +48,13 @@ def get_gpt_layer_with_flux_spec(
     qk_layernorm: Optional[bool] = False,
     multi_latent_attention: Optional[bool] = False,
     fp8: Optional[str] = None,  # pylint: disable=unused-argument
-    moe_use_legacy_grouped_gemm: Optional[bool] = False,
     qk_l2_norm: Optional[bool] = False,
     use_te_op_fuser: Optional[bool] = False,  # pylint: disable=unused-argument
     use_kitchen: bool = False,  # pylint: disable=unused-argument
     use_te_activation_func: bool = False,  # pylint: disable=unused-argument
     use_kitchen_attention: bool = False,  # pylint: disable=unused-argument
     kitchen_attention_backend: str = "sdpa",  # pylint: disable=unused-argument
+    mla_down_proj_fusion: bool = False,
 ) -> ModuleSpec:
     """Use this spec to use flux modules (required for fp8 training).
 
@@ -82,7 +82,6 @@ def get_gpt_layer_with_flux_spec(
         use_te=False,
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
-        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
     )
 
     if multi_latent_attention:
@@ -150,7 +149,6 @@ def get_mlp_module_flux_spec(
     use_te: Optional[bool] = True,
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
-    moe_use_legacy_grouped_gemm: Optional[bool] = False,
 ) -> ModuleSpec:
     """Helper function to get module spec for MLP/MoE"""
 
@@ -169,5 +167,4 @@ def get_mlp_module_flux_spec(
             use_te=True,
             num_experts=num_experts,
             moe_grouped_gemm=moe_grouped_gemm,
-            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         )

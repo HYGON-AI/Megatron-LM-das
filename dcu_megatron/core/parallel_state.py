@@ -216,6 +216,8 @@ def initialize_model_parallel_wrapper(fn):
         high_priority_stream_groups: Optional[List[str]] = None,
         sharp_enabled_group: Optional[str] = None,
         create_all_gather_group: Optional[bool] = False,
+        rank_offset: int = 0,
+        local_world_size: Optional[int] = None,
     ) -> None:
         fn(
             tensor_model_parallel_size=tensor_model_parallel_size,
@@ -238,12 +240,16 @@ def initialize_model_parallel_wrapper(fn):
             high_priority_stream_groups=high_priority_stream_groups,
             sharp_enabled_group=sharp_enabled_group,
             create_all_gather_group=create_all_gather_group,
+            rank_offset=rank_offset,
+            local_world_size=local_world_size,
         )
 
         global _LM_HEAD_MODEL_PARALLEL_GROUP
         assert _LM_HEAD_MODEL_PARALLEL_GROUP is None, 'lm head model parallel group is already initialized'
 
-        world_size: int = torch.distributed.get_world_size()
+        world_size: int = (
+            local_world_size if local_world_size is not None else torch.distributed.get_world_size()
+        )
 
         model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
 
@@ -261,7 +267,7 @@ def initialize_model_parallel_wrapper(fn):
             pp=pipeline_model_parallel_size,
             cp=context_parallel_size,
             order=order,
-            rank_offset=0,
+            rank_offset=rank_offset,
         )
 
         nccl_comm_cfgs = {}

@@ -218,12 +218,14 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     create_dummy=True)
 
     def patch_core_transformers(self):
-        from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
+        from ..core.transformer.transformer_config import TransformerConfig, transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         from ..core.transformer.attention import attention_init_wrapper, self_attention_get_query_key_value_tensors_wrapper
         from ..core.transformer.moe.experts import TEGroupedMLP
 
         # Transformer config, add new params
+        MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
+                                    TransformerConfig)
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
                                     transformer_config_post_init_wrapper)
         # support experts_recompute
@@ -363,9 +365,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     set_ideal_affinity_for_current_gpu)
 
     def patch_training(self):
-        from ..training.tokenizer import build_tokenizer_wrapper, SFTTokenizer
         from ..training.initialize import _initialize_distributed
-        from ..training.initialize import _compile_dependencies
         from ..training.training import train
         from ..training.initialize import _set_random_seed
         from ..training.training import train_step
@@ -373,15 +373,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.utils import get_batch_on_this_tp_rank
         from ..training.arguments import core_transformer_config_from_args_wrapper
 
-        MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
-                                    build_tokenizer_wrapper,
-                                    apply_wrapper=True)
         # specify init_method
         MegatronAdaptation.register('megatron.training.initialize._initialize_distributed',
                                     _initialize_distributed)
-        # remove fused_kernels
-        MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
-                                    _compile_dependencies)
 
         # Add a fixed seed.
         MegatronAdaptation.register('megatron.training.initialize._set_random_seed',
@@ -396,10 +390,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         # (1) edgc, (2) ckpt add save/load iter info to ckpt
         MegatronAdaptation.register('megatron.training.training.setup_model_and_optimizer',
                                     setup_model_and_optimizer)
-
-        # support sft
-        MegatronAdaptation.register('megatron.training.tokenizer.sft_tokenizer.SFTTokenizer.pad',
-                                    SFTTokenizer.pad)
 
         # (1) dualpipev, (2) vocabulary parallelism
         MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
