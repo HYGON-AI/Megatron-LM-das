@@ -95,7 +95,7 @@ class _Llama3Tokenizer(MegatronLegacyTokenizer):
 
 
 class _Qwen2Tokenizer(MegatronLegacyTokenizer):
-    def __init__(self, vocab_file, merge_file,extra_vocab_size=0):
+    def __init__(self, vocab_file, merge_file, extra_vocab_size=0):
         super().__init__(vocab_file, merge_file)
         self.tokenizer = Qwen2Tokenizer(vocab_file, merge_file)
         self.extra_vocab_size = extra_vocab_size

@@ -1,3 +1,4 @@
+import os
 import argparse
 
 from typing import Union
@@ -67,6 +68,10 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     # Args from environment
     # args.rank = int(os.getenv('RANK', '0'))
     # args.world_size = int(os.getenv("WORLD_SIZE", '1'))
+
+    # set rank that safe_get_rank can use
+    os.environ['RANK'] = str(args.rank)
+    os.environ['WORLD_SIZE'] = str(args.world_size)
 
     # Args to disable MSC
     if not args.enable_msc:
@@ -228,6 +233,9 @@ def validate_args_func_decorator(validate_args_func):
 
         args = validate_args_func(args, defaults)
 
+        # print env vars
+        _print_env_vars("env vars", exclude_vars=["BASH_FUNC", "OMPI"])
+
         args_dict = vars(args)
         for key, value in ORIGIN_ARG_VALUES.items():
             if key in args_dict:
@@ -254,5 +262,46 @@ def _print_args_wrapper(fn):
         args = argparse.Namespace(**args_dict)
 
         fn(title, args)
+
+    return wrapper
+
+
+def _print_env_vars(title, exclude_vars=None):
+    """Print arguments."""
+    def _is_exclude_var(key):
+        if exclude_vars is None:
+            return False
+
+        for var in exclude_vars:
+            if key.startswith(var):
+                return True
+
+        return False
+
+    from megatron.training.utils import is_rank0
+    if is_rank0():
+        print(f'------------------------ {title} ------------------------', flush=True)
+        str_list = []
+        for key in os.environ.keys():
+            if _is_exclude_var(key):
+                continue
+            dots = '.' * (48 - len(key))
+            str_list.append('  {} {} {}'.format(key, dots, os.environ[key]))
+        for arg in sorted(str_list, key=lambda x: x.lower()):
+            print(arg, flush=True)
+        print(f'-------------------- end of {title} ---------------------', flush=True)
+
+
+_CONFIG = None
+
+def core_transformer_config_from_args_wrapper(func):
+    @wraps(func)
+    def wrapper(args, config_class=None):
+        global _CONFIG
+        if _CONFIG is not None:
+            return _CONFIG
+
+        _CONFIG = func(args, config_class=config_class)
+        return _CONFIG
 
     return wrapper

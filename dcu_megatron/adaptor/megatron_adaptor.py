@@ -3,12 +3,9 @@ import abc
 import argparse
 import torch
 
-from megatron.core.utils import is_te_min_version
-
 from .features_manager import ADAPTOR_FEATURES
 from .patch_utils import MegatronPatchesManager
 from dcu_megatron.training.arguments import process_adaptor_args
-from megatron.training import get_args
 
 _ARGS = None
 
@@ -376,6 +373,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.training import train_step
         from ..training.training import setup_model_and_optimizer
         from ..training.utils import get_batch_on_this_tp_rank
+        from ..training.arguments import core_transformer_config_from_args_wrapper
 
         MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
@@ -407,6 +405,10 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         # (1) dualpipev, (2) vocabulary parallelism
         MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
+
+        # prevent re-initialization of config
+        MegatronAdaptation.register('megatron.training.arguments.core_transformer_config_from_args',
+                                    core_transformer_config_from_args_wrapper)
 
     def patch_miscellaneous(self):
         from ..training.arguments import parse_args, validate_args_func_decorator, _print_args_wrapper
