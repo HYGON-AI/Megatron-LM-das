@@ -8,6 +8,7 @@ from megatron.core import parallel_state, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.typed_torch import apply_module
 from megatron.core.utils import (
     deprecate_inference_params,
     nvtx_range_pop,

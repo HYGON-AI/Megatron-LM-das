@@ -218,14 +218,12 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     create_dummy=True)
 
     def patch_core_transformers(self):
-        from ..core.transformer.transformer_config import TransformerConfig, transformer_config_post_init_wrapper
+        from ..core.transformer.transformer_config import transformer_config_post_init_wrapper
         from ..core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         from ..core.transformer.attention import attention_init_wrapper, self_attention_get_query_key_value_tensors_wrapper
         from ..core.transformer.moe.experts import TEGroupedMLP
 
         # Transformer config, add new params
-        MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig',
-                                    TransformerConfig)
         MegatronAdaptation.register('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
                                     transformer_config_post_init_wrapper)
         # support experts_recompute
@@ -240,7 +238,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
-        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.bias_act_func',
                                     TEGroupedMLP.bias_act_func)
         # (1) cpu offload. (2) seq1f1b
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
@@ -269,7 +267,7 @@ class CoreAdaptation(MegatronAdaptationABC):
     def patch_core_tokenizers(self):
         from ..core.tokenizers.utils.build_tokenizer import build_tokenizer_wrapper
 
-        MegatronAdaptation.register('megatron.core.tokenizers.text.utils.build_tokenizer.build_tokenizer',
+        MegatronAdaptation.register('megatron.core.tokenizers.utils.build_tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
                                     apply_wrapper=True)
 
@@ -278,8 +276,14 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
+        from ..core.extensions.transformer_engine import get_cpu_offload_context
+
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
+
+        # te_min_version 2.5.0 -> 2.10.0
+        MegatronAdaptation.register('megatron.core.extensions.transformer_engine.get_cpu_offload_context',
+                                    get_cpu_offload_context)
 
     def patch_tensor_parallel(self):
         from ..core.parallel_state import log_timing_wrapper

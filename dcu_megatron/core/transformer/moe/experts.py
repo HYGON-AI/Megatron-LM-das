@@ -10,7 +10,6 @@ from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_r
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
-from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
@@ -147,7 +146,7 @@ class TEGroupedMLP():
         return output, output_bias
 
 
-class PrimusTurboGroupedMLP(GroupedMLP):
+class PrimusTurboGroupedMLP():
     def __init__(
         self,
         num_local_experts: int,

@@ -1,5 +1,5 @@
 from functools import wraps
-from dataclasses import make_dataclass, field
+from dataclasses import make_dataclass, dataclass, field
 from typing import Literal
 
 from megatron.training import get_args
