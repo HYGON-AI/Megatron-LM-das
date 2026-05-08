@@ -1,7 +1,16 @@
 from functools import wraps
-from dataclasses import make_dataclass, field
+from dataclasses import make_dataclass, dataclass, field
+from typing import Literal
 
 from megatron.training import get_args
+from megatron.core.transformer.transformer_config import TransformerConfig as MegatronCoreTransformerConfig
+
+
+@dataclass
+class TransformerConfig(MegatronCoreTransformerConfig):
+
+    normalization: Literal['LayerNorm', 'RMSNorm', 'LightopRMSNorm'] = "LayerNorm"
+    """Which norm to use for normalization layers, valid options are `LayerNorm`, `RMSNorm` and `LightopRMSNorm`. """
 
 
 def transformer_config_post_init_wrapper(post_init_func):

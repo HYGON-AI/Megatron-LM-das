@@ -1,9 +1,23 @@
+import math
 from functools import wraps
 
 from transformers import AutoTokenizer, Qwen2Tokenizer, AutoProcessor
-from megatron.core.datasets.megatron_tokenizer import MegatronLegacyTokenizer
-from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
 
+
+def _vocab_size_with_padding(orig_vocab_size, args, logging_enabled=True):
+    """Pad vocab size so it is divisible by model parallel size and
+    still having GPU friendly size."""
+
+    after = orig_vocab_size
+    multiple = args.make_vocab_size_divisible_by * args.tensor_model_parallel_size
+    after = int(math.ceil(after / multiple) * multiple)
+    if args.rank == 0 and logging_enabled:
+        print(
+            f' > padded vocab (size: {orig_vocab_size}) with '
+            f'{after - orig_vocab_size} dummy tokens '
+            f'(new size: {after})'
+        )
+    return after
 
 def build_tokenizer_wrapper(build_tokenizer_func):
     @wraps(build_tokenizer_func)
@@ -41,13 +55,11 @@ def build_tokenizer_wrapper(build_tokenizer_func):
     return wrapper
 
 
-class _Llama3Tokenizer(MegatronLegacyTokenizer):
+class _Llama3Tokenizer():
     """tiktokenTokenizer-Megatron llama3 改写"""
     # https://github.com/meta-llama/llama3/blob/main/llama/tokenizer.py
 
     def __init__(self, model_file):
-        super().__init__(model_file)
-        from pathlib import Path
         import tiktoken
         from tiktoken.load import load_tiktoken_bpe
         tokenizer_path=model_file
@@ -94,9 +106,8 @@ class _Llama3Tokenizer(MegatronLegacyTokenizer):
         return self.eod_id
 
 
-class _Qwen2Tokenizer(MegatronLegacyTokenizer):
+class _Qwen2Tokenizer():
     def __init__(self, vocab_file, merge_file, extra_vocab_size=0):
-        super().__init__(vocab_file, merge_file)
         self.tokenizer = Qwen2Tokenizer(vocab_file, merge_file)
         self.extra_vocab_size = extra_vocab_size
         self.tokenizer.add_special_tokens(special_tokens_dict=dict(pad_token="<|extra_0|>"))
@@ -132,9 +143,8 @@ class _Qwen2Tokenizer(MegatronLegacyTokenizer):
         return self.tokenizer.pad_token_id
 
 
-class _DeepSeekV2Tokenizer(MegatronLegacyTokenizer):
+class _DeepSeekV2Tokenizer():
     def __init__(self, tokenizer_path, extra_vocab_size):
-        super().__init__(tokenizer_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             padding_side="right",
@@ -197,9 +207,8 @@ class _DeepSeekV2Tokenizer(MegatronLegacyTokenizer):
         return self.tokenizer.eos_token_id
 
 
-class _Qwen2VLTokenizer(MegatronLegacyTokenizer):
+class _Qwen2VLTokenizer():
     def __init__(self, tokenizer_path, extra_vocab_size):
-        super().__init__(tokenizer_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_path,
             padding_side="right",

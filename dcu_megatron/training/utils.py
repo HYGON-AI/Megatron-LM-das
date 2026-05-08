@@ -109,25 +109,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['loss_mask'])
             _broadcast(batch['attention_mask'])
 
-        def _broadcast_cu_seqlens(cu_seqlens):
-            dev = torch.cuda.current_device()
-
-            n = 0 if cu_seqlens is None else int(cu_seqlens.numel())
-            n_tensor = torch.tensor(n, dtype=torch.int64, device=dev)
-            _broadcast(n_tensor)
-
-            if n == 0:
-                buf = torch.empty(0, dtype=torch.int32, device=dev)
-            else:
-                assert isinstance(cu_seqlens, torch.Tensor)
-                assert cu_seqlens.dtype == torch.int32
-                assert cu_seqlens.shape[0] == 1, "micro-batch-size must be 1 for packing"
-                buf = cu_seqlens.to(device=dev, non_blocking=True).contiguous()
-            _broadcast(buf)
-
-        _broadcast_cu_seqlens(batch['cu_seqlens'])
-        _broadcast(batch['max_seqlen'])
-
     else:
         if args.hybrid_context_parallel:
             seq_len = torch.tensor(0, dtype=torch.int32, device=torch.cuda.current_device())
@@ -166,7 +147,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             device=torch.cuda.current_device(),
         )
         cu_seqlens = None
-        if args.sft:
+        if args.hybrid_context_parallel or args.sft:
             max_seqlen = torch.empty(
                 1,
                 dtype=torch.int32,
@@ -175,12 +156,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         else:
             max_seqlen = None
 
-        cu_seqlens = None
-        max_seqlen = torch.empty(
-            1,
-            dtype=torch.int32,
-            device=torch.cuda.current_device(),
-        ) if args.hybrid_context_parallel else None
         local_cp_size = torch.empty(
             1,
             dtype=torch.int32,
@@ -239,24 +214,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(loss_mask)
             _broadcast(attention_mask)
 
-        def _broadcast_cu_seqlens():
-            dev = torch.cuda.current_device()
-
-            n = torch.empty((), dtype=torch.int64, device=dev)
-            _broadcast(n)
-            n = int(n.item())
-
-            if n == 0:
-                cu_seqlens = torch.empty(0, dtype=torch.int32, device=dev)
-            else:
-                cu_seqlens = torch.empty((args.micro_batch_size, n), dtype=torch.int32, device=dev)
-            _broadcast(cu_seqlens)
-
-            return cu_seqlens if n > 0 else None
-
-        cu_seqlens = _broadcast_cu_seqlens()
-        _broadcast(max_seqlen)
-
         batch = {
             'tokens': tokens,
             'labels': labels,
@@ -269,55 +226,3 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         }
 
     return batch
-
-
-def get_ltor_masks_and_position_ids(data,
-                                    eod_token,
-                                    reset_position_ids,
-                                    reset_attention_mask,
-                                    eod_mask_loss):
-    """Build masks and position id for left to right model."""
-
-    # Extract batch size and sequence length.
-    micro_batch_size, seq_length = data.size()
-
-    # Loss mask.
-    loss_mask = torch.ones(data.size(), dtype=torch.float, device=data.device)
-    if eod_mask_loss:
-        loss_mask[data == eod_token] = 0.0
-
-    # Position ids.
-    position_ids = torch.arange(seq_length, dtype=torch.long,
-                                device=data.device)
-    position_ids = position_ids.unsqueeze(0).expand_as(data)
-    # We need to clone as the ids will be modifed based on batch index.
-    if reset_position_ids:
-        position_ids = position_ids.clone()
-
-    if reset_position_ids or reset_attention_mask:
-        # Loop through the batches:
-        for b in range(micro_batch_size):
-
-            # Find indecies where EOD token is.
-            eod_index = position_ids[b, data[b] == eod_token]
-            # Detach indecies from positions if going to modify positions.
-            if reset_position_ids:
-                eod_index = eod_index.clone()
-
-            # Loop through EOD indecies:
-            prev_index = 0
-            for j in range(eod_index.size()[0]):
-                i = eod_index[j]
-                # Mask attention loss.
-                if reset_attention_mask:
-                    attention_mask[b, 0, (i + 1):, :(i + 1)] = 0
-                # Reset positions.
-                if reset_position_ids:
-                    position_ids[b, (i + 1):] -= (i + 1 - prev_index)
-                    prev_index = i + 1
-
-    # Convert attention mask to binary:
-    # attention_mask = (attention_mask < 0.5)
-    attention_mask = None
-
-    return attention_mask, loss_mask, position_ids

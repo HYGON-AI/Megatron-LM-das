@@ -7,7 +7,10 @@ from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.pipeline_parallel.utils import ScheduleNode
 from megatron.core.utils import get_attr_wrapped_model
-from megatron.core.pipeline_parallel.utils import AbstractSchedulePlan
+from megatron.core.pipeline_parallel.utils import (
+    AbstractSchedulePlan,
+    get_comp_stream,
+)
 
 
 def combined_forward_backward_step(
@@ -183,7 +186,7 @@ def combined_forward_backward_step(
         from dcu_megatron.core.pipeline_parallel.dualpipev.dualpipev_schedules import forward_step_calc_loss
 
         loss_node = ScheduleNode(
-            loss_func, torch.cuda.current_stream(), f_schedule_plan.event, name="loss_func"
+            loss_func, get_comp_stream, f_schedule_plan.event, name="loss_func"
         )
         loss_func = loss_node.forward
         output_tensor, num_tokens = forward_step_calc_loss(

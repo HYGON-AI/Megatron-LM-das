@@ -1,8 +1,6 @@
-import contextlib
 from typing import Optional, Tuple, Union
 from functools import wraps
 
-from sympy import im
 import torch
 import transformer_engine as te
 from torch import Tensor
@@ -57,6 +55,7 @@ def attention_init_wrapper(attention_init_func):
         attention_type,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        pp_layer_offset: Optional[int] = None,
     ):
         attention_init_func(
             self,
@@ -67,10 +66,10 @@ def attention_init_wrapper(attention_init_func):
             attention_type=attention_type,
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            pp_layer_offset=pp_layer_offset,
         )
 
-        args = get_args()
-        if args.pipe_sp_splits != 1:
+        if get_args().pipe_sp_splits != 1:
             self.core_attention_flash = FlashSeqSelfAttention(
                 causal=True, softmax_scale=self.config.softmax_scale, attention_dropout=self.config.attention_dropout
             )

@@ -238,6 +238,8 @@ class CoreAdaptation(MegatronAdaptationABC):
         # fused gelu and mul
         MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
+        MegatronAdaptation.register('megatron.core.transformer.moe.experts.TEGroupedMLP.bias_act_func',
+                                    TEGroupedMLP.bias_act_func)
         # (1) cpu offload. (2) seq1f1b
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.__init__',
                                     attention_init_wrapper,
@@ -263,9 +265,9 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     apply_wrapper=True)
 
     def patch_core_tokenizers(self):
-        from ..core.tokenizers.text.utils.build_tokenizer import build_tokenizer_wrapper
+        from ..core.tokenizers.utils.build_tokenizer import build_tokenizer_wrapper
 
-        MegatronAdaptation.register('megatron.core.tokenizers.text.utils.build_tokenizer.build_tokenizer',
+        MegatronAdaptation.register('megatron.core.tokenizers.utils.build_tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
                                     apply_wrapper=True)
 
@@ -274,11 +276,16 @@ class CoreAdaptation(MegatronAdaptationABC):
 
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
+        from ..core.extensions.transformer_engine import get_cpu_offload_context
+
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
 
+        # te_min_version 2.5.0 -> 2.10.0
+        MegatronAdaptation.register('megatron.core.extensions.transformer_engine.get_cpu_offload_context',
+                                    get_cpu_offload_context)
+
     def patch_tensor_parallel(self):
-        from ..core.tensor_parallel.cross_entropy import VocabParallelCrossEntropy
         from ..core.parallel_state import log_timing_wrapper
         from ..core.tensor_parallel.random import checkpoint_wrapper
 
@@ -286,10 +293,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         MegatronAdaptation.register('megatron.core.tensor_parallel.layers.VocabParallelEmbedding.forward',
                                     torch.compile(mode='max-autotune-no-cudagraphs'),
                                     apply_wrapper=True)
-
-        # VocabParallelCrossEntropy
-        MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy.VocabParallelCrossEntropy.calculate_predicted_logits',
-                                    VocabParallelCrossEntropy.calculate_predicted_logits)
         # _VocabParallelCrossEntropy
         MegatronAdaptation.register('megatron.core.tensor_parallel.cross_entropy._VocabParallelCrossEntropy.forward',
                                     remove_origin_wrappers=True)        
@@ -366,9 +369,7 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     set_ideal_affinity_for_current_gpu)
 
     def patch_training(self):
-        from ..training.tokenizer import build_tokenizer_wrapper, SFTTokenizer
         from ..training.initialize import _initialize_distributed
-        from ..training.initialize import _compile_dependencies
         from ..training.training import train
         from ..training.initialize import _set_random_seed
         from ..training.training import train_step
@@ -376,15 +377,9 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..training.utils import get_batch_on_this_tp_rank
         from ..training.arguments import core_transformer_config_from_args_wrapper
 
-        MegatronAdaptation.register('megatron.training.tokenizer.tokenizer.build_tokenizer',
-                                    build_tokenizer_wrapper,
-                                    apply_wrapper=True)
         # specify init_method
         MegatronAdaptation.register('megatron.training.initialize._initialize_distributed',
                                     _initialize_distributed)
-        # remove fused_kernels
-        MegatronAdaptation.register('megatron.training.initialize._compile_dependencies',
-                                    _compile_dependencies)
 
         # Add a fixed seed.
         MegatronAdaptation.register('megatron.training.initialize._set_random_seed',
@@ -399,10 +394,6 @@ class CoreAdaptation(MegatronAdaptationABC):
         # (1) edgc, (2) ckpt add save/load iter info to ckpt
         MegatronAdaptation.register('megatron.training.training.setup_model_and_optimizer',
                                     setup_model_and_optimizer)
-
-        # support sft
-        MegatronAdaptation.register('megatron.training.tokenizer.sft_tokenizer.SFTTokenizer.pad',
-                                    SFTTokenizer.pad)
 
         # (1) dualpipev, (2) vocabulary parallelism
         MegatronAdaptation.register('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)

@@ -1,6 +1,8 @@
+from typing import Callable
+
 import torch
 
-from megatron.core.pipeline_parallel.utils import stream_acquire_context, make_viewless
+from megatron.core.pipeline_parallel.utils import make_viewless
 from megatron.core.pipeline_parallel.utils import ScheduleNode as MegatronCoreScheduleNode
 
 
@@ -43,33 +45,30 @@ class ScheduleNode(MegatronCoreScheduleNode):
             )
 
     def _forward(self, *inputs, stream_wait_event=None, stream_record_event=None):
-        with stream_acquire_context(self.stream, self.event):
-            torch.cuda.nvtx.range_push(f"{self.name} forward")
-            with torch.cuda.stream(self.stream):
-                if stream_wait_event is not None:
-                    stream_wait_event.wait(self.stream)
+        # Lazy initialization of stream
+        if isinstance(self.stream, Callable):
+            self.stream = self.stream()
+        with self.stream_acquire_context(f"{self.name} forward"):
+            if stream_wait_event is not None:
+                stream_wait_event.wait(self.stream)
 
-                self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
-                for i, input in enumerate(self.inputs):
-                    if input is not None:
-                        input.requires_grad = inputs[i].requires_grad
+            self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
+            for i, input in enumerate(self.inputs):
+                if input is not None:
+                    input.requires_grad = inputs[i].requires_grad
 
-                data = tuple(self.inputs)
-                data = self.forward_func(*data)
+            data = tuple(self.inputs)
+            data = self.forward_func(*data)
 
-                if not isinstance(data, tuple):
-                    data = make_viewless(data)
-                else:
-                    data = tuple(
-                        [make_viewless(e) if isinstance(e, torch.Tensor) else e for e in data]
-                    )
+            if not isinstance(data, tuple):
+                data = make_viewless(data)
+            else:
+                data = tuple([make_viewless(e) if isinstance(e, torch.Tensor) else e for e in data])
 
-                self.output = data
+            self.output = data
 
             if stream_record_event is not None:
                 stream_record_event.record(self.stream)
-
-            torch.cuda.nvtx.range_pop()
 
         # Immediately frees input tensors after they are used for nodes
         # where inputs are no longer needed after computation.
@@ -92,25 +91,24 @@ class ScheduleNode(MegatronCoreScheduleNode):
             )
 
     def _backward(self, *output_grad, stream_wait_event=None, stream_record_event=None):
-        with stream_acquire_context(self.stream, self.event):
-            torch.cuda.nvtx.range_push(f"{self.name} backward")
-            with torch.cuda.stream(self.stream):
-                if stream_wait_event is not None:
-                    stream_wait_event.wait(self.stream)
+        # Lazy initialization of stream
+        if isinstance(self.stream, Callable):
+            self.stream = self.stream()
+        with self.stream_acquire_context(f"{self.name} backward"):
+            if stream_wait_event is not None:
+                stream_wait_event.wait(self.stream)
 
-                outputs = self.output
-                if not isinstance(outputs, tuple):
-                    outputs = (outputs,)
-                assert len(outputs) == len(output_grad), (
-                    f"{len(outputs)} of {type(outputs[0])} is not equal to "
-                    f"{len(output_grad)} of {type(output_grad[0])}"
-                )
-                output_grad = self.backward_func(outputs, output_grad)
+            outputs = self.output
+            if not isinstance(outputs, tuple):
+                outputs = (outputs,)
+            assert len(outputs) == len(output_grad), (
+                f"{len(outputs)} of {type(outputs[0])} is not equal to "
+                f"{len(output_grad)} of {type(output_grad[0])}"
+            )
+            output_grad = self.backward_func(outputs, output_grad)
 
             if stream_record_event is not None:
                 stream_record_event.record(self.stream)
-
-            torch.cuda.nvtx.range_pop()
 
         # output_grad maybe from another stream
         if output_grad:

@@ -7,8 +7,12 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+from megatron.core.utils import is_te_min_version
 
-import primus.backends.transformer_engine.pytorch.triton.permutation as triton_permutation
+try:
+    import primus.backends.transformer_engine.pytorch.triton.permutation as triton_permutation
+except ImportError:
+    warnings.warn(f"Failed to import primus.backends.transformer_engine.pytorch.triton.permutation")
 
 __all__ = [
     "moe_permute",
@@ -756,3 +760,44 @@ def moe_sort_chunks_by_index_with_probs(
     """
     output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
     return output, permuted_probs
+
+
+try:
+    from transformer_engine.pytorch.cpu_offload import (
+        get_cpu_offload_context as _get_cpu_offload_context,
+    )
+
+    def get_cpu_offload_context(
+        enabled,
+        num_layers,
+        model_layers,
+        activation_offloading,
+        weight_offloading,
+        double_buffering,
+        retain_pinned_cpu_buffers,
+    ):
+        """Get CPU offload context and sync function."""
+        if is_te_min_version("2.10.0"):
+            # Enables the additional double buffering switch for activations during LLM training
+            context, sync_func = _get_cpu_offload_context(
+                enabled,
+                num_layers,
+                model_layers,
+                activation_offloading,
+                weight_offloading,
+                double_buffering,
+                retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
+            )
+        elif is_te_min_version("1.10.0.dev0"):
+            context, sync_func = _get_cpu_offload_context(
+                enabled, num_layers, model_layers, activation_offloading, weight_offloading
+            )
+        else:
+            context, sync_func = _get_cpu_offload_context(
+                enabled, num_layers, activation_offloading, weight_offloading
+            )
+
+        return context, sync_func
+
+except ImportError:
+    get_cpu_offload_context = None  # type: ignore[assignment, misc]
