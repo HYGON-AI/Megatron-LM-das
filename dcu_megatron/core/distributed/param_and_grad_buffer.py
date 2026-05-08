@@ -339,8 +339,6 @@ class _ParamAndGradBucketGroup:
         makes synchronous call.
         """
         args = get_args()
-        if self.grad_reduce_handle is None:
-            return  # skip empty bucket
 
         self.param_gather_dispatched = False
         # If overlap_grad_reduce is False, start (and finish) synchronous communication call here.
@@ -357,6 +355,10 @@ class _ParamAndGradBucketGroup:
         if self.ddp_config.num_distributed_optimizer_instances > 1:
             torch.cuda.default_stream().wait_stream(self.communication_stream)
             return
+
+        if self.grad_reduce_handle is None:
+            return  # skip empty bucket
+
         assert self.grad_reduce_handle is not None, (
             f"Communication call has not been issued for this bucket "
             f"({len(self.per_param_grad_ready_counts)}/{len(self.params)} "
