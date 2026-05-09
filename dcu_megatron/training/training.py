@@ -459,7 +459,58 @@ def setup_model_and_optimizer(
     # (required for --rl-offload-optimizer-during-inference).
     skip_optimizer = args.skip_train and (not args.perform_rl_step or args.no_load_optim)
     wrap_with_ddp = not skip_optimizer
-    model = get_model(model_provider_func, model_type, wrap_with_ddp=wrap_with_ddp)
+    if args.use_bridge:
+        import copy
+        from megatron.bridge import AutoBridge
+        from megatron.training.arguments import core_transformer_config_from_args
+        if args.bridge_hf_model is None:
+            raise ValueError("When --use-bridge is set, --bridge-hf-model must be provided.")
+        bridge = AutoBridge.from_hf_pretrained(args.bridge_hf_model) 
+        provider = bridge.to_megatron_provider(load_weights=args.load_weights, hf_path=args.bridge_hf_model)
+        if hasattr(provider, "finalize"):
+            # 将args的并行config复制过去, 跟模型参数有关的不覆盖
+            transformer_config = core_transformer_config_from_args(args) # args的config
+            provider._COPY_KEYS = {
+                'tensor_model_parallel_size', 'pipeline_model_parallel_size', 'virtual_pipeline_model_parallel_size', 'sequence_parallel', 'context_parallel_size',
+                'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel', 
+                'expert_model_parallel_size', 'expert_tensor_parallel_size', 
+            }
+            for key, value in transformer_config.__dict__.items():
+                if value is None:
+                    continue 
+                if key in provider._NO_COPY_KEYS:
+                    # Keep the same reference to avoid losing initialized process groups.
+                    setattr(provider, key, value)
+                if key in provider._COPY_KEYS:
+                    setattr(provider, key, copy.deepcopy(value))
+            # print(f"After core_transformer_config_from_args provider: {provider}")
+            provider.finalize()
+        kwargs = {} # copy from get_model(): wrap_with_ddp
+        for f in dataclasses.fields(DistributedDataParallelConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        kwargs['grad_reduce_in_fp32'] = args.accumulate_allreduce_grads_in_fp32
+        kwargs['check_for_nan_in_grad'] = args.check_for_nan_in_loss_and_grad
+        kwargs['check_for_large_grads'] = args.check_for_large_grads
+        if args.ddp_num_buckets is not None:
+            assert args.ddp_bucket_size is None, \
+                "Cannot specify both --ddp-num-buckets and --ddp-bucket-size"
+            assert args.ddp_num_buckets > 0, \
+                "--ddp-num-buckets must be greater than 0"
+            kwargs['bucket_size'] = num_parameters // args.ddp_num_buckets
+        else:
+            kwargs['bucket_size'] = args.ddp_bucket_size
+        kwargs['pad_buckets_for_high_nccl_busbw'] = args.ddp_pad_buckets_for_high_nccl_busbw
+        kwargs['average_in_collective'] = args.ddp_average_in_collective
+        if args.use_megatron_fsdp and args.use_precision_aware_optimizer:
+            kwargs["preserve_fp32_weights"] = False
+        ddp_config = DistributedDataParallelConfig(**kwargs)
+
+        model = provider.provide_distributed_model(wrap_with_ddp=wrap_with_ddp, ddp_config=ddp_config)
+        if torch.distributed.get_rank() in [0]:
+            print(f"model rank[{torch.distributed.get_rank()}]: {model}")
+    else:
+        model = get_model(model_provider_func, model_type, wrap_with_ddp=wrap_with_ddp)
     unwrapped_model = unwrap_model(model)
 
     one_logger and one_logger.log_metrics({"app_build_optimzer_start_time": one_logger_utils.get_timestamp_in_ms()})
@@ -556,7 +607,7 @@ def setup_model_and_optimizer(
 
     if (
         args.load is not None or args.pretrained_checkpoint is not None
-    ) and not args.moe_use_upcycling:
+    ) and not args.moe_use_upcycling and not args.use_bridge:
         one_logger and one_logger.log_metrics(
             {'load_checkpoint_start_time': one_logger_utils.get_timestamp_in_ms()}
         )

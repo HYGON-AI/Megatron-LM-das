@@ -31,6 +31,7 @@ def process_adaptor_args(parser):
     parser = _add_extra_tokenizer_args(parser)
     parser = _add_extra_checkpointing_args(parser)
     parser = _add_extra_vision_args(parser)
+    parser = _add_extra_mbridge_args(parser)
 
     for feature in ADAPTOR_FEATURES:
         feature.register_args(parser)
@@ -209,6 +210,15 @@ def _add_extra_checkpointing_args(parser):
                    help='Whether to enable memory caching for checkpoints (to speed up access by keeping checkpoints in memory)')
     return parser
 
+def _add_extra_mbridge_args(parser):
+    group = parser.add_argument_group(title='extra mbridge args')
+    group.add_argument('--use-bridge', action='store_true',
+                       help='Whether to use bridge module in the model')
+    group.add_argument('--bridge-hf-model', type=str, default=None,
+                       help='The HuggingFace model path for initializing the bridge module')
+    group.add_argument('--load-weights', action='store_true',
+                       help='Whether to load weights for the bridge module when initializing the model')
+    return parser
 
 ORIGIN_ARG_VALUES = dict()
 
