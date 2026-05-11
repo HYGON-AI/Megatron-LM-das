@@ -7,3 +7,6 @@
 [submodule "Megatron-Energon"]
 	path = Megatron-Energon
 	url = https://github.com/NVIDIA/Megatron-Energon.git
+[submodule "Megatron-Bridge"]
+	path = Megatron-Bridge
+	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git

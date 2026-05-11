@@ -278,7 +278,7 @@ class TransformerLayer():
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
-            micro_sp_idx=micro_sp_idx,
+            # micro_sp_idx=micro_sp_idx,
         )
         nvtx_range_pop(suffix="self_attention")
 
