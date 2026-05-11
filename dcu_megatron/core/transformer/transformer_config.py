@@ -69,4 +69,27 @@ def transformer_config_post_init_wrapper(post_init_func):
                         "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
                     )
 
+        # Recompute specific transformer layers to save activation memory without enabling full recomputation
+        # https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html#feature-6-recompute-selected-layers
+        if self.recompute_layer_ids is not None:
+            assert isinstance(
+                self.recompute_layer_ids, list
+            ), f"recompute_layer_ids={self.recompute_layer_ids} should be a list"
+            recompute_layer_ids = list(set(self.recompute_layer_ids))
+            assert len(recompute_layer_ids) > 0, "recompute layer ids is null"
+            for layer_id in recompute_layer_ids:
+                assert (
+                    layer_id >= 0 and layer_id < self.num_layers
+                ), f"recompute layer id must be between 0 and {args.num_layers - 1}"
+
+            if self.recompute_granularity != "full":
+                raise ValueError(
+                    f'When using recompute_layer_ids, recompute_granuarlity: {self.recompute_granularity} must be "full"'
+                )
+
+            if self.recompute_method is not None:
+                raise ValueError(
+                    f"When using recompute_layer_ids, recompute_method: {self.recompute_method} must be None."
+                )
+
     return wrapper
