@@ -76,6 +76,11 @@ class PipelineFeature(AbstractFeature):
         if args.schedule_method != "dualpipev":
             return args
 
+        assert args.num_layers_per_virtual_pipeline_stage is None, "num_layers_per_virtual_pipeline_stage must be none to use dualpipev"
+        assert args.num_virtual_stages_per_pipeline_rank is None, "num_virtual_stages_per_pipeline_rank must be none to use dualpipev"
+        if args.num_layers_to_build is not None:
+            assert args.pipeline_model_parallel_layout is None, "pipeline_model_parallel_layout must be none to use num_layers_to_build"
+
         pp_size = args.pipeline_model_parallel_size * 2
         if args.num_layers is None and args.num_layers_to_build is not None:
             pp_size = args.pipeline_model_parallel_size
@@ -187,6 +192,7 @@ class PipelineFeature(AbstractFeature):
                 PipelineOffloadManagerDualpipeV,
                 FineGrainedActivationOffloadingInterface,
             )
+            from dcu_megatron.core.pipeline_parallel.pipeline_parallel_layer_layout import PipelineParallelLayerLayoutDualpipeV
 
             patch_manager.register_patch(
                 'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
@@ -246,6 +252,16 @@ class PipelineFeature(AbstractFeature):
                                               PipelineOffloadManagerDualpipeV.init_model_chunk_offload_handler])
             patch_manager.register_patch('megatron.core.pipeline_parallel.fine_grained_activation_offload.FineGrainedActivationOffloadingInterface.init_chunk_handler',
                                         FineGrainedActivationOffloadingInterface.init_chunk_handler)
+
+            patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.pipeline_parallel_layer_layout.PipelineParallelLayerLayoutDualpipeV',
+                                             [PipelineParallelLayerLayoutDualpipeV.__init__,
+                                              PipelineParallelLayerLayoutDualpipeV.validate_layer_layout,
+                                              PipelineParallelLayerLayoutDualpipeV.get_num_layers_to_build,
+                                              PipelineParallelLayerLayoutDualpipeV.get_layer_offset,
+                                              PipelineParallelLayerLayoutDualpipeV.get_layer_id_list,
+                                              PipelineParallelLayerLayoutDualpipeV.pretty_repr,
+                                              PipelineParallelLayerLayoutDualpipeV.from_str,
+                                              PipelineParallelLayerLayoutDualpipeV.get_num_stages_from_str])
 
         if args.enable_vocab_parallel:
             from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper
