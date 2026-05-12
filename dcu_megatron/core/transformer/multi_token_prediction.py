@@ -23,16 +23,64 @@ def tie_word_embeddings_state_dict_wrapper(fn):
     return wrapper
 
 
+def mtp_on_this_rank(
+    config: TransformerConfig, ignore_virtual: Optional[bool] = True, vp_stage: Optional[int] = None
+) -> bool:
+    """
+    Check if there is MTP on the current rank.
+
+    Behavior:
+        - If a custom pipeline model parallel layout is provided in the config:
+            - If virtual pipeline parallelism is enabled (and `ignore_virtual` is False), checks
+              whether any MTP layers are present on this (pp_rank, vp_stage) pair.
+            - Otherwise, checks all virtual pipeline ranks of the current pipeline rank. Returns
+              True if any virtual sub-rank includes at least one MTP layer.
+        - If no custom layout is provided, assumes all MTP layers (if any) are placed on the last
+          pipeline stage. The function returns True only on the last pipeline stage.
+    """
+    mtp_on_this_rank = False
+    pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+    if config.pipeline_model_parallel_layout is not None:
+        # with custom PP layout, we support put MTP layers on any pipeline stage
+        layout = config.pipeline_model_parallel_layout.layout
+        if (
+            not ignore_virtual
+            and parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None
+        ):
+            assert vp_stage is not None, "vp_stage must be passed if virtual pipeline is enabled"
+            num_layers_to_build = layout[pp_rank][vp_stage].count(LayerType.mtp)
+            mtp_on_this_rank = num_layers_to_build > 0
+        else:
+            for vpp_rank in range(len(layout[pp_rank])):
+                num_layers_to_build = layout[pp_rank][vpp_rank].count(LayerType.mtp)
+                if num_layers_to_build > 0:
+                    mtp_on_this_rank = True
+                    break
+    else:
+        # without custom PP layout, we only support put all of MTP layers on the last pipeline stage
+        if config.mtp_num_layers is not None:
+            if get_args().schedule_method == 'dualpipev':
+                mtp_on_this_rank = parallel_state.is_pipeline_first_stage(
+                    ignore_virtual=True
+                )
+            else:
+                mtp_on_this_rank = parallel_state.is_pipeline_last_stage(
+                    ignore_virtual=ignore_virtual, vp_stage=vp_stage
+                )
+        else:
+            mtp_on_this_rank = False
+    return mtp_on_this_rank
+
+
 def get_mtp_num_layers_to_build(
     config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None, model=None,
 ) -> int:
     """Get the number of MTP layers to build."""
 
     args = get_args()
-    is_first_pp_stage = pp_rank == 0
     dualpipev_first_chunk = getattr(model, "dualpipev_first_chunk", False) if model is not None else getattr(args, "dualpipev_first_chunk", False)
     if args.schedule_method == "dualpipev":
-        if is_first_pp_stage and not dualpipev_first_chunk:
+        if parallel_state.is_pipeline_first_stage(ignore_virtual=True) and not dualpipev_first_chunk:
             return config.mtp_num_layers if config.mtp_num_layers else 0
         else:
             return 0

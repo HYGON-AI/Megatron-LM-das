@@ -221,8 +221,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
         elif args.enable_vocab_parallel:
             pre_process = is_pp_first_stage(pg_collection.pp)
-            assert model_type != ModelType.encoder_and_decoder, \
-                'vocab parallel is not yet supported in encoder-decoder models'
+
             model = [
                 model_provider_func(
                     pre_process=pre_process,
@@ -264,8 +263,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 model[3].model_type = model_type
 
         elif args.schedule_method == "dualpipev":
-            assert model_type != ModelType.encoder_and_decoder, \
-                "dualpipev schedule not supported for model with both encoder and decoder"
 
             model = []
             args.dualpipev_first_chunk = True
