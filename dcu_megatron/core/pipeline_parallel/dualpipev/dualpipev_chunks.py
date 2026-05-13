@@ -1,29 +1,11 @@
-import dataclasses
-
-import torch
-
 from functools import wraps
 from typing import Optional
-from megatron.core import mpu, tensor_parallel
-from megatron.core.utils import get_model_config
-from megatron.core.fp8_utils import correct_amax_history_if_needed
-from megatron.core.transformer.module import Float16Module
-from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.enums import ModelType
+from megatron.core import mpu
 from megatron.training.global_vars import get_args
+from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.module import fp32_to_float16, float16_to_fp32
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core import parallel_state
-from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
-from megatron.training.utils import to_empty_if_meta_device
-
-try:
-    from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
-
-    HAVE_FSDP2 = True
-except ImportError:
-    HAVE_FSDP2 = False
 
 from dcu_megatron.core.parallel_state import get_dualpipe_chunk
 
@@ -51,13 +33,24 @@ def get_num_layers_to_build(
     Returns:
         int: The number of layers to be built for the current pipeline stage.
     """
+
+    # If we have a custom PP layout, straightforwardly
+    # return the number of decoders in the layout array.
+    args = get_args()
+
+    if config.pipeline_model_parallel_layout is not None:
+        if getattr(args, "schedule_method", None) == "dualpipev":
+            vp_stage = 1 - int(getattr(args, 'dualpipev_first_chunk', True))
+        return config.pipeline_model_parallel_layout.get_num_layers_to_build(
+            layer_type=LayerType.decoder, vp_stage=vp_stage
+        )
+
     if pp_rank is None:
         pp_rank = parallel_state.get_pipeline_model_parallel_rank()
 
     is_first_pp_stage = pp_rank == 0
     is_last_pp_stage = pp_rank == config.pipeline_model_parallel_size - 1
 
-    args = get_args()
     if args.num_layers_to_build is not None:
         if isinstance(args.num_layers_to_build, int):
             return args.num_layers_to_build

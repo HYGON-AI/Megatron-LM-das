@@ -136,6 +136,9 @@ def _add_extra_training_args(parser):
                        help='num micro sequence')
     group.add_argument('--pipe-sp-strategy', type=str, default="average", choices=['average', 'uniform_comp'],
                        help='how to split sequence exactly')
+    group.add_argument('--recompute-layer-ids', type=int, default=None,
+                       help='Specify the exact IDs of layers to recompute, enabling more flexible memory reduction.')
+
     return parser
 
 
@@ -181,6 +184,7 @@ def _add_extra_checkpointing_args(parser):
                    help='Whether to enable memory caching for checkpoints (to speed up access by keeping checkpoints in memory)')
     return parser
 
+
 def _add_extra_mbridge_args(parser):
     group = parser.add_argument_group(title='extra mbridge args')
     group.add_argument('--use-bridge', action='store_true',
@@ -190,6 +194,7 @@ def _add_extra_mbridge_args(parser):
     group.add_argument('--load-weights', action='store_true',
                        help='Whether to load weights for the bridge module when initializing the model')
     return parser
+
 
 ORIGIN_ARG_VALUES = dict()
 

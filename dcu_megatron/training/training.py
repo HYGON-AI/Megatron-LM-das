@@ -221,8 +221,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
         elif args.enable_vocab_parallel:
             pre_process = is_pp_first_stage(pg_collection.pp)
-            assert model_type != ModelType.encoder_and_decoder, \
-                'vocab parallel is not yet supported in encoder-decoder models'
+
             model = [
                 model_provider_func(
                     pre_process=pre_process,
@@ -264,8 +263,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 model[3].model_type = model_type
 
         elif args.schedule_method == "dualpipev":
-            assert model_type != ModelType.encoder_and_decoder, \
-                "dualpipev schedule not supported for model with both encoder and decoder"
 
             model = []
             args.dualpipev_first_chunk = True
@@ -465,19 +462,19 @@ def setup_model_and_optimizer(
         from megatron.training.arguments import core_transformer_config_from_args
         if args.bridge_hf_model is None:
             raise ValueError("When --use-bridge is set, --bridge-hf-model must be provided.")
-        bridge = AutoBridge.from_hf_pretrained(args.bridge_hf_model) 
+        bridge = AutoBridge.from_hf_pretrained(args.bridge_hf_model)
         provider = bridge.to_megatron_provider(load_weights=args.load_weights, hf_path=args.bridge_hf_model)
         if hasattr(provider, "finalize"):
             # 将args的并行config复制过去, 跟模型参数有关的不覆盖
             transformer_config = core_transformer_config_from_args(args) # args的config
             provider._COPY_KEYS = {
                 'tensor_model_parallel_size', 'pipeline_model_parallel_size', 'virtual_pipeline_model_parallel_size', 'sequence_parallel', 'context_parallel_size',
-                'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel', 
-                'expert_model_parallel_size', 'expert_tensor_parallel_size', 
+                'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel',
+                'expert_model_parallel_size', 'expert_tensor_parallel_size',
             }
             for key, value in transformer_config.__dict__.items():
                 if value is None:
-                    continue 
+                    continue
                 if key in provider._NO_COPY_KEYS:
                     # Keep the same reference to avoid losing initialized process groups.
                     setattr(provider, key, value)

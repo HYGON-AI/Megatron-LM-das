@@ -4,6 +4,7 @@ from functools import wraps
 from torch import Tensor
 
 from megatron.training import get_args
+from megatron.core.transformer.enums import LayerType
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -35,8 +36,14 @@ def get_transformer_layer_offset(
             return sum(args.num_layers_to_build[:actual_rank])
 
     if config.pipeline_model_parallel_size > 1:
+        if config.pipeline_model_parallel_layout:
+            if args.schedule_method == 'dualpipev':
+                vp_stage = 1 - getattr(args, 'dualpipev_first_chunk', True)
+            offset = config.pipeline_model_parallel_layout.get_layer_offset(
+                layer_type=LayerType.decoder, vp_stage=vp_stage
+            )
 
-        if (
+        elif (
             config.num_layers_in_first_pipeline_stage is not None
             or config.num_layers_in_last_pipeline_stage is not None
         ):
