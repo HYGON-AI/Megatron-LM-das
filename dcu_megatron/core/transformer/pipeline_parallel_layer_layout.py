@@ -178,7 +178,7 @@ class PipelineParallelLayerLayoutDualpipeV:
         offset = 0
         for _pp_rank in range(pp_rank if vp_stage == 0 else self.pipeline_model_parallel_size):
             offset += self.layout[_pp_rank][0].count(layer_type)
-            
+
         if vp_stage == 0:
             return offset
 
