@@ -28,7 +28,10 @@ def get_transformer_layer_offset(
         pp_rank = parallel_state.get_pipeline_model_parallel_rank()
     is_first_pp_stage = pp_rank == 0
 
-    actual_rank = pp_rank if getattr(args, 'dualpipev_first_chunk', True) else 2 * pipeline_size - 1 - pp_rank
+    if args.schedule_method == 'dualpipev' and vp_stage is None:
+        vp_stage = 1 - int(getattr(args, 'dualpipev_first_chunk', True))
+
+    actual_rank = pp_rank if vp_stage == 0 else 2 * pipeline_size - 1 - pp_rank
     if args.num_layers_to_build is not None:
         if isinstance(args.num_layers_to_build, int):
             return args.num_layers_to_build * actual_rank
@@ -37,8 +40,6 @@ def get_transformer_layer_offset(
 
     if config.pipeline_model_parallel_size > 1:
         if config.pipeline_model_parallel_layout:
-            if args.schedule_method == 'dualpipev':
-                vp_stage = 1 - getattr(args, 'dualpipev_first_chunk', True)
             offset = config.pipeline_model_parallel_layout.get_layer_offset(
                 layer_type=LayerType.decoder, vp_stage=vp_stage
             )
@@ -89,20 +90,20 @@ def get_transformer_layer_offset(
             else:
                 num_layers_per_pipeline_rank = 0
 
-            middle_pipeline_rank = (
-                pp_rank
-                if config.num_layers_in_first_pipeline_stage is None
-                else pp_rank - 1
-            )
-
-            if not getattr(args, 'dualpipev_first_chunk', True):
+            if vp_stage == 0:
+                middle_pipeline_rank = (
+                    pp_rank
+                    if config.num_layers_in_first_pipeline_stage is None
+                    else pp_rank - 1
+                )
+            else:
                 middle_pipeline_rank = (
                     config.pipeline_model_parallel_size
                     if config.num_layers_in_first_pipeline_stage is None
                     else config.pipeline_model_parallel_size - 1
                 ) + (config.pipeline_model_parallel_size - (pp_rank + 1))
 
-            if getattr(args, 'dualpipev_first_chunk', True) and pp_rank == 0:
+            if vp_stage == 0 and pp_rank == 0:
                     offset = 0
             else:
                 offset = (
@@ -123,7 +124,7 @@ def get_transformer_layer_offset(
             if args.schedule_method == 'dualpipev':
                 num_layers_per_pipeline_rank = num_layers_per_pipeline_rank // 2
 
-            if getattr(args, 'dualpipev_first_chunk', True):
+            if vp_stage == 0:
                 offset = pp_rank * num_layers_per_pipeline_rank
             else:
                 offset = num_layers - (pp_rank + 1) * num_layers_per_pipeline_rank
@@ -132,7 +133,7 @@ def get_transformer_layer_offset(
             if config.account_for_embedding_in_pipeline_split:
                 if not is_first_pp_stage:
                     offset -= 1
-                elif not getattr(args, 'dualpipev_first_chunk', True):
+                elif vp_stage == 1:
                     offset -= 1
     else:
         offset = 0

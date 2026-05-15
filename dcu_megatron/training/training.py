@@ -269,6 +269,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             first_model = model_provider_func(
                 pre_process=is_pp_first_stage(pg_collection.pp),
                 post_process=False,
+                vp_stage=0,
                 config=config,
                 pg_collection=pg_collection,
             )
@@ -279,6 +280,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             second_model = model_provider_func(
                 pre_process=False,
                 post_process=is_pp_first_stage(pg_collection.pp),
+                vp_stage=1,
                 config=config,
                 pg_collection=pg_collection,
             )
