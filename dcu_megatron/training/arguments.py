@@ -137,7 +137,7 @@ def _add_extra_training_args(parser):
                        help='num micro sequence')
     group.add_argument('--pipe-sp-strategy', type=str, default="average", choices=['average', 'uniform_comp'],
                        help='how to split sequence exactly')
-    group.add_argument('--recompute-layer-ids', type=int, default=None,
+    group.add_argument('--recompute-layer-ids', nargs='+', type=int, default=None,
                        help='Specify the exact IDs of layers to recompute, enabling more flexible memory reduction.')
 
     return parser
