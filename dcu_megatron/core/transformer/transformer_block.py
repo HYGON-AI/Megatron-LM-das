@@ -592,8 +592,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
 
         elif recompute_layer_ids is not None:
             for layer_idx in range(self.num_layers_per_pipeline_rank):
-                model_layer_idx = layer_idx + get_transformer_layer_offset(self.config, self.vp_stage)
-                if model_layer_idx not in recompute_layer_ids or (
+                global_layer_idx = layer_idx + get_transformer_layer_offset(self.config, self.vp_stage)
+                if global_layer_idx not in recompute_layer_ids or (
                     (self.config.fp8 or self.config.fp4) and not hidden_states.requires_grad
                 ):
                     hidden_states, context = custom(layer_idx, layer_idx + 1)(
