@@ -356,9 +356,6 @@ class _ParamAndGradBucketGroup:
             torch.cuda.default_stream().wait_stream(self.communication_stream)
             return
 
-        if self.grad_reduce_handle is None:
-            return  # skip empty bucket
-
         assert self.grad_reduce_handle is not None, (
             f"Communication call has not been issued for this bucket "
             f"({len(self.per_param_grad_ready_counts)}/{len(self.params)} "
