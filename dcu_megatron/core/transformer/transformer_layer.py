@@ -31,7 +31,7 @@ def get_transformer_layer_offset(
     if args.schedule_method == 'dualpipev' and vp_stage is None:
         vp_stage = 1 - int(getattr(args, 'dualpipev_first_chunk', True))
 
-    actual_rank = pp_rank if vp_stage else 2 * pipeline_size - 1 - pp_rank
+    actual_rank = pp_rank if vp_stage == 0 else 2 * pipeline_size - 1 - pp_rank
     if args.num_layers_to_build is not None:
         if isinstance(args.num_layers_to_build, int):
             return args.num_layers_to_build * actual_rank
