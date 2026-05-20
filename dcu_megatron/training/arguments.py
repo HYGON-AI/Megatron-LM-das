@@ -137,7 +137,9 @@ def _add_extra_training_args(parser):
     group.add_argument('--pipe-sp-strategy', type=str, default="average", choices=['average', 'uniform_comp'],
                        help='how to split sequence exactly')
     group.add_argument('--recompute-layer-ids', nargs='+', type=int, default=None,
-                       help='Specify the exact IDs of layers to recompute, enabling more flexible memory reduction.')
+                       help='Specify the exact IDs of transformer layers to recompute, enabling more flexible memory reduction.')
+    group.add_argument('--recompute-mtp-layer-ids', nargs='+', type=int, default=None,
+                       help='Specify the exact IDs of mtp layers to recompute, enabling more flexible memory reduction.')
 
     return parser
 

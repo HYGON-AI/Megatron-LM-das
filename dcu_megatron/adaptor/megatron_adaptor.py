@@ -249,6 +249,7 @@ class CoreAdaptation(MegatronAdaptationABC):
         from ..core.transformer.transformer_block import TransformerBlock
         from ..core.transformer.transformer_layer import TransformerLayer
         from ..core.transformer.multi_latent_attention import multi_latent_attention_forward_wrapper
+        from ..core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 
         MegatronAdaptation.register(
             'megatron.core.transformer.transformer_block.TransformerBlock._checkpointed_forward',
@@ -257,6 +258,9 @@ class CoreAdaptation(MegatronAdaptationABC):
                                     TransformerBlock.forward)
         MegatronAdaptation.register('megatron.core.transformer.transformer_layer.TransformerLayer._forward_attention',
                                     TransformerLayer._forward_attention)
+        # support recompute_mtp_layer_ids
+        MegatronAdaptation.register('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionLayer._checkpointed_forward',
+                                    MultiTokenPredictionLayer._checkpointed_forward)
 
         MegatronAdaptation.register('megatron.core.transformer.attention.Attention.forward',
                                     Attention.forward)

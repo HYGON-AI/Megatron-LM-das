@@ -50,14 +50,29 @@ def transformer_config_post_init_wrapper(post_init_func):
                     layer_id >= 0 and layer_id < self.num_layers
                 ), f"recompute layer id must be between 0 and {args.num_layers - 1}"
 
+        if args.recompute_mtp_layer_ids is not None:
+            assert isinstance(
+                args.recompute_mtp_layer_ids, list
+            ), f"recompute_mtp_layer_ids={args.recompute_mtp_layer_ids} should be a list"
+            recompute_mtp_layer_ids = list(set(args.recompute_mtp_layer_ids))
+            assert len(recompute_mtp_layer_ids) > 0, "recompute layer ids is null"
+            for layer_id in recompute_mtp_layer_ids:
+                assert (
+                    layer_id >= 0 and layer_id < self.mtp_num_layers
+                ), f"recompute layer id must be between 0 and {args.mtp_num_layers - 1}"
+
+        if (
+            args.recompute_layer_ids is not None
+            or args.recompute_mtp_layer_ids is not None
+        ):
             if self.recompute_granularity != "full":
                 raise ValueError(
-                    f'When using recompute_layer_ids, recompute_granuarlity: {self.recompute_granularity} must be "full"'
+                    f'When using recompute_layer_ids or recompute_mtp_layer_ids, recompute_granuarlity: {self.recompute_granularity} must be "full"'
                 )
 
             if self.recompute_method is not None:
                 raise ValueError(
-                    f"When using recompute_layer_ids, recompute_method: {self.recompute_method} must be None."
+                    f"When using recompute_layer_ids or recompute_mtp_layer_ids, recompute_method: {self.recompute_method} must be None."
                 )
 
             # set recompute_granularity to avoid AssertionError (Using recompute_granularity: full so recompute_method must be "block" or "uniform")
@@ -95,7 +110,10 @@ def transformer_config_post_init_wrapper(post_init_func):
                         "Please choose either 'moe' or a combination of 'experts' and/or 'router'."
                     )
 
-        if self.recompute_layer_ids is not None:
+        if (
+            args.recompute_layer_ids is not None
+            or args.recompute_mtp_layer_ids is not None
+        ):
             self.recompute_granularity = "full"
 
     return wrapper
