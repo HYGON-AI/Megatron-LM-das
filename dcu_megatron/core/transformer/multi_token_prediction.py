@@ -1,3 +1,5 @@
+import contextlib
+import warnings
 from typing import Optional
 from functools import wraps
 
@@ -6,7 +8,7 @@ from torch import Tensor
 
 from megatron.training import get_args
 from megatron.core.transformer.enums import LayerType
-from megatron.core import InferenceParams, parallel_state
+from megatron.core import InferenceParams, parallel_state, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.multi_token_prediction import get_mtp_layer_offset
@@ -103,7 +105,77 @@ def get_mtp_num_layers_to_build(
     return num_layers_to_build
 
 
+RecomputeMTPLayerFlag = False
+
+def get_recompute_mtp_layer_flag():
+    global RecomputeMTPLayerFlag
+    return RecomputeMTPLayerFlag
+
+
+def set_recompute_mtp_layer_flag(recompute_mtp_layer_flag):
+    global RecomputeMTPLayerFlag
+    RecomputeMTPLayerFlag = recompute_mtp_layer_flag
+
+
+@contextlib.contextmanager
+def _fork_recompute_mtp_layer_flag():
+    # Store the current states.
+    current_recompute_mtp_layer_flag = get_recompute_mtp_layer_flag()
+    try:
+        yield
+    finally:
+        # Set the states back to what it was at the start of this function.
+        set_recompute_mtp_layer_flag(current_recompute_mtp_layer_flag)
+
+
 class MultiTokenPredictionLayer:
+    def _checkpointed_forward(self, forward_func, *args, **kwargs):
+        def checkpoint_handler():
+            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
+            if self.config.fp8:
+                from megatron.core.extensions.transformer_engine import te_checkpoint
+
+                return te_checkpoint(
+                    forward_func,
+                    self.config.distribute_saved_activations,
+                    tensor_parallel.random.get_cuda_rng_tracker,
+                    parallel_state.get_tensor_model_parallel_group(),
+                    *args,
+                    **kwargs,
+                )
+            else:
+                return tensor_parallel.checkpoint(
+                    forward_func, self.config.distribute_saved_activations, *args, *kwargs.values()
+                )
+
+        if self.config.recompute_method == 'uniform':
+            # Uniformly divide the total number of Transformer layers and checkpoint
+            # the input activation of each divided chunk.
+            # A method to further reduce memory usage reducing checkpoints.
+            assert (
+                self.config.recompute_num_layers == 1
+            ), "recompute_num_layers must be 1 for MTP recompute"
+            outputs = checkpoint_handler()
+        elif (
+            get_args().recompute_layer_ids is not None
+            or get_args().recompute_mtp_layer_ids is not None
+        ):
+            # layer id is in recompute_mtp_layer_ids
+            if get_recompute_mtp_layer_flag():
+                outputs = checkpoint_handler()
+            else:
+                outputs = forward_func(*args, **kwargs)
+        elif self.config.recompute_method == 'block':
+            # TODO: implement block-based recompute for MTP
+            warnings.warn(
+                "recompute_method == 'block' is not supported for MTP yet." " Skipping recompute."
+            )
+            outputs = forward_func(*args, **kwargs)
+        else:
+            raise ValueError("Invalid activation recompute method.")
+
+        return outputs
+
     def backward_dw(self):
         self.eh_proj.backward_dw()
         if (
@@ -159,20 +231,24 @@ class MultiTokenPredictionBlock:
         hidden_states = hidden_states_list[offset]
         for iteration in range(self.config.mtp_num_layers):
             layer_idx = 0 if self.mtp_use_repeated_layer else iteration
-            (hidden_states, input_ids, position_ids) = self.layers[layer_idx](
-                input_ids=input_ids,
-                position_ids=position_ids,
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                inference_params=inference_params,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-                embedding=embedding,
-                **(extra_block_kwargs or {}),
-            )
+            global_iteration = iteration + offset
+            with _fork_recompute_mtp_layer_flag():
+                if get_args().recompute_mtp_layer_ids is not None:
+                    set_recompute_mtp_layer_flag(global_iteration in get_args().recompute_mtp_layer_ids)
+                (hidden_states, input_ids, position_ids) = self.layers[layer_idx](
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    inference_params=inference_params,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    packed_seq_params=packed_seq_params,
+                    sequence_len_offset=sequence_len_offset,
+                    embedding=embedding,
+                    **(extra_block_kwargs or {}),
+                )
 
             # append the output hidden states of the current mtp layer
             # to the hidden_states_list

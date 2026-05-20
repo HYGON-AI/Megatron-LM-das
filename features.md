@@ -143,19 +143,18 @@ def unpermute(
 ### 项目支持激活值offload
 + 在模型规格较大时，我们通常使用重计算降低显存占用，但是性能下降较严重，这里我们通过在前向计算时将激活值offload到CPU，在反向计算时，再将激活值copy到dcu来减少显存占用。具体见[激活值offload](./docs/features/async-activation-offload.md)
 
-### zero-overhead activation offload
-+ 项目提供另外一种激活值offload方式。要在启动脚本中加入以下参数：
+### 项目支持指定重计算层
++ megatron支持对所有transformer/mtp层进行重计算，该情形下模型训练显存占用小，但是训练性能通常较差。为了在显存满足要求的同时，提高模型训练性能，dcu megatron支持对指定tranformer/mtp层进行重计算。使用该重计算方式，需要开启以下参数：
 ```
-必选:
---offload-activation
-可选：
---offload-modules core_attn
+--recompute-granularity full
+--recompute-layer-ids 0 4 8 12   # 对第0、4、8和12 transformer层进行重计算（从0开始对tranformer层进行编号）
+--recompute-mtp-layer-ids 0    # 对第0 mtp层进行重计算（从0开始对mtp层进行编号）
 ```
-
 + 注意事项：
-1. te需满足te>=2.7；torch需满足torch>=2.7;
-2. offload-modules支持self_attn、qkv_linear、core_attn、attn_linear、router_fc1、router_fc2、shared_fc1、shared_fc2、moe_act，可同时offload多个module；
-3. 当前支持interleaved 1f1b和dualpipev两种流水线调度。
+1. recompute-layer-ids的给定值范围为[0, N<sub>total_layers</sub>-1]，N<sub>total_layers</sub>为模型中transformer层数;
+2. recompute-mtp-layer-ids的给定值范围为[0, N<sub>total_mtp_layers</sub>-1]，N<sub>total_mtp_layers</sub>为模型中mtp层数;
+3. recompute-layer-ids/recompute-mtp-layer-ids允许同时设置，或只设置一个。如不设置，相应网络层不进行重计算；
+4. 不允许设置recompute-method参数。
 
 
 

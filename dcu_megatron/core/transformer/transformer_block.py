@@ -492,6 +492,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                 )
 
         recompute_layer_ids = getattr(self.config, "recompute_layer_ids", None)
+        recompute_mtp_layer_ids = getattr(self.config, "recompute_mtp_layer_ids", None)
 
         if self.config.recompute_method == 'uniform':
             # Uniformly divide the total number of Transformer layers and checkpoint
@@ -601,6 +602,12 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     )
                 else:
                     hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
+
+        elif recompute_mtp_layer_ids is not None:
+            for layer_idx in range(self.num_layers_per_pipeline_rank):
+                hidden_states, context = custom(layer_idx, layer_idx + 1)(
+                    hidden_states, attention_mask, context, context_mask, rotary_pos_emb
+                )
 
         else:
             raise ValueError("Invalid activation recompute method.")
