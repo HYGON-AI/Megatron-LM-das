@@ -147,6 +147,7 @@ class Patch:
                         raise RuntimeError('no exist {} of {}'.format(function_name, module))
 
         if function_name is not None and not hasattr(sys.modules[module_path], function_name):
+            assert create_dummy, f"{function_name} of {module_path} does not exist"
             setattr(sys.modules[module_path], function_name, None)
         return sys.modules[module_path], getattr(sys.modules[module_path], function_name) if function_name is not None else None
 

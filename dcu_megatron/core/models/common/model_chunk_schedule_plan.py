@@ -350,7 +350,10 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         return f_input, b_grad
 
 
-if get_args().overlap_ep_comm_with_split_attn:
+if get_args().integrate_recompute_to_ep_comm_overlap:
+    from .model_chunk_schedule_plan_with_recompute import TransformerLayerSchedulePlanWithRecompute
+    layer_schedule_plan_cls = TransformerLayerSchedulePlanWithRecompute
+elif get_args().overlap_ep_comm_with_split_attn:
     layer_schedule_plan_cls = TransformerLayerSchedulePlanWithSplitAttn
 else:
     layer_schedule_plan_cls = TransformerLayerSchedulePlanWithoutSplitAttn
