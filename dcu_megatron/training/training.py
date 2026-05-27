@@ -473,6 +473,7 @@ def setup_model_and_optimizer(
                 'tensor_model_parallel_size', 'pipeline_model_parallel_size', 'virtual_pipeline_model_parallel_size', 'sequence_parallel', 'context_parallel_size',
                 'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel',
                 'expert_model_parallel_size', 'expert_tensor_parallel_size',
+                'num_layers_in_first_pipeline_stage', 'num_layers_in_last_pipeline_stage',
             }
             for key, value in transformer_config.__dict__.items():
                 if value is None:
