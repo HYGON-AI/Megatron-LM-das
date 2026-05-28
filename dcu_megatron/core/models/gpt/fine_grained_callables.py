@@ -97,7 +97,6 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
         """Calls the submodule as the forward pass."""
         return self.submodule(self, *args, is_recompute=is_recompute)
 
-
     def detach(self, t):
         """Detaches a tensor and stores it for backward computation."""
         if get_args().integrate_recompute_to_ep_comm_overlap and not self.is_recompute:
@@ -354,7 +353,7 @@ def build_mtp_layer_callables_without_split_attn(layer):
     is_moe = isinstance(layer.mtp_model_layer.mlp, MoELayer)
     assert is_moe, "MTP layer in a2a overlap only supports MoE layer for now."
 
-    def submodule_mtp_attn_forward(node, hidden_states):
+    def submodule_mtp_attn_forward(node, hidden_states, is_recompute=False,):
         # MTP Block Preprocess
         if node.is_first_layer:
             offset = get_mtp_layer_offset(layer.config, node.chunk_state.model.vp_stage)
@@ -393,9 +392,9 @@ def build_mtp_layer_callables_without_split_attn(layer):
         # fp8 context is added in 1f1b schedule, so we don't need to add it here
         with rng_context:
             hidden_states = layer._concat_embeddings(hidden_states, decoder_input)
-            return attn_forward(node, hidden_states)
+            return attn_forward(node, hidden_states, is_recompute=is_recompute,)
 
-    def submodule_mtp_postprocess_forward(node, hidden_states):
+    def submodule_mtp_postprocess_forward(node, hidden_states, is_recompute=False,):
         hidden_states = layer._postprocess(hidden_states)
         node.chunk_state.mtp_hidden_states.append(hidden_states)
         if node.is_last_layer:

@@ -7,7 +7,7 @@ from .features_manager import ADAPTOR_FEATURES
 from .patch_utils import MegatronPatchesManager
 from dcu_megatron.training.arguments import process_adaptor_args
 
-_ARGS = None
+_ADAPTOR_ARGS = None
 
 
 def add_args(args, key, value):
@@ -38,12 +38,12 @@ def parser_unknown_args(args, unknown):
 
 
 def get_adaptor_args():
-    global _ARGS
-    if _ARGS is None:
+    global _ADAPTOR_ARGS
+    if _ADAPTOR_ARGS is None:
         parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
-        _ARGS, unknown = process_adaptor_args(parser).parse_known_args()
-        parser_unknown_args(_ARGS, unknown)
-    return _ARGS
+        _ADAPTOR_ARGS, unknown = process_adaptor_args(parser).parse_known_args()
+        parser_unknown_args(ADAPTOR_ARGS, unknown)
+    return _ADAPTOR_ARGS
 
 
 class MegatronAdaptation:
