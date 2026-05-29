@@ -59,7 +59,7 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 28   
+    --num-layers 24
     --hidden-size 1024
     --ffn-hidden-size 5504 
     --num-attention-heads 16
@@ -114,7 +114,11 @@ MODEL_PARALLEL_ARGS=(
 DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    --data-path ${DATA_PATH} 
+    --dataloader-type external
+    --px-data-config-path ${DATA_PATH}
+    --model-arch qwen3vl
+    --processor-path ${TOKENIZER_MODEL_PATH}
+    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -124,8 +128,8 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
@@ -146,7 +150,7 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
+APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \

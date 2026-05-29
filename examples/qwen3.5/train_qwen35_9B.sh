@@ -60,12 +60,12 @@ DISTRIBUTED_ARGS=(
 GPT_MODEL_ARGS=(
     --seq-length 2048
     --num-layers 32
-    --hidden-size None
-    --ffn-hidden-size None
-    --num-attention-heads None
-    --max-position-embeddings None
-    --num-query-groups None
-    --group-query-attention
+    --hidden-size 4096
+    --ffn-hidden-size 12288
+    --num-attention-heads 32
+    --max-position-embeddings 262144
+    # --num-query-groups None
+    # --group-query-attention
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
@@ -79,7 +79,7 @@ TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 8
+    --global-batch-size 32
     --train-iters 50
     --weight-decay 0.1 
     --adam-beta1 0.9 
@@ -104,7 +104,7 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 4
+    --tensor-model-parallel-size 2
     --pipeline-model-parallel-size 2
     # --decoder-first-pipeline-num-layers 4
     # --decoder-last-pipeline-num-layers 32
@@ -117,11 +117,10 @@ DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --dataloader-type external
-    --px-data-config-path /public/home/wangxj3/Downloads/datasets/coco_2014_caption/config/config.json
-    --model-arch qwen2vl
+    --px-data-config-path ${DATA_PATH}
+    --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path /public/home/wangxj3/Downloads/datasets/coco_2014_caption
-    --px-train-data-domain-names coco_caption
+    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -138,7 +137,7 @@ EVAL_AND_LOGGING_ARGS=(
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
     --profile-dir torch_prof_llama_1nodes_tp4-pp1-cp1

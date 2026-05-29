@@ -292,7 +292,7 @@ def add_qwen3vl_extra_args(parser):
     """Extra arguments."""
     group = parser.add_argument_group(title='qwen3vl arguments')
     group.add_argument("--hf-model-path", type=str, default=None, help="")
-    group.add_argument("--model-arch", type=str, default="qwen2vl", choices=["qwen2vl", "qwen2.5vl", "qwen3_vl"],
+    group.add_argument("--model-arch", type=str, default="qwen2vl", choices=["qwen2vl", "qwen2.5vl", "qwen3vl"],
                        help="model architecture, which determines the default processor and tokenizer if not specified")
 
     group.add_argument("--processor-path", type=str, default=None, help="")

@@ -59,19 +59,9 @@ def _add_dataset_extra_args(parser):
 
     group = parser.add_argument_group(title='dataset extra args')
 
-    # ── domain 配置（通常由 JSON 配置文件设定，CLI 作为 fallback） ──
-    group.add_argument(
-        "--px-domain-probabilities", nargs="*", type=float, default=[1.0],
-        help="各 domain 的采样概率"
-    )
-    group.add_argument(
-        "--px-train-data-domain-names", type=str, nargs='*', default=None,
-        help="训练集各 domain 的名称"
-    )
-    group.add_argument(
-        "--px-eval-data-domain-names", type=str, nargs='*', default=None,
-        help="验证集各 domain 的名称"
-    )
+    # ── domain 配置由 JSON 配置文件设定，不需要 CLI 参数 ──
+    # px_domain_probabilities / px_train_data_domain_names / px_eval_data_domain_names
+    # 均由 parse_dataset_config() 从 config JSON 的 key 自动读取并覆盖
 
     # ── 数据加载通用参数 ──
     group.add_argument(
