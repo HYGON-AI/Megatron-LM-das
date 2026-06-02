@@ -331,9 +331,9 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.backward_dw',
                                     TransformerBlock.backward_dw,
                                     create_dummy=True)
-        patch_manager.register_cls_funcs('megatron.core.transformer.moe.moe_layer.MoELayer.get_token_dispatcher',
-                                         MoELayer.get_token_dispatcher,
-                                         create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.get_token_dispatcher',
+                                    MoELayer.get_token_dispatcher,
+                                    create_dummy=True)
         patch_manager.register_cls_funcs('megatron.core.transformer.moe.moe_layer.MoELayer',
                                          [MoELayer.preprocess,
                                           MoELayer.dispatch,

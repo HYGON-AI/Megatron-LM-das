@@ -11,7 +11,7 @@ from megatron.core.transformer.moe.token_dispatcher import (
     MoEAlltoAllTokenDispatcher,
     MoEFlexTokenDispatcher,
 )
-from megatron.core.transformer.moe.layer import MoESubmodules
+from megatron.core.transformer.moe.moe_layer import MoESubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
 from megatron.core.utils import internal_api

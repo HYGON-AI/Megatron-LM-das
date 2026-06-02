@@ -10,7 +10,7 @@ from dcu_megatron.core.quantization_utils import (
     destindex_copy_quantize_int4,
     destindex_dequantize_int4,
 )
-from dcu_megatron.adaptor.features_manager.communication.quantize_comm_feature import (
+from dcu_megatron.features_manager.communication.quantize_comm_feature import (
     QUANT_BIT_DEFAULT_GROUP_SIZE_MAP,
     QUANT_BIT_GROUP_SIZE_CHOICES_MAP,
 )

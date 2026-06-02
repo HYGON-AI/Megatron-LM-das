@@ -1,11 +1,26 @@
 #!/bin/bash
-set -euxo pipefail
+set -euo pipefail
 
 # Parse command line arguments
 usage() {
     echo "Usage: $0 --bucket BUCKET [--unit-test-repeat N] [--unit-test-timeout N] --log-dir LOG_DIR"
     exit 1
 }
+
+export UNIT_TEST_MODE=1
+
+DTK_ENV=""   # where env.sh of dtk
+source $DTK_ENV
+
+# activate the conda environment
+source path-to-conda/etc/profile.d/conda.sh && conda activate conda-env
+
+MEGATRON_PATH=""    # path to megatron
+export PYTHONPATH=${MEGATRON_PATH}:${PYTHONPATH:-}
+
+if [ -d ${MEGATRON_PATH}/tests ]; then
+    mv ${MEGATRON_PATH}/tests ${MEGATRON_PATH}/tests_bak
+fi
 
 # Get directory of this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,11 +79,6 @@ if [[ "$UNIT_TEST_TIMEOUT" == "10" ]]; then
     UNIT_TEST_TIMEOUT=$((10 * UNIT_TEST_REPEAT))
 fi
 
-CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
-TEST_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-
-cd $TEST_PATH
-
 export BUCKET
 
 echo "------ARGUMENTS for SLURM ---"
@@ -98,7 +108,7 @@ for i in $(seq $UNIT_TEST_REPEAT); do
     CMD=$(echo python -m torch.distributed.run ${DISTRIBUTED_ARGS[@]} \
         -m coverage run \
         --data-file=.coverage.unit_tests \
-        --source=megatron/core \
+        --source=dcu_megatron/core \
         -m pytest \
         -xvs \
         $(echo "$BUCKET" | sed 's|/\*\*/\*\.py$||'))
@@ -107,3 +117,7 @@ for i in $(seq $UNIT_TEST_REPEAT); do
 done
 
 coverage combine -q
+
+if [ -d ${MEGATRON_PATH}/tests_bak ]; then
+    mv ${MEGATRON_PATH}/tests_bak ${MEGATRON_PATH}/tests
+fi

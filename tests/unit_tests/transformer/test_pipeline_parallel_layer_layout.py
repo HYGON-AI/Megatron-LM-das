@@ -1,55 +1,63 @@
-# Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-
-import copy
+import sys
 from contextlib import nullcontext
 
 import pytest
 import torch
-from packaging import version
 
-from megatron.core import mpu, parallel_state
-from megatron.core.fp8_utils import get_fp8_context
-from megatron.core.hyper_comm_grid import HyperCommGrid
+from megatron.core import parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
-from megatron.core.transformer.spec_utils import build_module
-from megatron.core.transformer.transformer_block import TransformerBlock, get_num_layers_to_build
+from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.transformer_layer import TransformerLayer
-from megatron.core.pipeline_parallel.utils import is_pp_first_stage
+from megatron.training.arguments import parse_args, validate_args
 from megatron.training.global_vars import (
     destroy_global_vars,
     get_args,
-    set_args,
     set_global_variables,
 )
 from tests.unit_tests.test_utilities import Utils
 
+from dcu_megatron.megatron_adaptor import get_adaptor_args, repatch
+
+
+def create_test_adaptor_args():
+    sys.argv = ['test_pipeline_parallel_layer_layout.py']
+    args = get_adaptor_args()
+    args.schedule_method = "dualpipev"
+    return args
 
 def create_test_args():
     destroy_global_vars()
     destroy_num_microbatches_calculator()
 
-    sys.argv = ['test_fp8_param.py']
+    sys.argv = ['test_pipeline_parallel_layer_layout.py']
     args = parse_args()
+    args.num_layers = 2
+    args.hidden_size = 128
+    args.num_attention_heads = 8
+    args.max_position_embeddings = 512
+    args.micro_batch_size = 1
+    args.create_attention_mask_in_dataloader = True
+    args.seq_length = 256
+    args.schedule_method = "dualpipev"
+    args.delay_wgrad_compute = True
 
     validate_args(args)
     set_global_variables(args, False)
-
-    adaptor_args = get_adaptor_args()
-    adaptor_args.schedule_method = "dualpipev"
-    return args, adaptor_args
-
-create_test_adaptor_args()
-
-from dcu_megatron import megatron_adaptor
+    return args
 
 
 class TestPipelineParallelLayoutTransformerBlock:
+    @classmethod
+    def setup_class(cls):
+        adaptor_args = create_test_adaptor_args()
+        megatron_args = create_test_args()
+        repatch(vars(adaptor_args), vars(megatron_args))
+
     @pytest.mark.parametrize(
         "num_layers, pp_size, pipeline_model_parallel_layout, should_assert_error",
         [
@@ -85,6 +93,12 @@ class TestPipelineParallelLayoutTransformerBlock:
                     [["embedding", "decoder"], ["decoder"] * 3],
                     [["decoder"] * 2, ["decoder", "loss"]],
                 ],
+                True,
+            ),
+            (
+                62,
+                8,
+                [["embedding"] + ["decoder"] * 3] + [["decoder"] * 2] * 29 + [["decoder"], ["loss"]],
                 True,
             ),
             # Usual pp case
@@ -123,7 +137,8 @@ class TestPipelineParallelLayoutTransformerBlock:
             for i in range(pp_size):
                 parallel_state.set_pipeline_model_parallel_rank(i)
                 for j in range(2):
-                    total_build_layers += get_num_layers_to_build(transformer_config, vp_stage=j)
+                    num_layers_test = get_num_layers_to_build(transformer_config, vp_stage=j)
+                    total_build_layers += num_layers_test
         if not should_assert_error:
             assert (
                 total_build_layers == num_layers
@@ -173,6 +188,7 @@ class TestPipelineParallelLayoutTransformerBlock:
         transformer_config = TransformerConfig(**default_config_kwargs)
         pp_rank = parallel_state.get_pipeline_model_parallel_rank()
         gpt_model = []
+        args = get_args()
         args.dualpipev_first_chunk = True
         this_model = GPTModel(
             config=transformer_config,
@@ -200,7 +216,7 @@ class TestPipelineParallelLayoutTransformerBlock:
         gpt_model.append(this_model)
 
         pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-        for vpp_rank in range(vpp_size):
+        for vpp_rank in range(2):
             layers = gpt_model[vpp_rank].decoder.layers
             layer_numbers = [l.layer_number for l in layers]
             golden_answer_curr_stage = layer_number_golden_answer[pp_rank][vpp_rank]
@@ -237,8 +253,8 @@ class TestPipelineParallelLayoutTransformerBlock:
             ),
             (
                 8,
-                "Et*3|(tt|)*29,m|L",
-                [["embedding"] + ["decoder"] * 3] + [["decoder"] * 2] * 29 + [["mtp"], ["loss"]],
+                "Et*3|(tt|)*13,m|L",
+                [["embedding"] + ["decoder"] * 3] + [["decoder"] * 2] * 13 + [["mtp"], ["loss"]],
             ),
             (
                 16,
@@ -264,7 +280,7 @@ class TestPipelineParallelLayoutTransformerBlock:
         [
             (2, "Et|t*4|t|tL"),
             (2, [["embedding", "decoder"], ["decoder"] * 4, ["decoder"], ["decoder", "loss"]]),
-            (8, [["embedding"] + ["decoder"] * 3] + [["decoder"] * 2] * 29 + [["mtp"], ["loss"]]),
+            (8, [["embedding"] + ["decoder"] * 3] + [["decoder"] * 2] * 13 + [["mtp"], ["loss"]]),
         ],
     )
     def test_repr_returns_string(self, pp_size, input_layout):

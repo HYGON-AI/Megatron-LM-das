@@ -39,7 +39,7 @@ def get_num_layers_to_build(
     args = get_args()
 
     if config.pipeline_model_parallel_layout is not None:
-        if getattr(args, "schedule_method", None) == "dualpipev":
+        if getattr(args, "schedule_method", None) == "dualpipev" and vp_stage is None:
             vp_stage = 1 - int(getattr(args, 'dualpipev_first_chunk', True))
         return config.pipeline_model_parallel_layout.get_num_layers_to_build(
             layer_type=LayerType.decoder, vp_stage=vp_stage
