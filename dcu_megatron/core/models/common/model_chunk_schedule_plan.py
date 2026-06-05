@@ -381,6 +381,33 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         post_backward=None,
         block_level_wgrad_compute=False,
     ):
+        if get_args().integrate_recompute_to_ep_comm_overlap
+            run_func = TransformerModelChunkSchedulePlan.run_recompute_with_overlap_three_layers
+        else:
+            run_func = TransformerModelChunkSchedulePlan.run_without_recompute
+
+        return run_func(
+            f_schedule_plan,
+            b_schedule_plan,
+            b_grad=b_grad,
+            pre_forward=pre_forward,
+            pre_backward=pre_backward,
+            post_forward=post_forward,
+            post_backward=post_backward,
+            block_level_wgrad_compute=block_level_wgrad_compute,
+        )
+
+    @staticmethod
+    def run_without_recompute(
+        f_schedule_plan,
+        b_schedule_plan,
+        b_grad=None,
+        pre_forward=None,
+        pre_backward=None,
+        post_forward=None,
+        post_backward=None,
+        block_level_wgrad_compute=False,
+    ):
         """Model Chunk level 1f1b fine-grained scheduler.
 
         This function schedules the forward and backward passes for a model chunk,
@@ -530,7 +557,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         return f_input, None
 
     @staticmethod
-    def run_overlap_three_layers(
+    def run_recompute_with_overlap_three_layers(
         f_schedule_plan,
         b_schedule_plan,
         b_grad=None,
