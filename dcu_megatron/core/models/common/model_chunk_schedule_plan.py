@@ -381,61 +381,19 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         post_backward=None,
         block_level_wgrad_compute=False,
     ):
-        if get_args().integrate_recompute_to_ep_comm_overlap
-            run_func = TransformerModelChunkSchedulePlan.run_recompute_with_overlap_three_layers
-        else:
-            run_func = TransformerModelChunkSchedulePlan.run_without_recompute
-
-        return run_func(
-            f_schedule_plan,
-            b_schedule_plan,
-            b_grad=b_grad,
-            pre_forward=pre_forward,
-            pre_backward=pre_backward,
-            post_forward=post_forward,
-            post_backward=post_backward,
-            block_level_wgrad_compute=block_level_wgrad_compute,
-        )
-
-    @staticmethod
-    def run_without_recompute(
-        f_schedule_plan,
-        b_schedule_plan,
-        b_grad=None,
-        pre_forward=None,
-        pre_backward=None,
-        post_forward=None,
-        post_backward=None,
-        block_level_wgrad_compute=False,
-    ):
-        """Model Chunk level 1f1b fine-grained scheduler.
-
-        This function schedules the forward and backward passes for a model chunk,
-        which interleaves forward and backward function of multiple Transformer layers
-        within a model chunk, and this is needed to overlap the submodules between the individual
-        forward and backward functions.
-
-        Assume there are 4 layers in the given model chunk:
-        Phase 0: p2p_comm_sync -> forward_preprocess -> p2p_comm_sync -> backward_postprocess
-        Phase 1: forward_layer[0] + backward_layer[3], overlapped execution by schedule_layer_1f1b
-        Phase 2: forward_layer[1] + backward_layer[2], overlapped execution by schedule_layer_1f1b
-        Phase 3: forward_layer[2] + backward_layer[1], overlapped execution by schedule_layer_1f1b
-        Phase 4: forward_layer[3] + backward_layer[0], overlapped execution by schedule_layer_1f1b
-        Phase 5: send_forward_recv_backward -> send_backward_recv_forward
-        Phase 6: backward_dw of the first layer -> forward_postprocess -> backward_preprocess
-
-        Args:
-            f_schedule_plan (TransformerModelChunkSchedulePlan): The forward schedule plan
-            b_schedule_plan (TransformerModelChunkSchedulePlan): The backward schedule plan
-            b_grad (Tensor or None): The gradient of the loss function
-            pre_forward (callable or None): The function to call before the forward pass
-            pre_backward (callable or None): The function to call before the backward pass
-            post_forward (callable or None): The function to call after the forward pass
-            post_backward (callable or None): The function to call after the backward pass
-        Returns:
-            The output of the forward pass.
-        """
         args = get_args()
+        if args.integrate_recompute_to_ep_comm_overlap and args.ep_overlap_early_recompute:
+            run_func = TransformerModelChunkSchedulePlan.run_recompute_with_overlap_three_layers
+            return run_func(
+                f_schedule_plan,
+                b_schedule_plan,
+                b_grad=b_grad,
+                pre_forward=pre_forward,
+                pre_backward=pre_backward,
+                post_forward=post_forward,
+                post_backward=post_backward,
+                block_level_wgrad_compute=block_level_wgrad_compute,
+            )
 
         f_input = None
         if f_schedule_plan:
@@ -621,7 +579,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         if b_schedule_plan is not None:
             r_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1)
             torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1}r")
-            _, _ = layer_schedule_plan_cls.run(
+            _, _ = layer_schedule_plan_cls.run_early_recompute(
                 None,
                 None,
                 r_layer,
@@ -637,7 +595,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             f_layer = f_schedule_plan.get_layer(i)
             r_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1 - i - 1)
             torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b-layer_{b_num_layers - 2 - i}r")
-            f_input, b_grad = layer_schedule_plan_cls.run(
+            f_input, b_grad = layer_schedule_plan_cls.run_early_recompute(
                 f_layer,
                 b_layer,
                 r_layer,
@@ -656,7 +614,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             for i in range(overlapped_layers, b_num_layers - 1):
                 r_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1 - i - 1)
                 torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b-layer_{b_num_layers - 2 - i}r")
-                _, b_grad = layer_schedule_plan_cls.run(
+                _, b_grad = layer_schedule_plan_cls.run_early_recompute(
                     None,
                     b_layer,
                     r_layer,
@@ -671,7 +629,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
 
             # S4: backward pass for the first layer
             torch.cuda.nvtx.range_push(f"layer_0b")
-            _, b_grad = layer_schedule_plan_cls.run(
+            _, b_grad = layer_schedule_plan_cls.run_early_recompute(
                 None,
                 b_layer,
                 None,
@@ -684,7 +642,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             # S3: combined forward and backward pass for overlapped layers
             f_layer = f_schedule_plan.get_layer(overlapped_layers)
             torch.cuda.nvtx.range_push(f"layer_{overlapped_layers}f-layer_0b")
-            _, b_grad = layer_schedule_plan_cls.run(
+            _, b_grad = layer_schedule_plan_cls.run_early_recompute(
                 f_layer,
                 b_layer,
                 None,
@@ -699,7 +657,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             for i in range(overlapped_layers + 1, f_num_layers):
                 f_layer = f_schedule_plan.get_layer(i)
                 torch.cuda.nvtx.range_push(f"layer_{i}f")
-                f_input, _ = layer_schedule_plan_cls.run(f_layer, None, None, f_input=f_input)
+                f_input, _ = layer_schedule_plan_cls.run_early_recompute(f_layer, None, None, f_input=f_input)
                 torch.cuda.nvtx.range_pop()
 
         if f_schedule_plan is not None and post_forward is not None:

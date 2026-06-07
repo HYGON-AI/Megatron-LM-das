@@ -57,6 +57,9 @@ class PipelineFeature(AbstractFeature):
         group.add_argument('--integrate-recompute-to-ep-comm-overlap', action="store_true",
                            default=False,
                            help='integrate recomputation to ep overlap to reduce memory')
+        group.add_argument('--ep-overlap-early-recompute', action="store_true",
+                           default=False,
+                           help='Enable early recomputation of transformer layer during EP overlap')
         group.add_argument('--num-layers-to-build',
                            type=num_layers_build_type,
                            default=None,
