@@ -143,6 +143,16 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
         torch.distributed.init_process_group(**init_process_group_kwargs)
         inprocess_restart.maybe_force_nccl_backend_init(device_id)
 
+    if args.overlap_moe_expert_parallel_comm and args.enable_pre_init_ep_overlap_streams:
+        from megatron.core.pipeline_parallel.utils import set_streams, get_comp_stream, get_comm_stream
+        set_streams()
+
+        wait_tensor = torch.Tensor([0]).cuda()
+        wait_tensor.record_stream(get_comp_stream())
+
+        wait_tensor = torch.Tensor([0]).cuda()
+        wait_tensor.record_stream(get_comm_stream())
+
     # Set the tensor model-parallel, pipeline model-parallel, and
     # data-parallel communicators.
     if device_count > 0:

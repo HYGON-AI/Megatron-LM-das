@@ -60,6 +60,9 @@ class PipelineFeature(AbstractFeature):
         group.add_argument('--ep-overlap-early-recompute', action="store_true",
                            default=False,
                            help='Enable early recomputation of transformer layer during EP overlap')
+        group.add_argument('--enable-pre-init-ep-overlap-streams', action="store_true",
+                           default=False,
+                           help='Enable pre-initialization of streams for ep overlap')
         group.add_argument('--num-layers-to-build',
                            type=num_layers_build_type,
                            default=None,
