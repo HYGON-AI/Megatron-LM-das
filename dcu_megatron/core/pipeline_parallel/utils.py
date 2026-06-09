@@ -67,7 +67,7 @@ class ScheduleNode():
         self.event = event
         self.free_input = free_input
         self.inputs = None
-        self.output = None
+        self.outputs = None
         self.delay_grads_release = False
         self.manual_release_grads = False
         self.is_recompute = False
@@ -93,7 +93,9 @@ class ScheduleNode():
             self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
             for i, input in enumerate(self.inputs):
                 if input is not None:
-                    input.requires_grad = inputs[i].requires_grad
+                    # requires_grad is set to true for post_process module, otherwise
+                    #  backward will raise error when recomputation is enabled.
+                    input.requires_grad = True if self.name == "post_process" else inputs[i].requires_grad
 
             data = tuple(self.inputs)
             data = self.forward_func(*data)

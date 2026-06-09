@@ -91,7 +91,7 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
                     input.record_stream(self.stream)
                     input.untyped_storage().resize_(0)
 
-        return self.output
+        return data
 
     def forward_impl(self, *args, is_recompute=False):
         """Calls the submodule as the forward pass."""

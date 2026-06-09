@@ -175,7 +175,7 @@ class MoELayer():
         tokens and their associated probabilities to the devices hosting their assigned
         experts.
         """
-        return self.token_dispatcher.token_dispatch(hidden_states, probs)
+        return self.get_token_dispatcher(is_recompute).token_dispatch(hidden_states, probs)
 
     @internal_api
     def routed_experts_compute(self, hidden_states: torch.Tensor, probs: torch.Tensor, is_recompute=False,):

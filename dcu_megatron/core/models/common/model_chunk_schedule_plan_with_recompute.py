@@ -53,14 +53,18 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         The event and chunk_state are binded to the TransformerModelChunkSchedulePlan
         and shared across all layers in the model chunk.
         """
-        super(TransformerLayerSchedulePlanWithoutSplitAttn, self).__init__(
-            layer,
-            event,
-            chunk_state,
-            comp_stream,
-            comp_stream,
-            extra_args=extra_args,
-        )
+        from megatron.core.models.gpt.fine_grained_callables import TransformerLayerState
+
+        self.config = layer.config
+        self.layer_state = TransformerLayerState()
+        self.chunk_state = chunk_state
+        self.layer = layer
+        self.event = event
+        self.comp_stream = comp_stream
+        self.comm_stream = comm_stream
+
+        # get callable nodes for transformer/mtp layer
+        self._build_callable_nodes(event, comp_stream, comm_stream, extra_args)
 
         # for recomputing
         self.saved_tensors = None
@@ -383,8 +387,8 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
             r_input = r_layer.saved_tensors
             r_layer_rng_states = r_layer.rng_states
 
-        r_or_f_layer = f_layer or r_layer
-        r_or_f_input = f_input or r_input
+        r_or_f_layer = f_layer if f_layer is not None else r_layer
+        r_or_f_input = f_input if f_layer is not None else r_input
 
         if b_layer is not None:
             b_grad = b_layer.mtp_post_process.backward(b_grad)
@@ -430,6 +434,10 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         if not block_level_wgrad_compute:
             if b_layer is not None and not is_last_layer_in_bwd:
                 b_layer.attn.backward_dw()
+
+        if r_layer is not None:
+            r_layer.saved_tensors = None
+            r_layer.rng_states = None
 
         return r_or_f_input if f_layer is not None else None, b_grad
 
