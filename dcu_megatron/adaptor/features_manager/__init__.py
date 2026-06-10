@@ -6,6 +6,7 @@ from .communication.gradient_compress_feature import GradientCompressFeature
 from .communication.quantize_comm_feature import QuantizeCommFeature
 from .memory.swap_attention_feature import SwapAttentionFeature
 from .recompute.activation_function import RecomputeActivationFeature
+from .transformer.hyper_connection_feature import HyperConnectionFeature
 
 ADAPTOR_FEATURES = [
     PipelineFeature(),
@@ -16,4 +17,5 @@ ADAPTOR_FEATURES = [
     QuantizeCommFeature(),
     SwapAttentionFeature(),
     RecomputeActivationFeature(),
+    HyperConnectionFeature(),
 ]

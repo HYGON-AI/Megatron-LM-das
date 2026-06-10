@@ -1,5 +1,5 @@
 from contextlib import nullcontext
-from typing import List, Optional, Set, Union, cast
+from typing import List, Optional, Set, Union, cast, Tuple
 
 import torch
 from torch import Tensor
@@ -32,7 +32,8 @@ from megatron.core.transformer.transformer_layer import (
     get_transformer_layer_offset,
 )
 from megatron.core.typed_torch import apply_module
-
+from dcu_megatron.core.transformer.hyper_connection import HyperConnectionModule
+from dcu_megatron.core.tensor_parallel.random import CheckpointManager
 
 def _get_block_submodules(
     config: TransformerConfig,
@@ -138,7 +139,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
 
             self.offload_context, self.group_prefetch_offload_commit_async = nullcontext(), None
             self.config._cpu_offloading_context = None
-
+        
+        self.num_residual_streams = config.num_residual_streams
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
@@ -150,6 +152,46 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                 hidden_size=self.config.hidden_size,
                 eps=self.config.layernorm_epsilon,
             )
+
+    def _build_mhc_recompute_layer_plan(
+        self, use_mhc_recompute: bool
+    ) -> Tuple[List[Optional[CheckpointManager]], List[bool]]:
+        """Pre-build per-layer MHC recompute managers and block-end markers."""
+        num_layers = len(self.layers)
+        layer_managers: List[Optional[CheckpointManager]] = [None] * num_layers
+        is_recompute_block_end: List[bool] = [False] * num_layers
+
+        if not use_mhc_recompute or num_layers == 0:
+            return layer_managers, is_recompute_block_end
+
+        mhc_recompute_layer_num = self.config.mhc_recompute_layer_num
+        mhc_manager = CheckpointManager()
+
+        for l_no in range(num_layers):
+            is_last_in_transformer_block = l_no == num_layers - 1
+            is_last_in_recompute_block = is_last_in_transformer_block
+            if mhc_recompute_layer_num is not None:
+                is_last_in_recompute_block = is_last_in_transformer_block or (
+                    (l_no + 1) % mhc_recompute_layer_num == 0
+                )
+
+            layer_managers[l_no] = mhc_manager
+            is_recompute_block_end[l_no] = is_last_in_recompute_block
+
+            if is_last_in_recompute_block and not is_last_in_transformer_block:
+                mhc_manager = CheckpointManager()
+
+        return layer_managers, is_recompute_block_end
+
+    @staticmethod
+    def _finalize_mhc_recompute_layer(
+        mhc_manager: Optional[CheckpointManager],
+        hidden_states: Tensor,
+        is_last_in_recompute_block: bool,
+    ) -> None:
+        """Finalize MHC recompute state for the current layer when block ends."""
+        if mhc_manager is not None and is_last_in_recompute_block:
+            mhc_manager.discard_all_outputs_and_register_unified_recompute(hidden_states)
 
     def forward(
         self,
@@ -261,6 +303,12 @@ class TransformerBlock(MegatronCoreTransformerBlock):
         #   is called here to be future-proof and corner-case-proof.
         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
 
+        # Expand hidden states for hyper connections at the start of the block
+        # Only expand at the first PP stage; subsequent stages receive n-stream from previous stage
+        if self.config.enable_hyper_connections and self.pre_process:
+            hidden_states = HyperConnectionModule.input_expand(
+                hidden_states, self.num_residual_streams
+            )  # [s, b, C] -> [s, b, n*C]
         if self.config.sequence_parallel:
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
         else:
@@ -287,6 +335,19 @@ class TransformerBlock(MegatronCoreTransformerBlock):
             use_outer_quantization_context = False
             use_inner_quantization_context = False
             outer_quantization_context = nullcontext()
+
+        # Determine if MHC recompute should be used
+        # Only enable when: training mode AND hyper connections AND 'mhc' in recompute_modules
+        use_mhc_recompute = (
+            self.training
+            and self.config.enable_hyper_connections
+            and self.config.recompute_granularity == 'selective'
+            and "mhc" in self.config.recompute_modules
+        )
+        mhc_layer_managers, mhc_is_last_in_recompute_block = self._build_mhc_recompute_layer_plan(
+            use_mhc_recompute
+        )
+
 
         with rng_context, outer_quantization_context:
             # Forward pass.
@@ -329,23 +390,55 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     else:
                         inner_quantization_context = nullcontext()
 
-                    with self.offload_context, inner_quantization_context:
-                        hidden_states, context = layer(
-                            hidden_states=hidden_states,
-                            attention_mask=attention_mask,
-                            context=context,
-                            context_mask=context_mask,
-                            rotary_pos_emb=rotary_pos_emb,
-                            rotary_pos_cos=rotary_pos_cos,
-                            rotary_pos_sin=rotary_pos_sin,
-                            rotary_pos_cos_sin=rotary_pos_cos_sin,
-                            attention_bias=attention_bias,
-                            inference_context=inference_context,
-                            packed_seq_params=packed_seq_params,
-                            sequence_len_offset=sequence_len_offset,
-                            padding_mask=padding_mask,
-                            micro_sp_idx=micro_sp_idx,
+                    mhc_manager = mhc_layer_managers[l_no]
+                    if mhc_manager is not None:
+                        mhc_manager.is_last_layer_in_recompute_block = (
+                            mhc_is_last_in_recompute_block[l_no]
                         )
+
+                        with self.offload_context, inner_quantization_context:
+                            hidden_states, context = layer(
+                                hidden_states=hidden_states,
+                                attention_mask=attention_mask,
+                                context=context,
+                                context_mask=context_mask,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                rotary_pos_cos_sin=rotary_pos_cos_sin,
+                                attention_bias=attention_bias,
+                                inference_context=inference_context,
+                                packed_seq_params=packed_seq_params,
+                                sequence_len_offset=sequence_len_offset,
+                                padding_mask=padding_mask,
+                                mhc_recompute_manager=mhc_manager,
+                                micro_sp_idx=micro_sp_idx,
+                            )
+                    else:
+                        with self.offload_context, inner_quantization_context:
+                            hidden_states, context = layer(
+                                hidden_states=hidden_states,
+                                attention_mask=attention_mask,
+                                context=context,
+                                context_mask=context_mask,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                rotary_pos_cos_sin=rotary_pos_cos_sin,
+                                attention_bias=attention_bias,
+                                inference_context=inference_context,
+                                packed_seq_params=packed_seq_params,
+                                sequence_len_offset=sequence_len_offset,
+                                padding_mask=padding_mask,
+                                micro_sp_idx=micro_sp_idx,
+                            )
+
+                    self._finalize_mhc_recompute_layer(
+                        mhc_manager=mhc_manager,
+                        hidden_states=hidden_states,
+                        is_last_in_recompute_block=mhc_is_last_in_recompute_block[l_no],
+                    )
+
 
                     if (
                         torch.is_grad_enabled()
@@ -357,6 +450,12 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     # Extract intermediate embeddings using global layer index
                     if (l_no + layer_offset) in extract_layer_indices:
                         intermediate_hidden_states.append(hidden_states)
+
+        # Only contract if the final layer norm is in this stage
+        if self.config.enable_hyper_connections and self.has_final_layernorm_in_this_stage():
+            hidden_states = HyperConnectionModule.output_contract(
+                hidden_states, self.num_residual_streams
+            )  # [s, b, n*C] -> [s, b, C]
 
         # Final layer norm.
         if self.final_layernorm is not None:

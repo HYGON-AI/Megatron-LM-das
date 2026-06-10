@@ -49,13 +49,14 @@ class Patch:
 
     @staticmethod
     def remove_wrappers(module, func_name, func):
+        if (
+            module.__dict__
+            and func_name in module.__dict__
+            and isinstance(module.__dict__[func_name], (staticmethod, classmethod))
+        ):
+            func = module.__dict__[func_name].__func__
+
         while True:
-            if (
-                module.__dict__
-                and func_name in module.__dict__
-                and isinstance(module.__dict__[func_name], (staticmethod, classmethod))
-            ):
-                func = module.__dict__[func_name].__func__
             if hasattr(func, '__wrapped__') and func.__wrapped__ is not None:
                 func = func.__wrapped__
             elif hasattr(func, '__closure__') and func.__closure__ is not None:
