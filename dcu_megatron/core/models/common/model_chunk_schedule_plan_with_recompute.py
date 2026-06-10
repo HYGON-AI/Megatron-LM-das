@@ -161,6 +161,7 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         Returns:
             Functions or values for next iteration's computation
         """
+
         if f_layer is not None:
             f_layer.saved_tensors = (f_input,)
             f_layer.rng_states = _get_all_rng_states()
@@ -174,33 +175,27 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
                 with torch.enable_grad(), b_layer.get_fp8_context():
                     b_input_recompute = b_layer.attn.forward(b_input_recompute, is_recompute=True)
                     b_input_recompute = b_layer.moe_dispatch.forward(b_input_recompute, is_recompute=True)
-
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.attn.forward(f_input)
-                f_input = f_layer.moe_dispatch.forward(f_input)
-
-        if b_layer is not None:
-            with _fork_recompute_rng(b_layer_rng_states):
-                with torch.enable_grad(), b_layer.get_fp8_context():
                     b_input_recompute = b_layer.mlp.forward(b_input_recompute, is_recompute=True)
-
-        if b_layer is not None:
-            with _fork_recompute_rng(b_layer_rng_states):
-                with torch.enable_grad(), b_layer.get_fp8_context():
                     b_input_recompute = b_layer.moe_combine.forward(b_input_recompute, is_recompute=True)
                     b_input_recompute = b_layer.mtp_post_process.forward(b_input_recompute, is_recompute=True)
 
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.mlp.forward(f_input)
+            b_layer.saved_tensors = None
+            b_layer.rng_states = None
 
         if b_layer is not None:
             b_grad = b_layer.mtp_post_process.backward(b_grad)
             b_grad = b_layer.moe_combine.backward(b_grad)
 
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.attn.forward(f_input)
+
         if b_layer is not None:
             b_grad = b_layer.mlp.backward(b_grad)
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.moe_dispatch.forward(f_input)
 
         if b_layer is not None:
             if not block_level_wgrad_compute:
@@ -209,6 +204,10 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
 
         if b_layer is not None and b_layer.config.ep_overlap_early_attn_memory_release:
             b_grad = b_layer.attn.backward(b_grad)
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.mlp.forward(f_input)
 
         if f_layer is not None:
             with torch.no_grad(), f_layer.get_fp8_context():
@@ -223,10 +222,6 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         if not block_level_wgrad_compute:
             if b_layer is not None and not is_last_layer_in_bwd:
                 b_layer.attn.backward_dw()
-
-        if b_layer is not None:
-            b_layer.saved_tensors = None
-            b_layer.rng_states = None
 
         return f_input, b_grad
 
@@ -347,7 +342,6 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
 
         return f_input, b_grad
 
-
     @staticmethod
     def run_overlap_fb_or_rb_layers(f_layer, b_layer, r_layer, f_input=None, b_grad=None, is_last_layer_in_bwd=False, block_level_wgrad_compute=False):
         """Schedule one-forward-one-backward operations for a single transformer layer.
@@ -389,6 +383,20 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
 
         r_or_f_layer = f_layer if f_layer is not None else r_layer
         r_or_f_input = f_input if f_layer is not None else r_input
+
+        if b_layer is None:
+            # can help improve performance
+            with fork_recompute_rng(r_layer_rng_states):
+                with get_grad_context(r_layer is not None), r_or_f_layer.get_fp8_context():
+                    r_or_f_input = r_or_f_layer.attn.forward(r_or_f_input, is_recompute=r_layer is not None,)
+                    r_or_f_input = r_or_f_layer.moe_dispatch.forward(r_or_f_input, is_recompute=r_layer is not None,)
+                    r_or_f_input = r_or_f_layer.mlp.forward(r_or_f_input, is_recompute=r_layer is not None,)
+                    r_or_f_input = r_or_f_layer.moe_combine.forward(r_or_f_input, is_recompute=r_layer is not None,)
+                    r_or_f_input = r_or_f_layer.mtp_post_process.forward(r_or_f_input, is_recompute=r_layer is not None,)
+            if r_layer is not None:
+                r_layer.saved_tensors = None
+                r_layer.rng_states = None
+            return r_or_f_input if f_layer is not None else None, None
 
         if b_layer is not None:
             b_grad = b_layer.mtp_post_process.backward(b_grad)
