@@ -472,7 +472,7 @@ class MegaIndexedJsonlDataset(BaseIndexedJsonlDataset):
          (适合纯文本预训练，多个 doc 拼成固定长度)
 
     MM:  text → yield raw JSON
-         (适合多模态，上层 Qwen2VlDataset 处理图片后再 tokenize)
+         (适合多模态，上层 QwenVLDataset 处理图片后再 tokenize)
     """
 
     def __init__(
@@ -644,7 +644,7 @@ class MegaIndexedJsonlDatasetMM(BaseIndexedJsonlDataset):
       - V3:  对文本做 tokenize + pack 成固定长度序列（文本预训练）
       - MM:  直接 yield 原始 json_data，不做 tokenize/pack（图文多模态）
 
-    tokenization 和图片处理由上层 MultiModalDataset / Qwen2VlDataset 完成。
+    tokenization 和图片处理由上层 MultiModalDataset / QwenVLDataset 完成。
     """
 
     def __init__(

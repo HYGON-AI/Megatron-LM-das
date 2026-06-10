@@ -55,7 +55,6 @@ def _add_dataset_extra_args(parser):
         "--px-data-config-path", type=str, default=None,
         help="VLM SFT 数据配置 JSON 文件路径"
     )
-    # GDatasetV4 分支已删除，如需使用请联系 nrwu/xiaotaoliu
 
     group = parser.add_argument_group(title='dataset extra args')
 

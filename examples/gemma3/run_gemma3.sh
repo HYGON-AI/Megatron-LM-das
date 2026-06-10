@@ -1,0 +1,49 @@
+for para in $*
+do
+    if [[ $para == --profiling* ]];then
+        profiling=${para#*=}
+    fi
+done
+
+CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
+MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
+
+# Those variables need to modify
+DTK_ENV=""                                                               # where env.sh of dtk
+DATA_PATH=""                                                             # path to oscar-1GB_head-llama2_text_document
+# DATA_PATH=""
+TOKENIZER_MODEL_PATH=""                                                  # HuggingFace path to model. example Qwen/Qwen3-32B
+CHECKPOINT_PATH="./ckpt"                                                       # path to ckpt
+NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
+LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
+
+# Those variables no need to modify
+hostfile_input=${1}
+node_num=${2}
+HOSTFILE="${hostfile_input}_slots"
+rm -f ${HOSTFILE} 
+cat ${hostfile_input} | sed -n "1,${node_num}p"|sed 's/$/ slots=8/' > ${HOSTFILE}
+
+GPUS=$(($(cat ${HOSTFILE}|sort|uniq |wc -l)*8))
+HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
+PORT="25907"
+
+# Runs gemma3 model
+source ${NCCL_ENV}
+mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
+                    --allow-run-as-root \
+                    --bind-to none \
+                    --mca plm_rsh_no_tree_spawn 1 \
+                    bash -c "
+                    source ${DTK_ENV} && \
+                    source ${NCCL_ENV} && \
+                    bash train_gemma3vl_12B.sh \
+                    ${HOST} \
+                    ${PORT} \
+                    --data_path=$DATA_PATH \
+                    --tokenizer_path=$TOKENIZER_MODEL_PATH \
+                    --checkpoint_path=$CHECKPOINT_PATH \
+                    --launch_with_binding=${LAUNCH_WITH_BINDING} \
+                    --profiling=$profiling" 2>&1|tee log-$((${GPUS} / 8))nodes-`date +%F-%H%M`.log 
+
+wait
