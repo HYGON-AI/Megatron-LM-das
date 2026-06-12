@@ -493,7 +493,7 @@ def setup_model_and_optimizer(
             provider.use_transformer_engine_op_fuser = True
 
             provider.finalize()
-            
+
         kwargs = {} # copy from get_model(): wrap_with_ddp
         for f in dataclasses.fields(DistributedDataParallelConfig):
             if hasattr(args, f.name):
