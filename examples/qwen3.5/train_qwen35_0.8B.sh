@@ -8,10 +8,10 @@ do
         data_path=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
-    elif [[ $para == --checkpoint_path* ]];then
-        checkpoint_path=${para#*=}
     elif [[ $para == --launch_with_binding* ]];then
         launch_with_binding=${para#*=}
+    elif [[ $para == --checkpoint_path* ]];then
+        checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     elif [[ $para == --reproduce* ]];then
@@ -38,7 +38,7 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
+CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
@@ -48,8 +48,7 @@ export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10
-
+export GPU_MAX_HW_QUEUES=4
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -60,11 +59,13 @@ DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length 4096
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 11008 
-    --num-attention-heads 32
-    --max-position-embeddings 4096
+    --num-layers 24
+    --hidden-size 1024
+    --ffn-hidden-size 5504 
+    --num-attention-heads 16
+    --max-position-embeddings 32768
+    --num-query-groups 8
+    --group-query-attention
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
@@ -78,7 +79,7 @@ TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 64
+    --global-batch-size 32
     --train-iters 50
     --weight-decay 0.1 
     --adam-beta1 0.9 
@@ -90,6 +91,8 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
+    --use-qk-norm
+    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
@@ -101,8 +104,8 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 2
-    --pipeline-model-parallel-size 2
+    --tensor-model-parallel-size 1
+    --pipeline-model-parallel-size 1
     --context-parallel-size 1
     --use-distributed-optimizer 
     --sequence-parallel
@@ -135,7 +138,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama
+    --profile-dir torch_prof_llama_1nodes_tp4-pp1-cp1
     --use-pytorch-profiler
 )
 

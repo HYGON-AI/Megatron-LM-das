@@ -473,6 +473,7 @@ def setup_model_and_optimizer(
                 'tensor_model_parallel_size', 'pipeline_model_parallel_size', 'virtual_pipeline_model_parallel_size', 'sequence_parallel', 'context_parallel_size',
                 'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel',
                 'expert_model_parallel_size', 'expert_tensor_parallel_size',
+                'num_layers_in_first_pipeline_stage', 'num_layers_in_last_pipeline_stage',
             }
             for key, value in transformer_config.__dict__.items():
                 if value is None:
@@ -482,8 +483,17 @@ def setup_model_and_optimizer(
                     setattr(provider, key, value)
                 if key in provider._COPY_KEYS:
                     setattr(provider, key, copy.deepcopy(value))
-            # print(f"After core_transformer_config_from_args provider: {provider}")
+            # 启用 TE fused RoPE（mRoPE 除外，TE 不支持 3D 位置编码）
+            pos_type = getattr(provider, "position_embedding_type", None)
+            if pos_type != "mrope":
+                provider.apply_rope_fusion = True
+                if pos_type != "yarn":
+                    provider.position_embedding_type = "rope"
+            # 启用 TE FusedMLP，GLU 的 chunk+SiLU+multiply 融合为 1 kernel
+            provider.use_transformer_engine_op_fuser = True
+
             provider.finalize()
+            
         kwargs = {} # copy from get_model(): wrap_with_ddp
         for f in dataclasses.fields(DistributedDataParallelConfig):
             if hasattr(args, f.name):
@@ -1172,7 +1182,7 @@ def training_log(
 
     # Dump memory snapshot and print metrics to stdout.
     if iteration % args.log_interval == 0 or is_first_iteration:
-        if args.record_memory_history and (is_last_rank() or torch.distributed.get_backend() == 'fake'):
+        if args.record_memory_history and (is_rank0() or torch.distributed.get_backend() == 'fake'):
             snapshot = torch.cuda.memory._snapshot()
             from pickle import dump
 
