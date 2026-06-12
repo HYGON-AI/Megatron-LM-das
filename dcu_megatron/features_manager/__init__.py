@@ -8,6 +8,7 @@ from .memory.swap_attention_feature import SwapAttentionFeature
 from .recompute.activation_function import RecomputeActivationFeature
 from .basic.megatron_basic import MegatronBasicFeature
 from .basic.minimum_basic import MinimumBasicFeature
+from .transformer.hyper_connection_feature import HyperConnectionFeature
 
 ADAPTOR_FEATURES = [
     PipelineFeature(),
@@ -20,4 +21,5 @@ ADAPTOR_FEATURES = [
     RecomputeActivationFeature(),
     MegatronBasicFeature(),
     MinimumBasicFeature(),
+    HyperConnectionFeature(),
 ]

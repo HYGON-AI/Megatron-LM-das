@@ -55,7 +55,7 @@ from megatron.training.checkpointing import checkpoint_exists
 from megatron.training.checkpointing import get_loaded_iteration
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
-from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.transformer.enums import CudaGraphScope, AttnBackend
 from megatron.core.transformer.module import Float16Module
 from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
 from megatron.core.distributed import DistributedDataParallel as DDP
@@ -347,6 +347,14 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         config = get_model_config(model[0])
         model = [Float16Module(config, model_module) for model_module in model]
 
+        if args.enable_hyper_connections and args.mhc_use_tilekernels:
+            for model_module in model:
+                for layer in model_module.module.decoder.layers:
+                    if hasattr(layer, 'self_attention_hyper_connection'):
+                        layer.self_attention_hyper_connection._maintain_float32_params()
+                    if hasattr(layer, 'mlp_hyper_connection'):
+                        layer.mlp_hyper_connection._maintain_float32_params()
+
     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
         model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
@@ -469,11 +477,16 @@ def setup_model_and_optimizer(
         if hasattr(provider, "finalize"):
             # 将args的并行config复制过去, 跟模型参数有关的不覆盖
             transformer_config = core_transformer_config_from_args(args) # args的config
+            # if torch.distributed.get_rank() == 0:
+            #     print(f"transformer_config: {transformer_config}")
+            #     print(f"provider: {provider}")
             provider._COPY_KEYS = {
                 'tensor_model_parallel_size', 'pipeline_model_parallel_size', 'virtual_pipeline_model_parallel_size', 'sequence_parallel', 'context_parallel_size',
                 'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel',
                 'expert_model_parallel_size', 'expert_tensor_parallel_size',
                 'num_layers_in_first_pipeline_stage', 'num_layers_in_last_pipeline_stage',
+                'fine_grained_activation_offloading', 'offload_modules', 'min_offloaded_tensor_size',
+                'optimizer_cpu_offload', 'use_precision_aware_optimizer', 'optimizer_offload_fraction', 'use_torch_optimizer_for_cpu_offload'
             }
             for key, value in transformer_config.__dict__.items():
                 if value is None:
@@ -491,6 +504,8 @@ def setup_model_and_optimizer(
                     provider.position_embedding_type = "rope"
             # 启用 TE FusedMLP，GLU 的 chunk+SiLU+multiply 融合为 1 kernel
             provider.use_transformer_engine_op_fuser = True
+            # provider.attention_backend = AttnBackend.flash # 这里用fa会报错, 待优化
+            # print(f"provider.attention_backend = {provider.attention_backend}")
 
             provider.finalize()
 

@@ -1,3 +1,4 @@
+import warnings
 from functools import wraps
 from dataclasses import make_dataclass, dataclass, field
 from typing import Literal
@@ -24,8 +25,10 @@ def transformer_config_post_init_wrapper(post_init_func):
         self.recompute_modules = set(self.recompute_modules)
         recompute_experts = "experts" in self.recompute_modules
         recompute_router  = "router"  in self.recompute_modules
+        recompute_mhc = "mhc" in self.recompute_modules
         self.recompute_modules.discard("experts")
         self.recompute_modules.discard("router")
+        self.recompute_modules.discard("mhc")
         self.recompute_modules = list(self.recompute_modules)
 
         # set delay_wgrad_compute to avoid AssertionError(overlap_moe_expert_parallel_comm must be enabled when enabling delay_wgrad_compute)
@@ -83,6 +86,8 @@ def transformer_config_post_init_wrapper(post_init_func):
             self.recompute_modules.append("experts")
         if recompute_router:
             self.recompute_modules.append("router")
+        if recompute_mhc:
+            self.recompute_modules.append("mhc")
 
         if args.schedule_method == "dualpipev":
             self.delay_wgrad_compute = origin_delay_wgrad_compute
@@ -100,6 +105,50 @@ def transformer_config_post_init_wrapper(post_init_func):
         for key, value in vars(args).items():
             if not hasattr(self, key):
                 setattr(self, key, value)
+
+        # Validation for "mhc" in recompute_modules
+        if self.recompute_granularity == "selective" and "mhc" in self.recompute_modules:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "'mhc' in recompute_modules requires enable_hyper_connections=True."
+                )
+            if "mlp" in self.recompute_modules:
+                raise ValueError(
+                    "'mhc' and 'mlp' in recompute_modules cannot be used together. "
+                    "They use different checkpoint mechanisms that may conflict."
+                )
+            if self.mhc_recompute_layer_num is not None and (
+                isinstance(self.mhc_recompute_layer_num, bool)
+                or not isinstance(self.mhc_recompute_layer_num, int)
+                or self.mhc_recompute_layer_num < 1
+            ):
+                raise ValueError(
+                    "mhc_recompute_layer_num must be a positive integer when "
+                    "'mhc' is in recompute_modules."
+                )
+            if self.fine_grained_activation_offloading:
+                raise ValueError(
+                    "'mhc' in recompute_modules is incompatible with "
+                    "fine_grained_activation_offloading. The mHC recompute hook fires "
+                    "before the offloading backward chunk is initialized, causing "
+                    "tensor_pop on a None chunk. Disable one of them."
+                )
+
+        if self.enable_hyper_connections and not (
+            self.recompute_granularity == "selective" and "mhc" in self.recompute_modules
+        ):
+            warnings.warn(
+                "HyperConnections are enabled but 'mhc' is not in "
+                "recompute_modules with selective recompute. Consider adding 'mhc' to "
+                "recompute_modules with selective recompute to reduce activation memory."
+            )
+
+        # Validation for hyper_connections with MTP
+        if self.enable_hyper_connections and self.mtp_num_layers is not None:
+            raise ValueError(
+                "enable_hyper_connections is not compatible with Multi-Token Prediction (MTP). "
+                "Please disable MTP (set mtp_num_layers=None) when using hyper connections."
+            )
 
         if self.recompute_granularity == 'selective':
             if len(self.recompute_modules) > 0:

@@ -98,7 +98,9 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None)
     """
     args = get_args()
     imgs, tokens, labels, loss_mask, attention_mask, position_ids = None, None, None, None, None, None
-    is_qwen3vl = args.model_arch in ("qwen3_vl_moe", "qwen3_vl")
+    is_qwen3vl = args.model_arch == "qwen3vl"
+    is_gemma3vl = args.model_arch == "gemma3vl"
+    is_qwen_vl = not is_gemma3vl  # Qwen 系列含 mRoPE, 需要 collator 计算的 position_ids
 
     data = next(data_iterator)
     for k, v in data.items():
@@ -111,8 +113,12 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None)
     image_input_mask = data_b["image_input_mask"].bool().contiguous()
     has_image = data_b["has_image"].bool()[0].item()
 
-    keys = ["input_ids", "labels", "position_ids"]
-    if has_image:
+    # ── int64 字段 ──
+    # GemmaVL: position_ids 由 LM 内部计算, collator 不产出
+    keys = ["input_ids", "labels"]
+    if is_qwen_vl:
+        keys.append("position_ids")
+    if has_image and is_qwen_vl:
         keys.append("image_grid_thw")
         if is_qwen3vl:
             # qwen3vl 内部做 CP split，需要 images_padded / cp_img_num
@@ -126,14 +132,21 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None)
     if has_image and is_qwen3vl:
         cp_img_num = data_b["cp_img_num"].long().tolist()
         images_padded = data_b["images_padded"].bool().tolist()
-    position_ids = data_b["position_ids"].long().contiguous()
+    if is_qwen_vl:
+        position_ids = data_b["position_ids"].long().contiguous()
 
     keys = ["loss_mask"]
     if has_image:
         keys.append("pixel_values")
     data_b = tensor_parallel.broadcast_data(keys, data, torch.float32)
     if has_image:
-        imgs = data_b["pixel_values"].float().squeeze(0).contiguous()
+        imgs = data_b["pixel_values"].float()
+        if is_gemma3vl:
+            # Gemma3VL: pixel_values 是 (B, C, H, W), 不需要 squeeze
+            pass
+        else:
+            # QwenVL: pixel_values 是 (total_pixels, C), 去掉多余的 batch 维
+            imgs = imgs.squeeze(0).contiguous()
         imgs = imgs.type(torch.bfloat16)
     loss_mask = data_b["loss_mask"].float().contiguous()
 
@@ -212,7 +225,8 @@ def forward_step(data_iterator, model, return_schedule_plan: bool = False, micro
     """
     args = get_args()
     timers = get_timers()
-    is_qwen3vl = args.model_arch in ("qwen3_vl_moe", "qwen3_vl")
+    is_qwen3vl = args.model_arch == "qwen3vl"
+    is_gemma3vl = args.model_arch == "gemma3vl"
 
     # Get the batch.
     timers('batch-generator', log_level=2).start()
@@ -224,7 +238,7 @@ def forward_step(data_iterator, model, return_schedule_plan: bool = False, micro
             tokens, labels, loss_mask, attention_mask, position_ids, pixel_values, image_grid_thw,
             image_input_mask, images_padded, cp_img_num
         ) = get_batch(data_iterator)
-    timers('batch-generator').stop()
+        timers('batch-generator').stop()
 
     timers("model-forward-only", log_level=2).start()
     with stimer:
@@ -244,17 +258,27 @@ def forward_step(data_iterator, model, return_schedule_plan: bool = False, micro
                     position_ids=position_ids,
                     attention_mask=attention_mask,
                     labels=labels,
-                    image_grid_thw=image_grid_thw,
                     pixel_values=pixel_values,
+                    loss_mask=loss_mask,
                 )
-                if is_qwen3vl:
-                    # qwen3vl 模型内部做 vision CP split，需要这些额外参数
-                    model_kwargs.update(
-                        image_input_mask=image_input_mask,
-                        images_padded=images_padded,
-                        cp_img_num=cp_img_num,
-                    )
+                if is_gemma3vl:
+                    # Gemma3VL 使用标准 RoPE (LM 内部计算 position_ids)，
+                    # 不需要 image_grid_thw / image_input_mask
+                    pass
+                else:
+                    model_kwargs["image_grid_thw"] = image_grid_thw
+                    model_kwargs["image_input_mask"] = image_input_mask
+                    if is_qwen3vl:
+                        # qwen3vl 模型内部做 vision CP split，需要这些额外参数
+                        model_kwargs.update(
+                            images_padded=images_padded,
+                            cp_img_num=cp_img_num,
+                        )
                 output_tensor = model(**model_kwargs)
+                # Gemma3VLModel.forward() 返回 (outputs, loss_mask) 元组，
+                # loss_mask 已在模型内部经过 CP slice，需要替换 get_batch 的版本
+                if is_gemma3vl:
+                    output_tensor, loss_mask = output_tensor
     timers("model-forward-only").stop()
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
@@ -292,7 +316,7 @@ def add_qwen3vl_extra_args(parser):
     """Extra arguments."""
     group = parser.add_argument_group(title='qwen3vl arguments')
     group.add_argument("--hf-model-path", type=str, default=None, help="")
-    group.add_argument("--model-arch", type=str, default="qwen2vl", choices=["qwen2vl", "qwen2.5vl", "qwen3vl"],
+    group.add_argument("--model-arch", type=str, default="qwen2vl", choices=["qwen2vl", "qwen2.5vl", "qwen3vl", "gemma3vl"],
                        help="model architecture, which determines the default processor and tokenizer if not specified")
 
     group.add_argument("--processor-path", type=str, default=None, help="")

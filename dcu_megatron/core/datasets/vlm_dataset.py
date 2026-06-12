@@ -20,6 +20,7 @@ from dcu_megatron.core.datasets.mm_dataset import (
     MultiModalDataset,
     fetch_images,
     convert_conversations,
+    remove_bos,
 )
 
 # copy from: https://github.com/QwenLM/Qwen2-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py
@@ -210,7 +211,7 @@ def pad_and_split_pixel_values(
 # 现改为在 build_train_valid_test_data_iter 中直接从 HF tokenizer 注入属性。
 
 
-class Qwen2VlDataset(MultiModalDataset):
+class QwenVLDataset(MultiModalDataset):
     """Qwen2-VL / Qwen2.5-VL / Qwen3-VL 多模态对话数据集。
 
     数据流全貌
@@ -222,13 +223,13 @@ class Qwen2VlDataset(MultiModalDataset):
         读取 JSONL 行 → yield {"json_data": {...}, "domain_line": 1, ...}
         │
         ▼
-    Qwen2VlDataset.__iter__()                     ← 当前类
+    QwenVLDataset.__iter__()                     ← 当前类
         ① 从 json_data 加载图片 (fetch_images)
         ② 解析对话结构 (convert_conversations: <image> → {"type":"image","image":"0"})
         ③ convert_example() 处理为训练 tensor
         │
         ▼
-    DataCollatorForQwen2Vl.__call__()
+    DataCollatorForQwenVL.__call__()
         拼接 batch、pad pixel_values、计算 RoPE position_ids、生成 loss_mask
 
     核心方法
@@ -596,7 +597,299 @@ class Qwen2VlDataset(MultiModalDataset):
 
 
 # =============================================================================
-# 统一的 3D RoPE position ID 计算
+# Gemma3VL 数据集 — 比 QwenVL 简单得多
+#
+# 核心差异:
+#   - 无 chat_template → 手动拼接 Gemma 对话格式
+#   - 无 image_grid_thw → pixel_values 是标准 [C, H, W] tensor, 每图固定 256 token
+#   - 无 mRoPE → collator 不需要计算 position_ids
+#   - 无 padding_vision_token → <image> 直接替换为 256 个 <image_soft_token>
+#
+# Gemma3 对话格式:
+#   <bos><start_of_turn>user
+#   {text}<end_of_turn>
+#   <start_of_turn>model
+#   {text}<end_of_turn><eos>
+# =============================================================================
+
+GEMMA_IMAGE_TOKEN = "<image_soft_token>"
+GEMMA_TOKENS_PER_IMAGE = 256
+
+
+class GemmaVLDataset(MultiModalDataset):
+    """Gemma3VL 多模态对话数据集。
+
+    与 QwenVLDataset 不同，Gemma3VL 没有 chat_template、image_grid_thw、mRoPE，
+    数据管线大大简化。
+    """
+
+    def __init__(
+        self,
+        min_pixels_num,
+        max_pixels_num,
+        use_for_hf,
+        mask_history,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.min_pixels_num = min_pixels_num
+        self.max_pixels_num = max_pixels_num
+        self.use_for_hf = use_for_hf
+        self.mask_history = mask_history
+
+    # =========================================================================
+    # Gemma 对话格式化: 手动拼接, 不依赖 chat_template
+    # =========================================================================
+
+    @staticmethod
+    def _format_content(content) -> str:
+        """将分段 content (list of dict) 转为纯文本。
+
+        Qwen 路径用 convert_conversations 把 <image> 转为 {"type":"image","image":"0"},
+        这里直接映射回 Gemma 的 <image_soft_token>。
+        """
+        if isinstance(content, str):
+            return content.replace("<image>", GEMMA_IMAGE_TOKEN * GEMMA_TOKENS_PER_IMAGE)
+        parts = []
+        for seg in content:
+            if seg.get("type") == "text":
+                parts.append(seg.get("text", ""))
+            elif seg.get("type") == "image":
+                parts.append(GEMMA_IMAGE_TOKEN * GEMMA_TOKENS_PER_IMAGE)
+            elif seg.get("type") == "video":
+                parts.append(GEMMA_IMAGE_TOKEN * GEMMA_TOKENS_PER_IMAGE)  # same placeholder
+        return "".join(parts)
+
+    def gemma_format_conversations(self, conversations) -> str:
+        """手动拼接 Gemma3 对话格式, 包含 <eos>。
+
+        格式: <bos><start_of_turn>user\n{text}<end_of_turn>\n<start_of_turn>model\n{text}<end_of_turn><eos>
+        """
+        parts = [self.tokenizer._tokenizer.bos_token]
+        for turn in conversations:
+            role = turn.get("role", "")
+            content = self._format_content(turn.get("content", ""))
+            if role == "user":
+                parts.append(f"<start_of_turn>user\n{content}<end_of_turn>\n")
+            elif role == "assistant":
+                parts.append(f"<start_of_turn>model\n{content}<end_of_turn>\n")
+            elif role == "system":
+                parts.append(f"{content}\n")
+        parts.append(self.tokenizer._tokenizer.eos_token)
+        return "".join(parts)
+
+    # =========================================================================
+    # process_vision — Gemma3VL 用标准 SigLIP image processor
+    # =========================================================================
+
+    def process_vision(self, images, videos=None):
+        """Gemma3VL: 标准 image processor, 输出 (B, C, H, W) pixel_values。
+
+        Qwen 的 processor 输出 (total_pixels, C) + image_grid_thw，Gemma 不需要这些。
+        """
+        if images is not None:
+            return self.image_processor(images=images, return_tensors="pt")
+        return {}
+
+    # =========================================================================
+    # gen_label_mask — 不依赖 apply_chat_template
+    # =========================================================================
+
+    def gen_label_mask(self, conversations, imgs=None, tools=None,
+                       label_role=("assistant",), rm_bos=True):
+        """逐轮手动拼接文本并测量 token 长度, 标记非 assistant 区间。
+
+        与 Qwen 版本的区别: 不调 processor.apply_chat_template, 改为手动拼接。
+        """
+        parts = [self.tokenizer._tokenizer.bos_token]
+        pre_len = 0
+        mask_indexs = []
+        for i, turn in enumerate(conversations):
+            if turn.get("role") in ("system",):
+                continue
+            role = turn["role"]
+            content = self._format_content(turn.get("content", ""))
+            if role == "user":
+                parts.append(f"<start_of_turn>user\n{content}<end_of_turn>\n")
+            elif role == "assistant":
+                parts.append(f"<start_of_turn>model\n{content}<end_of_turn>\n")
+            text = "".join(parts)
+            if rm_bos:
+                text = remove_bos(text)
+            cur_len = len(self.tokenizer._tokenizer(text, padding=False).input_ids)
+            if role not in label_role:
+                mask_indexs.append([pre_len, cur_len])
+            pre_len = cur_len
+
+        # 末尾加 <eos> (已在 gemma_format_conversations 中, 这里统一处理)
+        if self.mask_history:
+            mask_indexs = [[mask_indexs[0][0], mask_indexs[-1][-1]]]
+        return mask_indexs
+
+    # =========================================================================
+    # convert_example — Gemma3VL 简化版
+    # =========================================================================
+
+    def convert_example(self, example, conversations, imgs, domain_states, tools=None):
+        """Gemma3VL 单样本处理管线 (简化为 6 步)。
+
+        step 1. process_vision → pixel_values (B, C, H, W)
+        step 2. gemma_format_conversations → 文本
+        step 3. tokenize
+        step 4. gen_label_mask → labels
+        step 5. pad / truncate
+        step 6. shift
+        """
+        # ── step 1: 图片处理 ──
+        media_info = self.process_vision(imgs)
+        pixel_values = media_info.get("pixel_values", None)
+
+        # ── step 2: 对话 → 文本 (手动拼接, 包含 <image_soft_token>) ──
+        all_text = self.gemma_format_conversations(conversations)
+
+        # ── step 3: tokenize ──
+        all_text_tokenizer = self.tokenizer._tokenizer(all_text, padding=False)
+        input_ids = all_text_tokenizer.input_ids
+        attention_mask = all_text_tokenizer.attention_mask
+
+        # ── step 4: label mask ──
+        labels = torch.tensor(input_ids, dtype=torch.int64)
+        label_mask = self.gen_label_mask(conversations, imgs, tools, rm_bos=False)
+        for mask in label_mask:
+            labels[mask[0]:mask[1]] = -100
+        prompt_len = label_mask[-1][-1]
+        labels = labels.tolist()
+
+        effective_max_len = self.max_seq_len
+
+        # ── step 5: pad / truncate ──
+        target_len = effective_max_len + 1
+        if len(input_ids) < target_len:
+            pad_len = target_len - len(input_ids)
+            input_ids += [self.tokenizer._tokenizer.pad_token_id] * pad_len
+            labels += [-100] * pad_len
+            attention_mask += [0] * pad_len
+        elif len(input_ids) > target_len:
+            input_ids = input_ids[:target_len]
+            labels = labels[:target_len]
+            attention_mask = attention_mask[:target_len]
+
+        # ── step 6: shift ──
+        input_ids = input_ids[:-1]
+        attention_mask = attention_mask[:-1]
+        if self.use_for_hf:
+            labels = labels[:-1]
+        else:
+            labels = labels[1:]
+
+        # ── 截断 ──
+        if len(input_ids) > effective_max_len:
+            input_ids = input_ids[-effective_max_len:]
+            labels = labels[-effective_max_len:]
+            attention_mask = attention_mask[-effective_max_len:]
+
+        # ── 打包输出 ──
+        example["input_ids"] = torch.tensor(input_ids, dtype=torch.int64)
+        example["labels"] = torch.tensor(labels, dtype=torch.int64)
+        example["attention_mask"] = torch.tensor(attention_mask, dtype=torch.bool)
+        example["pixel_values"] = pixel_values
+        example["image_grid_thw"] = None  # Gemma 无此字段
+        example["image_input_mask"] = example["input_ids"] == self.tokenizer.image_token_id
+
+        domain_states.domain_lines += example["domain_line"]
+
+        # ── 校验: 全 ignore 则跳过 ──
+        all_ignore = torch.all(example["labels"] == -100).item()
+        if all_ignore:
+            print(f"Abort Sample at dp-rank:{self.underlying.dp_rank}[all ignore]")
+            return None
+
+        example["domain_line"] = torch.tensor(domain_states.domain_lines, dtype=torch.int64)
+        example["prompt_len"] = torch.tensor(prompt_len, dtype=torch.int64)
+        domain_states.domain_lines = 0
+        return example
+
+    # =========================================================================
+    # 迭代器
+    # =========================================================================
+
+    def __iter__(self):
+        """与 QwenVLDataset.__iter__ 类似, 但简化了 resize 和 qwen3vl 判断。"""
+        domain_states = SimpleNamespace(domain_lines=0)
+        for example in self.underlying:
+            json_data = example["json_data"]
+
+            # ── 加载图片 ──
+            imgs = None
+            if "images" in json_data and len(json_data["images"]) > 0:
+                imgs = fetch_images(json_data["images"], self.tar_dir, self.lmdb_port)
+                imgs_valid = True
+                for img in imgs:
+                    if img is None:
+                        imgs_valid = False
+                        break
+                    width, height = img.size
+                    if width < IMAGE_FACTOR or height < IMAGE_FACTOR:
+                        imgs_valid = False
+                        break
+                if not imgs_valid:
+                    domain_states.domain_lines += example["domain_line"]
+                    print(f"Abort Sample at dp-rank:{self.underlying.dp_rank}[invalid image]")
+                    continue
+
+            # ── 解析对话 ──
+            conversations = convert_conversations(json_data["conversations"])
+            tools = json_data.get("tools", None)
+            assert len(conversations) > 1, "SFT 至少需要一轮对话 (user + assistant)"
+            del example["json_data"]
+
+            # ── 转换样本 ──
+            example_copy = deepcopy(example)
+            example_copy = self.convert_example(
+                example_copy, conversations, imgs, domain_states, tools
+            )
+            if example_copy is None:
+                continue
+
+            yield example_copy
+
+
+# =============================================================================
+# Gemma3VL DataCollator — 标准 collate, 无 mRoPE
+# =============================================================================
+
+class DataCollatorForGemmaVL(object):
+    """Gemma3VL collator: 标准 pad + loss_mask, 无 position_ids 计算。"""
+
+    def __init__(self, tokenizer=None):
+        self.tokenizer = tokenizer
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        pixel_values = []
+        for instance in instances:
+            if instance.get("pixel_values") is not None:
+                pixel_values.append(instance["pixel_values"])
+            del instance["pixel_values"]
+            if "image_grid_thw" in instance:
+                del instance["image_grid_thw"]
+
+        res = default_collate(instances)
+
+        if len(pixel_values) > 0:
+            res["pixel_values"] = torch.cat(pixel_values, dim=0)
+            res["has_image"] = torch.tensor([True], dtype=torch.bool)
+        else:
+            res["has_image"] = torch.tensor([False], dtype=torch.bool)
+
+        # 标准 loss_mask
+        loss_mask = torch.ones(res["labels"].size(), dtype=torch.float, device=res["labels"].device)
+        loss_mask[res["labels"] == -100] = 0.0
+        if self.tokenizer is not None:
+            loss_mask[res["labels"] == self.tokenizer.pad_token_id] = 0.0
+        res["loss_mask"] = loss_mask
+
+        return res
 #
 # 三个模型的差异仅在于 temporal position 的计算方式：
 #   qwen2vl:    顺序递增 0, 1, 2, ...
@@ -667,7 +960,7 @@ def get_rope_index(
     vision_start_token_id = tokenizer.vision_start_token_id
 
     # ---- qwen3vl 专属预处理：按 timestamp 拆分 video_grid_thw，确保每帧 t=1 ----
-    if model_arch in ("qwen3_vl_moe", "qwen3_vl") and video_grid_thw is not None:
+    if model_arch == "qwen3vl" and video_grid_thw is not None:
         video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)
         video_grid_thw[:, 0] = 1
 
@@ -797,8 +1090,8 @@ def get_ltor_masks_and_position_ids(
     return loss_mask, position_ids
 
 
-class DataCollatorForQwen2Vl(object):
-    """将 Qwen2VlDataset 产出的单样本 dict 拼装为 batch。
+class DataCollatorForQwenVL(object):
+    """将 QwenVLDataset 产出的单样本 dict 拼装为 batch。
 
     负责：pixel_values 的 pad/split、position_ids 计算、loss_mask 生成。
     """
@@ -845,7 +1138,7 @@ class DataCollatorForQwen2Vl(object):
                 pixel_values,
                 image_grid_thws,
             )
-            if self.model_arch in ["qwen3_vl_moe", 'qwen3_vl']:
+            if self.model_arch == "qwen3vl":
                 for image_padded in images_padded:
                     assert not image_padded, "not support image padded now"
             elif any(images_padded):
@@ -888,7 +1181,21 @@ class DataCollatorForQwen2Vl(object):
 
 def get_processor(args):
     processor_path = args.processor_path
-    if args.model_arch in ["qwen3_vl_moe", 'qwen3_vl']:
+    model_arch = getattr(args, 'model_arch', 'qwen2vl')
+
+    # ── GemmaVL 分支: 不需要 min_pixels/max_pixels ──
+    if model_arch == "gemma3vl":
+        init_kwargs = {
+            "trust_remote_code": True,
+            "cache_dir": None,
+            "token": None,
+            "use_fast": True,
+        }
+        processor = AutoProcessor.from_pretrained(processor_path, **init_kwargs)
+        return processor
+
+    # ── QwenVL 分支 ──
+    if args.model_arch == "qwen3vl":
         min_pixels = args.min_pixels_num
         max_pixels = args.max_pixels_num
     else:
@@ -917,9 +1224,9 @@ def build_train_valid_test_datasets(
     dp_size=1,
     use_for_hf=False,
 ):
-    """构建 Qwen2VlDataset 训练/验证/测试数据集。
+    """构建 QwenVLDataset / GemmaVLDataset 训练/验证/测试数据集。
 
-    从 args 中读取数据路径、domain 配比、processor 配置等，创建 Qwen2VlDataset 实例。
+    从 args 中读取数据路径、domain 配比、processor 配置等，根据 model_arch 选择对应的 Dataset 类。
     """
     train_path_likes = args.data_path
     eval_path_likes = args.px_eval_data_path
@@ -933,29 +1240,27 @@ def build_train_valid_test_datasets(
     processor = get_processor(args)
     mask_history = args.mask_history
     max_seq_length = args.seq_length
+    model_arch = getattr(args, 'model_arch', 'qwen2vl')
 
-    print_rank_0(
-        f'build_train_valid_datasets train_data_consuming_progresses {getattr(args, "train_data_consuming_progresses", None)}'
-    )
-    train_ds = Qwen2VlDataset(
-        args.min_pixels_num,
-        args.max_pixels_num,
-        use_for_hf,
-        mask_history,
-        tokenizer,
-        max_seq_length,
-        train_path_likes,
-        domain_probabilities,
-        domain_names,
-        args.global_batch_size,
-        train_data_consuming_progresses=getattr(args, 'train_data_consuming_progresses', None),
+    # ── 根据 model_arch 选择 Dataset 类 ──
+    if model_arch == "gemma3vl":
+        DatasetCls = GemmaVLDataset
+    else:
+        DatasetCls = QwenVLDataset
+
+    common_kwargs = dict(
+        min_pixels_num=args.min_pixels_num,
+        max_pixels_num=args.max_pixels_num,
+        use_for_hf=use_for_hf,
+        mask_history=mask_history,
+        tokenizer=tokenizer,
+        max_seq_len=max_seq_length,
         rank=rank,
         dp_rank=dp_rank,
         dp_size=dp_size,
         num_workers=args.num_workers,
         shuffle_buffer_size=args.px_shuffle_buffer_size,
         seed=args.seed,
-        train=True,
         retention_rates_per_domains=retention_rates_per_domains,
         enable_pareto=enable_pareto,
         pareto_alphas=pareto_alpha,
@@ -969,38 +1274,29 @@ def build_train_valid_test_datasets(
         moe_pad_with_random_token=getattr(args, 'moe_pad_with_random_token', False),
     )
 
+    print_rank_0(
+        f'build_train_valid_datasets train_data_consuming_progresses {getattr(args, "train_data_consuming_progresses", None)}'
+    )
+    train_ds = DatasetCls(
+        path_likes=train_path_likes,
+        domain_probabilities=domain_probabilities,
+        domain_names=domain_names,
+        global_batch_size=args.global_batch_size,
+        train_data_consuming_progresses=getattr(args, 'train_data_consuming_progresses', None),
+        train=True,
+        **common_kwargs,
+    )
+
     eval_ds = None
     if eval_path_likes is not None:
-        eval_ds = Qwen2VlDataset(
-            args.min_pixels_num,
-            args.max_pixels_num,
-            use_for_hf,
-            mask_history,
-            tokenizer,
-            max_seq_length,
-            eval_path_likes,
-            [1.0],
-            args.px_eval_data_domain_names,
-            args.global_batch_size,
+        eval_ds = DatasetCls(
+            path_likes=eval_path_likes,
+            domain_probabilities=[1.0],
+            domain_names=args.px_eval_data_domain_names,
+            global_batch_size=args.global_batch_size,
             train_data_consuming_progresses=None,
-            rank=rank,
-            dp_rank=dp_rank,
-            dp_size=dp_size,
-            num_workers=args.num_workers,
-            shuffle_buffer_size=args.px_shuffle_buffer_size,
-            seed=args.seed,
             train=False,
-            retention_rates_per_domains=retention_rates_per_domains,
-            enable_pareto=enable_pareto,
-            pareto_alphas=pareto_alpha,
-            pareto_scales=pareto_scale,
-            pareto_score_scales=pareto_score_scale,
-            top_domains_to_cut=args.px_top_domains_to_cut,
-            processor=processor,
-            tar_dir=args.tarfile_path,
-            lmdb_port=args.lmdb_port,
-            image_token_id=getattr(args, 'image_token_id', None),
-            moe_pad_with_random_token=getattr(args, 'moe_pad_with_random_token', False),
+            **common_kwargs,
         )
         assert args.px_reset_dataloader_at_start_of_eval, "需要--px-reset-dataloader-at-start-of-eval来保保证每次eval的数据是一样的"
     test_ds = None
@@ -1016,20 +1312,53 @@ def build_train_valid_test_data_iter(
     dp_size=1,
     use_for_hf=False,
 ):
-    """构建 Qwen2VlDataset 的 DataLoader 迭代器。
+    """构建 QwenVLDataset / GemmaVLDataset 的 DataLoader 迭代器。
 
-    负责 tokenizer 视觉属性注入、hw_factor 计算、DataCollator 创建、DataLoader 组装。
+    负责 tokenizer 视觉属性注入、DataCollator 创建、DataLoader 组装。
+    根据 model_arch 选择 QwenVL 或 GemmaVL 路径。
     """
+    model_arch = getattr(args, 'model_arch', 'qwen2vl')
 
-    # ── 注入 Qwen2-VL 视觉 token 属性 ──
+    # ── 注入 tokenizer 属性 ──
     # tokenizer 类型: DefaultTokenizerText → MegatronTokenizerText
     #   tokenizer._tokenizer         = Megatron-LM HuggingFaceTokenizer (库实现)
-    #   tokenizer._tokenizer.tokenizer = HF AutoTokenizer (真正的 Qwen2-VL tokenizer)
+    #   tokenizer._tokenizer.tokenizer = HF AutoTokenizer
     hf = tokenizer._tokenizer.tokenizer
-
-    # 将 _tokenizer 替换为 HF AutoTokenizer，dataset 代码通过 _tokenizer(text, ...) 调用
     tokenizer._tokenizer = hf
 
+    # ── GemmaVL 分支: 简化的 token 注入 + collator ──
+    if model_arch == "gemma3vl":
+        tokenizer.image_token = '<image_soft_token>'
+        tokenizer.image_token_id = hf.convert_tokens_to_ids('<image_soft_token>')
+        tokenizer.pad_token_id = hf.pad_token_id
+        tokenizer.eos_token_id = hf.eos_token_id
+        tokenizer.bos_token_id = hf.bos_token_id
+
+        train_ds, eval_ds, test_ds = build_train_valid_test_datasets(
+            args, tokenizer, rank, dp_rank, dp_size, use_for_hf=use_for_hf,
+        )
+
+        collate_func = DataCollatorForGemmaVL(tokenizer=tokenizer)
+
+        batch_size = args.micro_batch_size
+        train_dataloader = torch.utils.data.DataLoader(
+            train_ds, batch_size=batch_size, num_workers=args.num_workers,
+            drop_last=True, pin_memory=True, collate_fn=collate_func,
+            prefetch_factor=args.px_dataloader_prefetch_factor,
+        )
+        eval_dataloader = None
+        if eval_ds is not None:
+            eval_dataloader = torch.utils.data.DataLoader(
+                eval_ds, batch_size=batch_size, num_workers=args.num_workers,
+                drop_last=True, pin_memory=True, collate_fn=collate_func,
+                prefetch_factor=args.px_dataloader_prefetch_factor,
+            )
+        test_dataloader = None
+        if use_for_hf:
+            return train_dataloader, eval_dataloader, test_dataloader
+        return get_iterator(train_dataloader), get_iterator(eval_dataloader), get_iterator(test_dataloader)
+
+    # ── QwenVL 分支: 原有逻辑 ──
     # Qwen2-VL 视觉 token 常量及 ID（HF tokenizer 不暴露为命名属性，用 convert_tokens_to_ids 查）
     tokenizer.image_token = '<|image_pad|>'
     tokenizer.image_token_id = hf.convert_tokens_to_ids('<|image_pad|>')
@@ -1045,23 +1374,18 @@ def build_train_valid_test_data_iter(
     tokenizer.eos_token_id = hf.eos_token_id
     tokenizer.bos_token_id = hf.bos_token_id
     train_ds, eval_ds, test_ds = build_train_valid_test_datasets(
-        args,
-        tokenizer,
-        rank,
-        dp_rank,
-        dp_size,
-        use_for_hf=use_for_hf,
+        args, tokenizer, rank, dp_rank, dp_size, use_for_hf=use_for_hf,
     )
 
     hw_factor = args.context_parallel_size
     if args.sequence_parallel:
         hw_factor *= args.tensor_model_parallel_size
     # qwen3vl 的 pixel_values 需要不同的对齐策略，跳过额外 padding
-    if args.model_arch in ["qwen3_vl_moe", 'qwen3_vl']:
+    if args.model_arch == "qwen3vl":
         hw_factor = 1
 
     hf_config = None
-    if args.model_arch in ["qwen3_vl_moe", 'qwen3_vl']:
+    if args.model_arch == "qwen3vl":
         from transformers import Qwen3VLConfig
         hf_config = Qwen3VLConfig.from_pretrained(args.processor_path)
         assert hf_config.image_token_id == tokenizer.image_token_id
@@ -1069,7 +1393,7 @@ def build_train_valid_test_data_iter(
         assert hf_config.vision_start_token_id == tokenizer.vision_start_token_id
         assert hf_config.vision_end_token_id == tokenizer.vision_end_token_id
 
-    collate_func = DataCollatorForQwen2Vl(
+    collate_func = DataCollatorForQwenVL(
         hw_factor=hw_factor,
         model_arch=args.model_arch,
         tokenizer=tokenizer,
@@ -1080,12 +1404,8 @@ def build_train_valid_test_data_iter(
 
     batch_size = args.micro_batch_size
     train_dataloader = torch.utils.data.DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        num_workers=args.num_workers,
-        drop_last=True,
-        pin_memory=True,
-        collate_fn=collate_func,
+        train_ds, batch_size=batch_size, num_workers=args.num_workers,
+        drop_last=True, pin_memory=True, collate_fn=collate_func,
         prefetch_factor=args.px_dataloader_prefetch_factor,
     )
 
