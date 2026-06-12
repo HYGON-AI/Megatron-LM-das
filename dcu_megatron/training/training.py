@@ -508,7 +508,7 @@ def setup_model_and_optimizer(
             # print(f"provider.attention_backend = {provider.attention_backend}")
 
             provider.finalize()
-            
+
         kwargs = {} # copy from get_model(): wrap_with_ddp
         for f in dataclasses.fields(DistributedDataParallelConfig):
             if hasattr(args, f.name):

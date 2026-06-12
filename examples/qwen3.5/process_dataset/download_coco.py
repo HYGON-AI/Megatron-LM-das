@@ -23,12 +23,12 @@ def download_single_image(task):
     包含重试逻辑和错误返回。
     """
     uniq_id, image_id, image_url = task
-    
+
     # 准备保存的文件名
     parsed_url = urlparse(image_url)
     original_filename = os.path.basename(parsed_url.path)
     save_path = os.path.join(download_dir, f"{uniq_id}_{image_id}_{original_filename}")
-    
+
     # 如果文件已存在，则跳过（断点续传）
     if os.path.exists(save_path):
         return True, uniq_id, "Skipped (already exists)"
@@ -38,18 +38,18 @@ def download_single_image(task):
         try:
             response = requests.get(image_url, stream=True, timeout=request_timeout)
             response.raise_for_status()
-            
+
             with open(save_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             return True, uniq_id, "Success"
-            
+
         except requests.exceptions.RequestException as e:
             if attempt == max_retries:
                 return False, uniq_id, f"Failed after {max_retries} attempts: {e}"
             # 非最后一次失败，短暂等待后重试
             time.sleep(0.5)
-    
+
     return False, uniq_id, "Unknown error"
 
 # 1. 从CSV文件读取并解析所有任务
@@ -57,7 +57,7 @@ tasks = []
 with open(csv_file_path, 'r', encoding='utf-8') as f:
     reader = csv.reader(f)
     # 如果你的文件有表头，取消下面这行的注释来跳过表头
-    next(reader, None) 
+    next(reader, None)
     for row in reader:
         if len(row) >= 4:
             uniq_id, image_id, caption, url = row[0], row[1], row[2], row[3]
@@ -70,16 +70,16 @@ failed_list = []
 with ThreadPoolExecutor(max_workers=max_workers) as executor:
     # 提交所有任务
     future_to_task = {executor.submit(download_single_image, task): task for task in tasks}
-    
+
     # 使用tqdm显示进度条
     progress_bar = tqdm(total=len(tasks), desc="下载进度", unit="张")
-    
+
     for future in as_completed(future_to_task):
         success, uid, message = future.result()
         if not success:
             failed_list.append((uid, message))
         progress_bar.update(1)
-    
+
     progress_bar.close()
 
 # 3. 输出最终结果

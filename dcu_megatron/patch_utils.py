@@ -1,6 +1,8 @@
 import importlib
+import inspect
 import sys
 import types
+from typing import List, Union
 
 
 def get_func_name(func):
@@ -119,6 +121,7 @@ class Patch:
                 setattr(value, self.orig_func_or_cls_name, final_patch_func_or_cls)
 
         self.is_applied = True
+        self.final_patch_func_or_cls = final_patch_func_or_cls
 
     @staticmethod
     def parse_path(module_path, function_name, create_dummy):
@@ -148,8 +151,39 @@ class Patch:
                         raise RuntimeError('no exist {} of {}'.format(function_name, module))
 
         if function_name is not None and not hasattr(sys.modules[module_path], function_name):
+            assert create_dummy, f"{function_name} of {module_path} does not exist"
             setattr(sys.modules[module_path], function_name, None)
         return sys.modules[module_path], getattr(sys.modules[module_path], function_name) if function_name is not None else None
+
+    def remove_patch_wrappers(self, wrapper_names: Union[str, List[str]] = None):
+        if wrapper_names is None:
+            self.wrappers.clear()
+            return
+
+        if isinstance(wrapper_names, str):
+            wrapper_names = [wrapper_names]
+        for name in wrapper_names:
+            i = 0
+            while i < len(self.wrappers):
+                if self.wrappers[i].__name__ == name:
+                    self.wrappers.pop(i)
+                else:
+                    i += 1
+
+    def remove_patch(self):
+        for key, value in sys.modules.copy().items():
+            if 'dcu_megatron' in key or 'torch.classes' == key:
+                continue
+
+            if inspect.isclass(self.orig_module) and hasattr(value, self.orig_module_name.split('.')[-1]):
+                value = getattr(value, self.orig_module_name.split('.')[-1])
+
+            if self.orig_func_or_cls_name is not None and hasattr(value, self.orig_func_or_cls_name) \
+                    and id(getattr(value, self.orig_func_or_cls_name)) == id(self.final_patch_func_or_cls):
+                setattr(value, self.orig_func_or_cls_name, self.orig_func_or_cls)
+        self.patch_func_or_cls = None
+        self.final_patch_func_or_cls = None
+        self.is_applied = False
 
 
 class MegatronPatchesManager:
@@ -195,3 +229,9 @@ class MegatronPatchesManager:
     def apply_patches():
         for patch in MegatronPatchesManager.patches_info.values():
             patch.apply_patch()
+
+    @staticmethod
+    def remove_patches():
+        for patch in MegatronPatchesManager.patches_info.values():
+            patch.remove_patch()
+            patch.remove_patch_wrappers()

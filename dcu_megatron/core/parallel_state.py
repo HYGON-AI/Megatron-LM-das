@@ -244,59 +244,60 @@ def initialize_model_parallel_wrapper(fn):
             local_world_size=local_world_size,
         )
 
-        global _LM_HEAD_MODEL_PARALLEL_GROUP
-        assert _LM_HEAD_MODEL_PARALLEL_GROUP is None, 'lm head model parallel group is already initialized'
+        if get_args().enable_vocab_parallel:
+            global _LM_HEAD_MODEL_PARALLEL_GROUP
+            assert _LM_HEAD_MODEL_PARALLEL_GROUP is None, 'lm head model parallel group is already initialized'
 
-        world_size: int = (
-            local_world_size if local_world_size is not None else torch.distributed.get_world_size()
-        )
-
-        model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
-
-        if world_size % model_size != 0:
-            raise RuntimeError(f"world_size ({world_size}) is not divisible by {model_size}")
-
-        data_parallel_size: int = world_size // model_size
-
-        rank = torch.distributed.get_rank()
-
-        decoder_rank_generator = RankGenerator(
-            tp=tensor_model_parallel_size,
-            ep=1,
-            dp=data_parallel_size,
-            pp=pipeline_model_parallel_size,
-            cp=context_parallel_size,
-            order=order,
-            rank_offset=rank_offset,
-        )
-
-        nccl_comm_cfgs = {}
-        if nccl_communicator_config_path is not None:
-            try:
-                import yaml
-            except ImportError:
-                raise RuntimeError(
-                    "Cannot import `yaml`. Setting custom nccl communicator configs "
-                    "requires the yaml package."
-                )
-
-            with open(nccl_communicator_config_path, "r") as stream:
-                nccl_comm_cfgs = yaml.safe_load(stream)
-
-        # Set is_high_priority_stream flag to the nccl_comm_cfgs if it is in high_priority_stream_groups
-        high_priority_stream_groups = high_priority_stream_groups or []
-        for pg_name in high_priority_stream_groups:
-            overwrite_nccl_comm_cfgs(nccl_comm_cfgs, pg_name, ("is_high_priority_stream", True))
-
-        for ranks in decoder_rank_generator.get_ranks('pp'):
-            group = create_group(
-                ranks,
-                timeout=timedelta(minutes=distributed_timeout_minutes),
-                pg_options=get_nccl_options("pp-lmhead", nccl_comm_cfgs),
-                group_desc="LM_HEAD_MODEL_PARALLEL_GROUP",
+            world_size: int = (
+                local_world_size if local_world_size is not None else torch.distributed.get_world_size()
             )
-            if rank in ranks:
-                _LM_HEAD_MODEL_PARALLEL_GROUP = group
+
+            model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
+
+            if world_size % model_size != 0:
+                raise RuntimeError(f"world_size ({world_size}) is not divisible by {model_size}")
+
+            data_parallel_size: int = world_size // model_size
+
+            rank = torch.distributed.get_rank()
+
+            decoder_rank_generator = RankGenerator(
+                tp=tensor_model_parallel_size,
+                ep=1,
+                dp=data_parallel_size,
+                pp=pipeline_model_parallel_size,
+                cp=context_parallel_size,
+                order=order,
+                rank_offset=rank_offset,
+            )
+
+            nccl_comm_cfgs = {}
+            if nccl_communicator_config_path is not None:
+                try:
+                    import yaml
+                except ImportError:
+                    raise RuntimeError(
+                        "Cannot import `yaml`. Setting custom nccl communicator configs "
+                        "requires the yaml package."
+                    )
+
+                with open(nccl_communicator_config_path, "r") as stream:
+                    nccl_comm_cfgs = yaml.safe_load(stream)
+
+            # Set is_high_priority_stream flag to the nccl_comm_cfgs if it is in high_priority_stream_groups
+            high_priority_stream_groups = high_priority_stream_groups or []
+            for pg_name in high_priority_stream_groups:
+                overwrite_nccl_comm_cfgs(nccl_comm_cfgs, pg_name, ("is_high_priority_stream", True))
+
+            for ranks in decoder_rank_generator.get_ranks('pp'):
+                group = create_group(
+                    ranks,
+                    timeout=timedelta(minutes=distributed_timeout_minutes),
+                    pg_options=get_nccl_options("pp-lmhead", nccl_comm_cfgs),
+                    group_desc="LM_HEAD_MODEL_PARALLEL_GROUP",
+                )
+                if rank in ranks:
+                    _LM_HEAD_MODEL_PARALLEL_GROUP = group
 
         # output parallel group info
         global PARALLEL_GROUP_RANKS_MAP

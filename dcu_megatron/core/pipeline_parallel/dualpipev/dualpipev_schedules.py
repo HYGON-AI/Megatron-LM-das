@@ -4,7 +4,6 @@ from typing import Iterator, List, Union, Optional, Callable
 import torch
 
 from megatron.core import parallel_state
-from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
@@ -730,6 +729,7 @@ def forward_backward_pipelining_with_cutinhalf(
         post_backward=None,
         checkpoint_activations_microbatch=None,
         block_level_wgrad_compute=False,
+        disable_overlap_moe_expert_parallel_comm=False,
     ):
         """
         wrap forward_helper、backward_helper、combined_forward_backward_helper in a unified way
@@ -739,6 +739,27 @@ def forward_backward_pipelining_with_cutinhalf(
             assert (
                 checkpoint_activations_microbatch is None
             ), "checkpoint_activations_microbatch not supported when overlap_moe_expert_parallel_comm is true"
+
+            if disable_overlap_moe_expert_parallel_comm:
+                output_tensor = None
+                if fwd_model_chunk_id is not None:
+                    output_tensor, _, _ = combined_forward_backward_helper(
+                        fwd_model_chunk_id=fwd_model_chunk_id,
+                        pre_forward=pre_forward,
+                        post_forward=post_forward,
+                    )
+
+                input_tensor_grad, chunk_backward_dw_func = None, None
+                if bwd_model_chunk_id is not None:
+                    _, input_tensor_grad, chunk_backward_dw_func = combined_forward_backward_helper(
+                        bwd_model_chunk_id=bwd_model_chunk_id,
+                        pre_backward=pre_backward,
+                        post_backward=post_backward,
+                        block_level_wgrad_compute=block_level_wgrad_compute,
+                    )
+
+                return output_tensor, input_tensor_grad, chunk_backward_dw_func
+
             return combined_forward_backward_helper(
                 fwd_model_chunk_id=fwd_model_chunk_id,
                 bwd_model_chunk_id=bwd_model_chunk_id,
@@ -946,6 +967,9 @@ def forward_backward_pipelining_with_cutinhalf(
     if not forward_only:
         num_overlap_steps += schedule['interleaved_backward'][rank]
     for step_id in range(num_overlap_steps):
+        from megatron.training import get_args
+        disable_overlap_moe_expert_parallel_comm = get_args().enable_a2a_overlap_only_in_1f1b_phase and (step_id>=schedule['overlap'][rank])
+
         only_bwd = False
         if cur_fwd_chunk_microbatch[fwd_model_chunk_id] == num_chunk_max_microbatch[fwd_model_chunk_id]:
             only_bwd = True
@@ -1057,6 +1081,7 @@ def forward_backward_pipelining_with_cutinhalf(
                     post_backward=pp_post_backward,
                     checkpoint_activations_microbatch=checkpoint_activations_microbatch,
                     block_level_wgrad_compute=(bwd_model_chunk_id == 1 and is_pp_first_stage(p2p_communicator.pp_group)),
+                    disable_overlap_moe_expert_parallel_comm=disable_overlap_moe_expert_parallel_comm,
                 )
 
                 if chunk_backward_dw_func is not None:
@@ -1089,6 +1114,7 @@ def forward_backward_pipelining_with_cutinhalf(
                     pre_backward=pp_pre_backward,
                     post_backward=pp_post_backward,
                     block_level_wgrad_compute=False,
+                    disable_overlap_moe_expert_parallel_comm=disable_overlap_moe_expert_parallel_comm,
                 )
 
         # swap fwd & bwd chunks

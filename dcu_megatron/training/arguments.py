@@ -7,7 +7,7 @@ from megatron.training.arguments import add_megatron_arguments
 from megatron.core.msc_utils import MultiStorageClientFeature
 from megatron.training.utils import warn_rank_0
 
-from dcu_megatron.adaptor.features_manager import ADAPTOR_FEATURES
+from dcu_megatron.features_manager import ADAPTOR_FEATURES
 
 
 def remove_original_params(parser, param_names: Union[list, str]):
@@ -27,9 +27,7 @@ def process_adaptor_args(parser):
     parser = _add_extra_network_size_args(parser)
     parser = _add_extra_training_args(parser)
     parser = _add_extra_initialization_args(parser)
-    parser = _add_extra_distributed_args(parser)
     parser = _add_extra_tokenizer_args(parser)
-    parser = _add_extra_checkpointing_args(parser)
     parser = _add_extra_mbridge_args(parser)
 
     for feature in ADAPTOR_FEATURES:
@@ -96,17 +94,6 @@ def _add_extra_network_size_args(parser):
     return parser
 
 
-def _add_extra_distributed_args(parser):
-    group = parser.add_argument_group(title='extra distributed args')
-    group.add_argument('--rank', default=-1, type=int,
-                       help='node rank for distributed training')
-    group.add_argument('--world-size', type=int, default=8,
-                       help='number of nodes for distributed training')
-    group.add_argument('--dist-url',
-                       help='Which master node url for distributed training.')
-    return parser
-
-
 def _add_extra_training_args(parser):
     remove_original_params(parser, ["recompute_modules"])
 
@@ -116,8 +103,6 @@ def _add_extra_training_args(parser):
                        dest='use_hip_profiler')
     group.add_argument('--profile-dir', type=str, default="./",
                        help='profile dir to save.')
-    group.add_argument('--comm-time-log-iter', type=int, default=None,
-                       help='iter to log communication time')
     group.add_argument('--recompute-modules', nargs='*', type=str, default=None,
                         help='The submodules to recompute. '
                         'choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "experts", "router", "mhc".. '
@@ -181,12 +166,6 @@ def _add_extra_tokenizer_args(parser):
                        help='What type of tokenizer to use.')
     return parser
 
-def _add_extra_checkpointing_args(parser):
-    group = parser.add_argument_group(title='extra checkpointing args')
-    group.add_argument('--use-ckpt-memory-cache', action='store_true', default=False,
-                   help='Whether to enable memory caching for checkpoints (to speed up access by keeping checkpoints in memory)')
-    return parser
-
 
 def _add_extra_mbridge_args(parser):
     group = parser.add_argument_group(title='extra mbridge args')
@@ -239,20 +218,27 @@ def validate_args_func_decorator(validate_args_func):
     return wrapper
 
 
-def _print_args_wrapper(fn):
-    @wraps(fn)
-    def wrapper(title, args):
-        global ORIGIN_ARG_VALUES
+def _print_args(title, args):
+    """Print arguments."""
+    from megatron.training.utils import is_rank0
 
-        args_dict = vars(args)
-        for key, value in ORIGIN_ARG_VALUES.items():
-            if key in args_dict:
-                args_dict[key] = value
-        args = argparse.Namespace(**args_dict)
+    global ORIGIN_ARG_VALUES
 
-        fn(title, args)
+    args_dict = vars(args)
+    for key, value in ORIGIN_ARG_VALUES.items():
+        if key in args_dict:
+            args_dict[key] = value
+    args = argparse.Namespace(**args_dict)
 
-    return wrapper
+    if is_rank0() and not int(os.getenv("UNIT_TEST_MODE", "0")):
+        print(f'------------------------ {title} ------------------------', flush=True)
+        str_list = []
+        for arg in vars(args):
+            dots = '.' * (48 - len(arg))
+            str_list.append('  {} {} {}'.format(arg, dots, getattr(args, arg)))
+        for arg in sorted(str_list, key=lambda x: x.lower()):
+            print(arg, flush=True)
+        print(f'-------------------- end of {title} ---------------------', flush=True)
 
 
 def _print_env_vars(title, exclude_vars=None):
@@ -268,7 +254,8 @@ def _print_env_vars(title, exclude_vars=None):
         return False
 
     from megatron.training.utils import is_rank0
-    if is_rank0():
+
+    if is_rank0() and not int(os.getenv("UNIT_TEST_MODE", "0")):
         print(f'------------------------ {title} ------------------------', flush=True)
         str_list = []
         for key in os.environ.keys():
