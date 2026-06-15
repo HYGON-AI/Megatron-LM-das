@@ -54,6 +54,15 @@ class PipelineFeature(AbstractFeature):
         group.add_argument('--overlap-ep-comm-with-split-attn', action="store_true",
                            default=False,
                            help='whether to split attention')
+        group.add_argument('--integrate-recompute-to-ep-comm-overlap', action="store_true",
+                           default=False,
+                           help='integrate recomputation to ep overlap to reduce memory')
+        group.add_argument('--ep-overlap-early-recompute', action="store_true",
+                           default=False,
+                           help='Enable early recomputation of transformer layer during EP overlap')
+        group.add_argument('--enable-pre-init-ep-overlap-streams', action="store_true",
+                           default=False,
+                           help='Enable pre-initialization of streams for ep overlap')
         group.add_argument('--num-layers-to-build',
                            type=num_layers_build_type,
                            default=None,
@@ -71,6 +80,10 @@ class PipelineFeature(AbstractFeature):
                            help='Start iteration of the vocabulary parallelism schedule timer')
         group.add_argument('--schedule-timer-end', type=int, default=20,
                            help='End iteration of the vocabulary parallelism schedule timer')
+
+        # dualpipev
+        group.add_argument('--enable-a2a-overlap-only-in-1f1b-phase', action='store_true',
+                           help='Enables moe a2a overlap only in the 1f1b phase.')
 
     def pre_validate_args(self, args):
         if args.schedule_method != "dualpipev":
@@ -160,12 +173,15 @@ class PipelineFeature(AbstractFeature):
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.pipeline_parallel.schedules import get_forward_backward_func_wrapper
         from dcu_megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
+        from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
 
         patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_forward_backward_func',
                                     get_forward_backward_func_wrapper,
                                     apply_wrapper=True)
         patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.get_mtp_num_layers_to_build',
                                     get_mtp_num_layers_to_build)
+        patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
+                                    build_layer_callables_without_split_attn)
 
         if args.schedule_method == "dualpipev":
             from megatron.training.utils import print_rank_0
@@ -179,7 +195,6 @@ class PipelineFeature(AbstractFeature):
             from dcu_megatron.core.transformer.transformer_layer import get_transformer_layer_offset
             from dcu_megatron.training.training import build_train_valid_test_data_iterators_wrapper
             from dcu_megatron.core.models.gpt.gpt_model import GPTModel
-            from dcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
             from dcu_megatron.training.global_vars import _set_tensorboard_writer, _set_wandb_writer, _set_one_logger
             from dcu_megatron.core.models.common.language_module.language_module import LanguageModule
             from dcu_megatron.core.tensor_parallel.layers import VocabParallelEmbedding
@@ -246,9 +261,6 @@ class PipelineFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
                                          DistributedDataParallel._make_backward_post_hook)
 
-            patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
-                                        build_layer_callables_without_split_attn)
-
             patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.fine_grained_activation_offload.PipelineOffloadManager',
                                              [PipelineOffloadManagerDualpipeV.__init__,
                                               PipelineOffloadManagerDualpipeV.push,
@@ -288,6 +300,7 @@ class PipelineFeature(AbstractFeature):
         from dcu_megatron.core.models.gpt.gpt_model import GPTModel
         from dcu_megatron.core.transformer.multi_latent_attention import MLASelfAttention
         from dcu_megatron.core.transformer.attention import Attention
+        from dcu_megatron.core.transformer.moe.moe_layer import MoELayer
         from dcu_megatron.core.distributed.data_parallel_base import _BaseDataParallel
         from dcu_megatron.core.transformer.module import Float16Module
         from dcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer, MultiTokenPredictionBlock
@@ -296,7 +309,7 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer.backward_dw',
                                     TransformerLayer.backward_dw,
                                     create_dummy=True)
-        if args.schedule_method == "dualpipev" or args.overlap_ep_comm_with_split_attn:
+        if args.schedule_method == "dualpipev" or args.overlap_ep_comm_with_split_attn or args.integrate_recompute_to_ep_comm_overlap:
             patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.build_schedule_plan',
                                         GPTModel.build_schedule_plan)
             patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel.preprocess_for_fine_grained_offloading',
@@ -324,6 +337,16 @@ class PipelineFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.backward_dw',
                                     TransformerBlock.backward_dw,
                                     create_dummy=True)
+        patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.get_token_dispatcher',
+                                    MoELayer.get_token_dispatcher,
+                                    create_dummy=True)
+        patch_manager.register_cls_funcs('megatron.core.transformer.moe.moe_layer.MoELayer',
+                                         [MoELayer.preprocess,
+                                          MoELayer.dispatch,
+                                          MoELayer.routed_experts_compute,
+                                          MoELayer.combine,
+                                          MoELayer.postprocess,
+                                          MoELayer.router_and_preprocess])
         patch_manager.register_patch('megatron.core.transformer.multi_token_prediction.MultiTokenPredictionLayer.backward_dw',
                                     MultiTokenPredictionLayer.backward_dw,
                                     create_dummy=True)
@@ -337,7 +360,10 @@ class PipelineFeature(AbstractFeature):
                                          [NoopScheduleNode.forward,
                                           NoopScheduleNode.backward,])
         patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.utils.ScheduleNode',
-                                         [ScheduleNode.forward,
+                                         [ScheduleNode.__init__,
+                                          ScheduleNode.forward,
                                           ScheduleNode._forward,
+                                          ScheduleNode.get_output,
                                           ScheduleNode.backward,
-                                          ScheduleNode._backward,])
+                                          ScheduleNode._backward,
+                                          ScheduleNode._release_state,])

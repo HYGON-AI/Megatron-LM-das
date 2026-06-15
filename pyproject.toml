@@ -1,0 +1,4 @@
+[tool.coverage.run]
+concurrency = ["thread", "multiprocessing"]
+parallel = true
+sigterm = false

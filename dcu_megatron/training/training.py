@@ -503,7 +503,7 @@ def setup_model_and_optimizer(
             # 启用 TE FusedMLP，GLU 的 chunk+SiLU+multiply 融合为 1 kernel
             provider.use_transformer_engine_op_fuser = True
             provider.finalize()
-            
+
         kwargs = {} # copy from get_model(): wrap_with_ddp
         for f in dataclasses.fields(DistributedDataParallelConfig):
             if hasattr(args, f.name):

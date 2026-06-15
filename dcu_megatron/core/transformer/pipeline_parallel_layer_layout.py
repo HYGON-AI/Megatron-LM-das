@@ -123,10 +123,7 @@ class PipelineParallelLayerLayoutDualpipeV:
                 assert (
                     self.layout[pp_rank][-1].count(LayerType.mtp) == mtp_num_layers
                 ), "All of the MTP layers must be in the same one virtual pipeline stage"
-        assert LayerType.mtp not in self.layout[0][0], (
-            f"Currently we restrict that the MTP should not be in the first pp rank."
-            f"But got {self.layout[0]} for the first pp rank."
-        )
+
         ## Detect MTP standalone usage.
         mtp_standalone = False
         for pp_rank in range(self.pipeline_model_parallel_size):

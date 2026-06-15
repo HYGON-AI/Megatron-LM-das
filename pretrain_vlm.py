@@ -188,7 +188,7 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model=None):
     ])
     if args.context_parallel_size > 1:
         torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
-    
+
     # Check individual rank losses are not NaN prior to DP all-reduce.
     rerun_state_machine = get_rerun_state_machine()
     if args.check_for_nan_in_loss_and_grad:
@@ -202,7 +202,7 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model=None):
             f"Device: {torch.cuda.current_device()}, node: {os.uname()[1]}"
         )
     bwd_loss = loss[0] / loss[1]
-    
+
     averaged_loss = average_losses_across_data_parallel_group(loss)
     averaged_loss = averaged_loss[0] / averaged_loss[1]
 
