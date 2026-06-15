@@ -262,18 +262,20 @@ def forward_step(data_iterator, model, return_schedule_plan: bool = False, micro
                     loss_mask=loss_mask,
                 )
                 if is_gemma3vl:
-                    # Gemma3VL 使用标准 RoPE (LM 内部计算 position_ids)，
+                    # Gemma3VL: 标准 RoPE (LM 内部计算 position_ids)，
                     # 不需要 image_grid_thw / image_input_mask
                     pass
+                elif is_qwen3vl:
+                    # Qwen3VL: mRoPE + vision CP split, 需要全部视觉参数
+                    model_kwargs.update(
+                        image_grid_thw=image_grid_thw,
+                        image_input_mask=image_input_mask,
+                        images_padded=images_padded,
+                        cp_img_num=cp_img_num,
+                    )
                 else:
+                    # Qwen2VL / Qwen2.5VL: mRoPE, 但不需要 image_input_mask
                     model_kwargs["image_grid_thw"] = image_grid_thw
-                    model_kwargs["image_input_mask"] = image_input_mask
-                    if is_qwen3vl:
-                        # qwen3vl 模型内部做 vision CP split，需要这些额外参数
-                        model_kwargs.update(
-                            images_padded=images_padded,
-                            cp_img_num=cp_img_num,
-                        )
                 output_tensor = model(**model_kwargs)
                 # Gemma3VLModel.forward() 返回 (outputs, loss_mask) 元组，
                 # loss_mask 已在模型内部经过 CP slice，需要替换 get_batch 的版本
