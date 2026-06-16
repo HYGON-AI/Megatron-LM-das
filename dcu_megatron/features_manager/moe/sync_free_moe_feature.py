@@ -15,6 +15,10 @@ class SyncFreeMoeFeature(AbstractFeature):
                            default=False,
                            dest='sync_free_moe',
                            help='use sync free moe')
+        group.add_argument('--turbo-sync-free-moe-stage',
+                           type=int, default=0,
+                           help='Sync-Free MoE optimization levels provided by primus')
+        turbo_sync_free_moe_stage
         group.add_argument('--use-primus-topk-router', action='store_true', default=False,
                            help='Replace TopKRouter with PrimusTopKRouter')
         group.add_argument('--use-primus-moe-permute-fusion', action='store_true', default=False,
@@ -25,6 +29,16 @@ class SyncFreeMoeFeature(AbstractFeature):
                            help='use PrimusTurboGroupedMLP')
         group.add_argument('--use-primus-fused-act-with-probs', action='store_true', default=False,
                            help='use fused act with probs provided by primus turbo')
+
+    def pre_validate_args(self, args):
+        if agrs.sync_free_moe and args.use_primus_fused_act_with_probs:
+            args.turbo_sync_free_moe_stage = 3
+        elif args.use_primus_deepep or args.use_primus_grouped_mlp:
+            args.turbo_sync_free_moe_stage = 2
+        elif args.use_primus_topk_router or args.use_primus_moe_permute_fusion:
+            args.turbo_sync_free_moe_stage = 1
+
+        return args
 
     def validate_args(self, args):
         if args.sync_free_moe and args.use_primus_deepep:
@@ -41,7 +55,14 @@ class SyncFreeMoeFeature(AbstractFeature):
                 warnings.warn(f"use-primus-deepep does not take effect when enable-sync-free-moe is not set")
 
             if args.use_primus_grouped_mlp:
-                warnings.warn(f"uuse-primus-grouped-mlp does not take effect when enable-sync-free-moe is not set")
+                warnings.warn(f"use-primus-grouped-mlp does not take effect when enable-sync-free-moe is not set")
+
+            if args.use_primus_fused_act_with_probs:
+                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when enable-sync-free-moe is not set")
+
+        if args.use_primus_fused_act_with_probs:
+            if not args.use_primus_grouped_mlp:
+                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when use_primus_grouped_mlp is not set")
 
     def register_patches(self, patch_manager, args):
         if args.sync_free_moe:
