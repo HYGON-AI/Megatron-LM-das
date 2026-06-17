@@ -129,20 +129,38 @@ def _get_transformer_layer_spec(use_te, config):
     Returns:
         transformer_layer_spec: The transformer layer specification
     """
+    enable_hyper_connection = getattr(config, 'enable_hyper_connections', False)
     if use_te:
-        return get_gpt_layer_with_transformer_engine_spec(
-            config.num_moe_experts,
-            config.moe_grouped_gemm,
-            config.qk_layernorm,
-            config.multi_latent_attention,
-            config.experimental_attention_variant,
-            qk_l2_norm=config.qk_l2_norm,
-            use_kitchen=config.use_kitchen,
-            use_te_activation_func=config.use_te_activation_func,
-            use_kitchen_attention=config.use_kitchen_attention,
-            kitchen_attention_backend=config.kitchen_attention_backend,
-            mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
-        )
+        if enable_hyper_connection:
+            return get_gpt_layer_with_transformer_engine_spec(
+                config.num_moe_experts,
+                config.moe_grouped_gemm,
+                config.qk_layernorm,
+                config.multi_latent_attention,
+                config.experimental_attention_variant,
+                qk_l2_norm=config.qk_l2_norm,
+                use_kitchen=config.use_kitchen,
+                use_te_activation_func=config.use_te_activation_func,
+                use_kitchen_attention=config.use_kitchen_attention,
+                kitchen_attention_backend=config.kitchen_attention_backend,
+                mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
+                enable_hyper_connection=config.enable_hyper_connections,
+            )
+        else:
+            return get_gpt_layer_with_transformer_engine_spec(
+                config.num_moe_experts,
+                config.moe_grouped_gemm,
+                config.qk_layernorm,
+                config.multi_latent_attention,
+                config.experimental_attention_variant,
+                qk_l2_norm=config.qk_l2_norm,
+                use_kitchen=config.use_kitchen,
+                use_te_activation_func=config.use_te_activation_func,
+                use_kitchen_attention=config.use_kitchen_attention,
+                kitchen_attention_backend=config.kitchen_attention_backend,
+                mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
+                # enable_hyper_connection=config.enable_hyper_connections,
+            )
     elif config.transformer_impl == "inference_optimized":
         return get_gpt_layer_with_inference_spec(
             config.qk_layernorm,
@@ -160,4 +178,5 @@ def _get_transformer_layer_spec(use_te, config):
             use_kitchen=config.use_kitchen,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
+            enable_hyper_connection=config.enable_hyper_connections,
         )

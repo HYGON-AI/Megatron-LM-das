@@ -355,6 +355,14 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                     if hasattr(layer, 'mlp_hyper_connection'):
                         layer.mlp_hyper_connection._maintain_float32_params()
 
+        if args.enable_hyper_connections and args.mhc_use_tilekernels:
+            for model_module in model:
+                if hasattr(model_module.module, 'mtp'):
+                    for layer in model_module.module.mtp.layers:
+                        if hasattr(layer, 'mtp_model_layer'):
+                            layer.mtp_model_layer.self_attention_hyper_connection._maintain_float32_params()
+                            layer.mtp_model_layer.mlp_hyper_connection._maintain_float32_params()
+
     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
         model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
