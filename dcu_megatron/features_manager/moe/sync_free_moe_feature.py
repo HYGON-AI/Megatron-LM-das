@@ -18,7 +18,6 @@ class SyncFreeMoeFeature(AbstractFeature):
         group.add_argument('--turbo-sync-free-moe-stage',
                            type=int, default=0,
                            help='Sync-Free MoE optimization levels provided by primus')
-        turbo_sync_free_moe_stage
         group.add_argument('--use-primus-topk-router', action='store_true', default=False,
                            help='Replace TopKRouter with PrimusTopKRouter')
         group.add_argument('--use-primus-moe-permute-fusion', action='store_true', default=False,
@@ -31,7 +30,7 @@ class SyncFreeMoeFeature(AbstractFeature):
                            help='use fused act with probs provided by primus turbo')
 
     def pre_validate_args(self, args):
-        if agrs.sync_free_moe and args.use_primus_fused_act_with_probs:
+        if args.sync_free_moe and args.use_primus_fused_act_with_probs:
             args.turbo_sync_free_moe_stage = 3
         elif args.use_primus_deepep or args.use_primus_grouped_mlp:
             args.turbo_sync_free_moe_stage = 2
