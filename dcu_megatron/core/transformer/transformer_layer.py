@@ -668,6 +668,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
     def backward_dw(self):
         self.self_attention.backward_dw()
+        if self.is_moe_layer:
+            self.mlp.backward_dw(routed_experts=True, shared_experts=True)
+            return
         self.mlp.backward_dw()
 
     def __call__(self, *args, **kwargs):
