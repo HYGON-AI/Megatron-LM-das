@@ -125,9 +125,14 @@ def unpermute(
 ### 交错式1f1b流水线支持[moe a2a通信计算overlap](https://mp.weixin.qq.com/s?__biz=MzU2NzkyMzUxMw==&mid=2247550702&idx=2&sn=9f6bb8ea72475aa833bfd73718f03530&chksm=fdb928e884341e81762eeaffbc3d00a3023e4543001b5448f259977b8bf0e4603448db75360e&mpshare=1&scene=1&srcid=0306blxvLHplbcAOqnznmXiQ&sharer_shareinfo=962faa39bc50b5544c96cf846186f076&sharer_shareinfo_first=962faa39bc50b5544c96cf846186f076&version=4.1.20.70286&platform=mac#rd)
 + 项目支持moe a2a 通算overlap，实现计算掩盖全部或部分a2a通信。具体见[流水线并行](./docs/features/pipeline-parallel.md)
 
+### 1f1b流水线支持拆分cooldown阶段梯度计算
++ 项目支持对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能。具体使用说明见[流水线并行](./docs/features/pipeline-parallel.md)
 
 ### 项目支持dualpipev
 + 项目支持dualpipev。具体使用说明见[流水线并行](./docs/features/pipeline-parallel.md)
+
+### 项目支持ZB-H1流水线
++ 项目支持ZB-H1流水线调度，可提升小batch情形下训练性能。具体使用说明见[流水线并行](./docs/features/pipeline-parallel.md)
 
 
 ### 项目支持量化通信

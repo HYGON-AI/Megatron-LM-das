@@ -63,7 +63,7 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 ### 拆分attn，缓解tp与ep竞争
 针对图2中的调度排布，如果训练时同时开启tp和ep，ep会与attn部分的tp重叠，为了解决该问题，dcu megatron将attn部分拆分为三部分：（1）qkv计算，（2）core attn计算和（3）proj计算，并重新组织调度排布，如下图所示。
 <figure style="text-align:center;">
-  <img src=../source/images/moe_a2a_overlap_split_attn.png alt="示例图"/>
+  <img src=../source/images/moe_a2a_overlap_split_attn.png alt="示例图" style="width: 70%; height: auto;"/>
   <figcaption>
   图5. attn计算拆分为三部分
   </figcaption>
@@ -98,7 +98,7 @@ dualpipev可通过指定每个stage中transformer层数的方式对网络进行�
 --num-layers-to-build  *** # 整数或者数组，如果为整数，表示每个chunk上的网络层数；如果为数组，数组长度为stage数的两倍，数组的元素值为对应chunk的transformer层数，顺序与前向计算一致
 ```
 <figure style="text-align:center;">
-  <img src=../source/images/dualpipev-2.png alt="示例图"/>
+  <img src=../source/images/dualpipev-2.png alt="示例图" style="width: 50%; height: auto;"/>
   <figcaption>
   图7. dualpipev切分，图中数字为每个chunk中的transformer层数。该情形下，可设置num-layers-to-build为[2,3,1,4,3,2,1,3]
   </figcaption>
@@ -124,7 +124,7 @@ dcu megatron支持对1f1b流水线cooldown阶段的参数/激活值梯度计算�
 ```
 
 <figure style="text-align:center;">
-  <img src=../source/images/1f1b-delay-cooldown-stage-wgrad-compute.png alt="示例图"/>
+  <img src=../source/images/1f1b-delay-cooldown-stage-wgrad-compute.png alt="示例图" style="width: 70%; height: auto;"/>
   <figcaption>
   图8. 对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能
   </figcaption>
