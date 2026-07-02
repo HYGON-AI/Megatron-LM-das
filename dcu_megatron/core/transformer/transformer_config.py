@@ -33,7 +33,11 @@ def transformer_config_post_init_wrapper(post_init_func):
 
         # set delay_wgrad_compute to avoid AssertionError(overlap_moe_expert_parallel_comm must be enabled when enabling delay_wgrad_compute)
         # set overlap_moe_expert_parallel_comm to avoid AssertionError
-        if args.schedule_method == "dualpipev":
+        need_delay_wgrad_compute_schedules = {"dualpipev", "zb_h1"}
+        if (
+            args.schedule_method in need_delay_wgrad_compute_schedules
+            or (args.schedule_method == "vanilla" and args.delay_1f1b_cooldown_wgrad_compute)
+        ):
             origin_delay_wgrad_compute = self.delay_wgrad_compute
             self.delay_wgrad_compute = False
 
@@ -89,7 +93,10 @@ def transformer_config_post_init_wrapper(post_init_func):
         if recompute_mhc:
             self.recompute_modules.append("mhc")
 
-        if args.schedule_method == "dualpipev":
+        if (
+            args.schedule_method in need_delay_wgrad_compute_schedules
+            or (args.schedule_method == "vanilla" and args.delay_1f1b_cooldown_wgrad_compute)
+        ):
             self.delay_wgrad_compute = origin_delay_wgrad_compute
             self.overlap_moe_expert_parallel_comm = origin_overlap_moe_expert_parallel_comm
 

@@ -357,7 +357,7 @@ class _ParamAndGradBucketGroup:
         if self.ddp_config.num_distributed_optimizer_instances > 1:
             torch.cuda.default_stream().wait_stream(self.communication_stream)
             return
-        
+
         if self.grad_reduce_handle is None:
             return
         assert self.grad_reduce_handle is not None, (

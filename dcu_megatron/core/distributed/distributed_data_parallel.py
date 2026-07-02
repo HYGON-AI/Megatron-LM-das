@@ -19,8 +19,8 @@ class DistributedDataParallel():
             if param in self.param_to_bucket_group:
                 assert param.requires_grad
                 if self.ddp_config.overlap_grad_reduce:
-                    # support dualpipev
-                    if not get_args().gradient_accumulation_fusion or not get_args().delay_wgrad_compute:
+                    # support dualpipev/ZB_H1
+                    if not (get_args().gradient_accumulation_fusion and get_args().delay_wgrad_compute):
                         assert (
                             param.grad is not None
                         ), 'param.grad being None is not safe when overlap_grad_reduce is True'

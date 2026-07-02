@@ -21,6 +21,7 @@ class OptimizerFeature(AbstractFeature):
     def validate_args(self, args):
         if args.reuse_fp32_param and not args.bf16:
             raise AssertionError('--reuse-fp32-param only support for `bf16`')
+        return args
 
     def register_patches(self, patch_manager, args):
         if args.reuse_fp32_param:

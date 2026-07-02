@@ -23,6 +23,7 @@ class ParallelLinearFeature(AbstractFeature):
     def validate_args(self, args):
         if args.parallel_linear_impl == "flux" and args.transformer_impl != 'transformer_engine':
             raise AssertionError('flux is only supported with transformer_engine implementation')
+        return args
 
     def register_patches(self, patch_manager, args):
         # flux

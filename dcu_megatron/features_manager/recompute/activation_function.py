@@ -23,6 +23,8 @@ class RecomputeActivationFeature(AbstractFeature):
                 raise ValueError(f'--recompute-activation-function-num-layers ({args.recompute_activation_function_num_layers}) '
                                             f'cannot be greater than --num-layers ({args.num_layers}).')
 
+        return args
+
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.memory.recompute.activation.adaptor import dcu_activation_recompute_forward
         from dcu_megatron.core.transformer.transformer_layer import transformer_layer_init_wrapper

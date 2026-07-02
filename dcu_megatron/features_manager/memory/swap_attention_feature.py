@@ -34,6 +34,8 @@ class SwapAttentionFeature(AbstractFeature):
         if is_enable_lora:
             raise AssertionError('swap attention is not compatible with LoRA')
 
+        return args
+
     def register_patches(self, patch_manager, args):
         if getattr(args, self.feature_name, None):
             if hasattr(args, "use_mcore_models") and args.use_mcore_models:

@@ -150,6 +150,8 @@ class RiPipeFeature(AbstractFeature):
             elif 'mlp' not in args.recompute_modules:
                 args.recompute_modules.append('mlp')
 
+        return args
+
     def register_patches(self, patch_manager, args):
         # Handle ripipe-specific patches
         if args.schedule_method == "ripipe":
