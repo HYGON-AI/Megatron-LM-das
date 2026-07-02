@@ -1,45 +1,6 @@
 from argparse import ArgumentParser
-import torch
 
-from megatron.training import get_args
-from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from ..feature import AbstractFeature
-
-
-def _make_backward_post_hook(self, param: torch.nn.Parameter):
-    """
-    Creates a backward post-hook to dispatch an all-reduce / reduce-scatter when
-    ready (i.e., when all grads in a bucket have been computed in all microbatches
-    in a batch).
-    """
-
-    def hook(*unused):
-        if is_graph_capturing():
-            return
-
-        if param in self.param_to_bucket_group:
-            assert param.requires_grad
-            if self.ddp_config.overlap_grad_reduce:
-                args = get_args()
-                # In ripipe recompute modes, param.grad can temporarily be None
-                # when this backward hook fires, so skip the strict assertion.
-                if not (
-                    (hasattr(args, 'recompute_in_advance') and args.recompute_in_advance)
-                    or (hasattr(args, 'recompute_in_bubble') and args.recompute_in_bubble)
-                ):
-                    assert (
-                        param.grad is not None
-                    ), 'param.grad being None is not safe when overlap_grad_reduce is True'
-            if param.grad is not None and (
-                not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
-            ):
-                param.main_grad.add_(param.grad.data)
-            param.grad = None
-
-            if self.ddp_config.overlap_grad_reduce:
-                self.param_to_bucket_group[param].register_grad_ready(param)
-
-    return hook
 
 
 class RiPipeFeature(AbstractFeature):
@@ -157,6 +118,7 @@ class RiPipeFeature(AbstractFeature):
         if args.schedule_method == "ripipe":
             # Only register the patch if either recompute_in_advance or recompute_in_bubble is enabled
             if getattr(args, 'recompute_in_advance', False) or getattr(args, 'recompute_in_bubble', False):
+                from dcu_megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
                 patch_manager.register_patch(
                     'megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
-                    _make_backward_post_hook)
+                    DistributedDataParallel._make_backward_post_hook)

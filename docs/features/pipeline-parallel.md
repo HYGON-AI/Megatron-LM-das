@@ -86,7 +86,7 @@ dcu megatron提供dualpipev流水线调度，每个stage上有两个模型chunk�
 
 ```
 --schedule-method dualpipev
---delay-wgrad-compute
+--delay-wgrad-compute  # dualpipev自动开启该参数，可去掉
 ```
 dualpipev支持moe a2a overlap，开启overlap需要额外增加以下参数：  
 ```
@@ -104,7 +104,33 @@ dualpipev可通过指定每个stage中transformer层数的方式对网络进行�
   </figcaption>
 </figure>
 
+### ZB-H1流水线
+dcu megatron支持ZB-H1流水线调度，通过拆分参数/激活值梯度计算，减少流水线气泡，具体见[Zero Bubble Pipeline Parallelism](https://github.com/sail-sg/zero-bubble-pipeline-parallelism/tree/zero-bubble-v0.1.0)。
+ZB-H1流水线显存占用与1f1b流水线相同，在小batch情形下，训练性能有明显提升。使用该流水线调度时，需要在脚本中增加以下参数:
+```
+--schedule-method zb_h1
+--delay-wgrad-compute # zb_h1自动开启该参数，可去掉
+```
+**注意**<br>
+1、使用该流水线调度需要满足流水线stage数大于1;<br>
+2、不支持开启vp。
 
+### 1f1b流水线优化
+dcu megatron支持对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能。
+开启该特性，需要在脚本中增加以下参数:
+```
+--delay-1f1b-cooldown-wgrad-compute
+--delay-wgrad-compute # 使用delay-1f1b-cooldown-wgrad-compute时自动开启该参数，可去掉
+```
 
+<figure style="text-align:center;">
+  <img src=../source/images/1f1b-delay-cooldown-stage-wgrad-compute.png alt="示例图"/>
+  <figcaption>
+  图8. 对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能
+  </figcaption>
+</figure>
 
+**注意**<br>
+1、使用该特性需要满足流水线stage数大于1;<br>
+2、不支持开启vp。
 

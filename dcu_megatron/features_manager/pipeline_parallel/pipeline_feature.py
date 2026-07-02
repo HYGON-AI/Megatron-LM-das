@@ -112,6 +112,10 @@ class PipelineFeature(AbstractFeature):
 
     def validate_args(self, args):
         if args.schedule_method == "dualpipev":
+            if not args.delay_wgrad_compute:
+                warnings.warn(f"set delay_wgrad_compute to True when using dualpipev schedule")
+                args.delay_wgrad_compute = True
+
             if args.delay_wgrad_compute and args.overlap_grad_reduce:
                 assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
                     "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"

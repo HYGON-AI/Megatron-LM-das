@@ -13,14 +13,21 @@ class DistributedDataParallel():
         """
 
         def hook(*unused):
+            args = get_args()
             if is_graph_capturing():
                 return
 
             if param in self.param_to_bucket_group:
                 assert param.requires_grad
                 if self.ddp_config.overlap_grad_reduce:
-                    # support dualpipev/ZB_H1
-                    if not (get_args().gradient_accumulation_fusion and get_args().delay_wgrad_compute):
+                    # param.grad can temporarily be None in the following cases:
+                    # (1) using dualpipev/ZB_H1 schedule.
+                    # (2) using ripipe schedule.
+                    is_ripipe = getattr(args, 'recompute_in_advance', False) or getattr(args, 'recompute_in_bubble', False)
+                    if (
+                        not (args.gradient_accumulation_fusion and args.delay_wgrad_compute)
+                        and not is_ripipe
+                    ):
                         assert (
                             param.grad is not None
                         ), 'param.grad being None is not safe when overlap_grad_reduce is True'
