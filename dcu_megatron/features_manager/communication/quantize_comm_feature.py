@@ -44,6 +44,8 @@ class QuantizeCommFeature(AbstractFeature):
         ):
             raise ValueError(f"quant_group_size {args.quant_group_size} only accepts values from {QUANT_BIT_GROUP_SIZE_CHOICES_MAP[args.quant_comm_bits]}")
 
+        return args
+
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.tensor_parallel.mappings import all_to_all
 

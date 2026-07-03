@@ -6,7 +6,7 @@ from typing import Callable, List, Optional
 try:
     import flux
 except ImportError:
-    raise ImportError("flux is NOT installed")
+    warnings.warn("flux is NOT installed")
 
 import torch
 from torch.nn.parameter import Parameter

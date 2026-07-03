@@ -25,7 +25,7 @@ class HyperConnectionFeature(AbstractFeature):
                                 'layer in the transformer block) will:'
                                 '- NOT checkpoint its final MLP BDA'
                                 '- Register the unified recompute hook on its MLP BDA output'
-                                '- A new CheckpointManager is created for subsequent layers'                    
+                                '- A new CheckpointManager is created for subsequent layers'
                                 'If None, all layers in the transformer block share a single recompute block.'
                                 'Must be a positive integer when set.')
         group.add_argument('--mhc-init-gating-factor', type=float, default=0.01,
@@ -52,7 +52,7 @@ class HyperConnectionFeature(AbstractFeature):
                            help='mhc-fuse-aggregate-compute.')
         group.add_argument('--mhc-init-hpre-use-module-layer', action='store_true', default=False,
                            help='If true, use module-level layer index (2*layer + is_mlp) for h_pre initialization.')
-        
+
     # def validate_args(self, args):
     #     if args.parallel_linear_impl == "flux" and args.transformer_impl != 'transformer_engine':
     #         raise AssertionError('flux is only supported with transformer_engine implementation')
@@ -67,7 +67,7 @@ class HyperConnectionFeature(AbstractFeature):
         from dcu_megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
         from dcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
         from dcu_megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_layer_specs, get_gpt_layer_with_flux_spec
-
+        from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_without_interleaving
 
         if args.enable_hyper_connections:
             patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_decoder_layer_specs",
@@ -81,4 +81,6 @@ class HyperConnectionFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.__init__',
                                           CheckpointWithoutOutput.__init__)
             patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.checkpoint',
-                                          CheckpointWithoutOutput.checkpoint)            
+                                          CheckpointWithoutOutput.checkpoint)
+            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_without_interleaving',
+                                          forward_backward_pipelining_without_interleaving)

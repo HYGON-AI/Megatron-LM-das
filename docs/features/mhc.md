@@ -17,6 +17,17 @@ dcu_megatron0.17.0增加了mhc实现，共提供了torch原生实现和tile_kern
 --mhc-tau 1.0
 --mhc-log-amax-per-step 20
 
+--------------------------------------------------------------------------
+使用Tilekernel实现前请完成以下操作:
+1.获取dcu版本tile-kernels,并安装;或将代码放到指定目录手动设置
+假设tile_kernels目录在Megatron-LM/megatron目录下，请设置
+export PYTHONPATH=/mnt/dcu_megatron/Megatron-LM/megatron/:$PYTHONPATH
+
+2.查找环境的python目录,设置z3/lib路径
+export LD_LIBRARY_PATH="/usr/local/lib/python3.11/site-packages/z3/lib:$LD_LIBRARY_PATH"
+---------------------------------------------------------------
+
+
 
 # 可选,开启mhc重计算
 --recompute-granularity selective

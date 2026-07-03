@@ -63,7 +63,7 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 ### 拆分attn，缓解tp与ep竞争
 针对图2中的调度排布，如果训练时同时开启tp和ep，ep会与attn部分的tp重叠，为了解决该问题，dcu megatron将attn部分拆分为三部分：（1）qkv计算，（2）core attn计算和（3）proj计算，并重新组织调度排布，如下图所示。
 <figure style="text-align:center;">
-  <img src=../source/images/moe_a2a_overlap_split_attn.png alt="示例图"/>
+  <img src=../source/images/moe_a2a_overlap_split_attn.png alt="示例图" style="width: 70%; height: auto;"/>
   <figcaption>
   图5. attn计算拆分为三部分
   </figcaption>
@@ -86,7 +86,7 @@ dcu megatron提供dualpipev流水线调度，每个stage上有两个模型chunk�
 
 ```
 --schedule-method dualpipev
---delay-wgrad-compute
+--delay-wgrad-compute  # dualpipev自动开启该参数，可去掉
 ```
 dualpipev支持moe a2a overlap，开启overlap需要额外增加以下参数：  
 ```
@@ -98,13 +98,39 @@ dualpipev可通过指定每个stage中transformer层数的方式对网络进行�
 --num-layers-to-build  *** # 整数或者数组，如果为整数，表示每个chunk上的网络层数；如果为数组，数组长度为stage数的两倍，数组的元素值为对应chunk的transformer层数，顺序与前向计算一致
 ```
 <figure style="text-align:center;">
-  <img src=../source/images/dualpipev-2.png alt="示例图"/>
+  <img src=../source/images/dualpipev-2.png alt="示例图" style="width: 50%; height: auto;"/>
   <figcaption>
   图7. dualpipev切分，图中数字为每个chunk中的transformer层数。该情形下，可设置num-layers-to-build为[2,3,1,4,3,2,1,3]
   </figcaption>
 </figure>
 
+### ZB-H1流水线
+dcu megatron支持ZB-H1流水线调度，通过拆分参数/激活值梯度计算，减少流水线气泡，具体见[Zero Bubble Pipeline Parallelism](https://github.com/sail-sg/zero-bubble-pipeline-parallelism/tree/zero-bubble-v0.1.0)。
+ZB-H1流水线显存占用与1f1b流水线相同，在小batch情形下，训练性能有明显提升。使用该流水线调度时，需要在脚本中增加以下参数:
+```
+--schedule-method zb_h1
+--delay-wgrad-compute # zb_h1自动开启该参数，可去掉
+```
+**注意**<br>
+1、使用该流水线调度需要满足流水线stage数大于1;<br>
+2、不支持开启vp。
 
+### 1f1b流水线优化
+dcu megatron支持对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能。
+开启该特性，需要在脚本中增加以下参数:
+```
+--delay-1f1b-cooldown-wgrad-compute
+--delay-wgrad-compute # 使用delay-1f1b-cooldown-wgrad-compute时自动开启该参数，可去掉
+```
 
+<figure style="text-align:center;">
+  <img src=../source/images/1f1b-delay-cooldown-stage-wgrad-compute.png alt="示例图" style="width: 70%; height: auto;"/>
+  <figcaption>
+  图8. 对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能
+  </figcaption>
+</figure>
 
+**注意**<br>
+1、使用该特性需要满足流水线stage数大于1;<br>
+2、不支持开启vp。
 

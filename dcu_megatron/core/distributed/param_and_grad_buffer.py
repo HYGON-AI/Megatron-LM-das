@@ -195,13 +195,15 @@ class _ParamAndGradBucketGroup:
                         local_data_view = self.cached_grad_buffer_shard_list[idx][
                             self.intra_distributed_optimizer_instance_rank
                         ]
-                        grad_reduce_handle = dist_reduce_scatter_func(
-                            local_data_view,
-                            bucket.grad_data,
-                            op=reduce_op,
-                            group=communication_group,
-                            async_op=async_op,
-                        )
+                        group_size = torch.distributed.get_world_size(group=communication_group)
+                        if group_size > 1:
+                            grad_reduce_handle = dist_reduce_scatter_func(
+                                local_data_view,
+                                bucket.grad_data,
+                                op=reduce_op,
+                                group=communication_group,
+                                async_op=async_op,
+                            )
                     else:
                         if torch.distributed.get_rank() == 0 and force_all_reduce:
                             logger.info(
@@ -291,6 +293,8 @@ class _ParamAndGradBucketGroup:
             self._copy_back_extra_main_grads()
             return
 
+        if self.grad_reduce_handle is None:
+            return
         assert self.grad_reduce_handle is not None, (
             f"Communication call has not been issued for this bucket "
             f"({len(self.per_param_grad_ready_counts)}/{len(self.params)} "

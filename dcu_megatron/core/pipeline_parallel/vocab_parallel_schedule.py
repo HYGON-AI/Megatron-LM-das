@@ -665,7 +665,7 @@ def forward_backward_pipelining_with_vocab_parallel(
             return
 
         output_tensor_grad = backward_step(
-            input_tensor, output_tensor, [None], model_type, config,
+            input_tensor, output_tensor, [None], config,
             run_timer=False
         )
 
@@ -727,7 +727,7 @@ def forward_backward_pipelining_with_vocab_parallel(
         set_virtual_vocab_parallel_chunk(0)
 
         input_tensor_grad = backward_step(
-            input_tensor, output_tensor, output_tensor_grad, model_type, config,
+            input_tensor, output_tensor, output_tensor_grad, config,
             run_timer=run_timer
         )
 
@@ -769,7 +769,7 @@ def forward_backward_pipelining_with_vocab_parallel(
             VocabOutputStore.backward_store(sum_exp_logits, logits_max, grad_output[0])
 
             grad_input = backward_step(
-                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], model_type, config,
+                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], config,
                 run_timer=False
             )
 
@@ -948,7 +948,7 @@ def forward_backward_pipelining_with_vocab_parallel(
                 ScheduleTimers.for_chunk(0).input_b.start()
 
             backward_step(
-                input_tensor, output_tensor, output_tensor_grad, model_type, config,
+                input_tensor, output_tensor, output_tensor_grad, config,
                 run_timer=False
             )
 

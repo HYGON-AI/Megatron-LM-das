@@ -17,14 +17,14 @@ from megatron.core.parallel_state import (
 
 from megatron.core.transformer.spec_utils import build_module
 
-
 if TYPE_CHECKING:
     from megatron.core.tensor_parallel.random import CheckpointManager
 
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
-
 _HYPERCONNECTION_LOGGING_TRACKER = {}
+
+
 def get_hyperconnection_logging_tracker():
     """Return the moe layer wise tracker."""
     global _HYPERCONNECTION_LOGGING_TRACKER
@@ -82,15 +82,12 @@ def native_h_aggregate(x: Tensor, h_pre: Tensor) -> Tensor:
 
 @torch.compile
 def native_h_post_bda(
-    h_res: Tensor, original_residual: Tensor, h_post: Tensor, x: Tensor, bias: Optional[Tensor]
+        h_res: Tensor, original_residual: Tensor, h_post: Tensor, x: Tensor, bias: Optional[Tensor]
 ) -> Tensor:
-    """Native H_res.T @ residual + H_post * (x [+ bias])."""
-    s, b, n, C = original_residual.shape    # [seq_len, batch, hidden_dim, channels]
-    dtype = original_residual.dtype
-    h_res = h_res.to(dtype)
-    h_post = h_post.to(dtype)
-    h_res_batched = h_res.transpose(-1, -2).contiguous().view(s * b, n, n)
-    residual_batched = original_residual.view(s * b, n, C)  # [s*b, n, C]
+    """Native H_res @ residual + H_post * (x [+ bias])."""
+    s, b, n, C = original_residual.shape
+    h_res_batched = h_res.view(s * b, n, n)
+    residual_batched = original_residual.view(s * b, n, C)
     mixed = torch.bmm(h_res_batched, residual_batched).view(s, b, n, C)
     x_expanded = h_post.unsqueeze(-1) * x.unsqueeze(2)  # h_post.unsqueeze(-1) [s, b, n, 1]; x.unsqueeze(2) [s, b, 1, C]
     if bias is not None:
@@ -135,7 +132,7 @@ class HyperConnectionModule(MegatronModule):
         layer_number: Current layer index for initialization
     """
 
-    def __init__(self, config: TransformerConfig, layer_number: int, hc_type: str = 'atten',):
+    def __init__(self, config: TransformerConfig, layer_number: int, hc_type: str = 'attn', ):
         super().__init__(config)
         self.config = config
         self.layer_number = layer_number
@@ -294,14 +291,14 @@ class HyperConnectionModule(MegatronModule):
                 self.alpha_res.expand(self.n * self.n),
             ],
             dim=-1,
-        )   # 总长度: n + n + n^2 = n^2 + 2n
-        h = r * proj * alpha_ + self.bias # [s, b, n^2+2n]
+        )  # 总长度: n + n + n^2 = n^2 + 2n
+        h = r * proj * alpha_ + self.bias  # [s, b, n^2+2n]
         # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
         h_pre = h[..., : self.n].sigmoid()  # [s, b, n]
 
         # H_post = 2σ(α_post * (θ_post @ x̃) + b_post)
-        h_post = h[..., self.n : 2 * self.n].sigmoid() * 2  # [s, b, n]
-        h_res = h[..., 2 * self.n :]
+        h_post = h[..., self.n: 2 * self.n].sigmoid() * 2  # [s, b, n]
+        h_res = h[..., 2 * self.n:]
         return h_pre, h_post, h_res
 
     @nvtx_decorator(message="HyperConnection::compute_mappings")
@@ -365,10 +362,10 @@ class HyperConnectionModule(MegatronModule):
 
     @nvtx_decorator(message="HyperConnection::apply_h_post")
     def apply_h_post(
-        self,
-        x_with_bias: Tuple[Tensor, Optional[Tensor]],
-        h_post: Tensor,
-        manager: Optional['CheckpointManager'] = None,
+            self,
+            x_with_bias: Tuple[Tensor, Optional[Tensor]],
+            h_post: Tensor,
+            manager: Optional['CheckpointManager'] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """
         Apply H_post to x and optionally bias, with optional checkpointing.
@@ -467,8 +464,7 @@ class HyperConnectionModule(MegatronModule):
         C = self.hidden_size
 
         # Reshape for bmm: [s, b, n, n] -> [s*b, n, n]
-        h_res = h_res.to(residual.dtype)
-        h_res_batched = h_res.transpose(-1, -2).contiguous().view(s * b, n, n)
+        h_res_batched = h_res.view(s * b, n, n)
         # [s, b, n*C] -> [s, b, n, C] -> [s*b, n, C]
         residual_batched = residual.view(s, b, n, C).view(s * b, n, C)
 
@@ -478,7 +474,7 @@ class HyperConnectionModule(MegatronModule):
         return mixed.view(s, b, n * C)
 
     def forward(
-        self, hidden_states: Tensor, mhc_recompute_manager: Optional['CheckpointManager'] = None
+            self, hidden_states: Tensor, mhc_recompute_manager: Optional['CheckpointManager'] = None
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Full mHC forward pass.
@@ -530,7 +526,7 @@ class HyperConnectionModule(MegatronModule):
             post_mix:    [s, b, n, 1]  (occupies the original `h_res_or_residual` slot)
             comb_mix:    [s, b, n, n]  (occupies the original `h_post` slot)
         """
-        from dcu_megatron.core.fusions.tile_kernels import mhc_pre
+        from tile_kernels.modeling.mhc import mhc_pre
         s, b, nC = hidden_states.shape
         residual_tk = hidden_states.view(s, b, self.n, self.block_size)
 
@@ -540,7 +536,8 @@ class HyperConnectionModule(MegatronModule):
         # tensor when params are bf16. norm_weight is stored in fp32, so .float()
         # may be a no-op; explicitly clone it to keep autograd materializing
         # param.grad for Megatron DDP overlap hooks.
-        norm_weight = self.norm_weight.clone() if getattr(self.norm_weight, 'main_grad', None) is not None else self.norm_weight
+        norm_weight = self.norm_weight.clone() if getattr(self.norm_weight, 'main_grad',
+                                                          None) is not None else self.norm_weight
 
         nvtx_range_push("HyperConnectionTKModule.forward.mhc_pre")
 
@@ -580,13 +577,13 @@ class HyperConnectionModule(MegatronModule):
         n_total = self.config.num_layers + (self.config.mtp_num_layers or 0)
         if 'hc_forward_amax' not in tracker:
             for key in (
-                'hc_forward_amax',
-                'hc_backward_amax',
-                'hc_eye_dist',
-                'hc_not_ds_ratio',
-                'hc_alpha_pre',
-                'hc_alpha_post',
-                'hc_alpha_res',
+                    'hc_forward_amax',
+                    'hc_backward_amax',
+                    'hc_eye_dist',
+                    'hc_not_ds_ratio',
+                    'hc_alpha_pre',
+                    'hc_alpha_post',
+                    'hc_alpha_res',
             ):
                 tracker[key] = torch.zeros(n_total * 2, device=comb_mix.device)
 
@@ -616,9 +613,8 @@ class HyperConnectionModule(MegatronModule):
             tracker['hc_alpha_post'][idx] = scale[1]
             tracker['hc_alpha_res'][idx] = scale[2]
 
-
     def _forward_with_checkpoint(
-        self, hidden_states: Tensor, manager: 'CheckpointManager'
+            self, hidden_states: Tensor, manager: 'CheckpointManager'
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Forward pass with checkpointing for memory efficiency.
@@ -697,15 +693,15 @@ class HyperConnectionModule(MegatronModule):
 
     @nvtx_decorator(message="HyperConnection::fused_h_res_h_post_bda")
     def fused_h_res_h_post_bda(
-        self,
-        h_res: Tensor,
-        original_residual: Tensor,
-        h_post: Tensor,
-        layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
-        dropout_prob: float,
-        training: bool,
-        fused: bool,
-        manager: Optional['CheckpointManager'] = None,
+            self,
+            h_res: Tensor,
+            original_residual: Tensor,
+            h_post: Tensor,
+            layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
+            dropout_prob: float,
+            training: bool,
+            fused: bool,
+            manager: Optional['CheckpointManager'] = None,
     ) -> Tensor:
         """
         Fused kernel combining apply_h_res, apply_h_post and bias-dropout-add.
@@ -766,16 +762,15 @@ class HyperConnectionModule(MegatronModule):
                 fused,
             )
 
-
     def _fused_h_res_h_post_bda_native(
-        self,
-        h_res: Tensor,
-        original_residual: Tensor,
-        h_post: Tensor,
-        layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
-        dropout_prob: float,
-        training: bool,
-        fused: bool,
+            self,
+            h_res: Tensor,
+            original_residual: Tensor,
+            h_post: Tensor,
+            layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
+            dropout_prob: float,
+            training: bool,
+            fused: bool,
     ) -> Tensor:
         """
         h_res, h_post and bda.
@@ -820,15 +815,15 @@ class HyperConnectionModule(MegatronModule):
 
     @nvtx_decorator(message="HyperConnection::fused_h_res_h_post_bda_with_checkpoint")
     def _fused_h_res_h_post_bda_with_checkpoint(
-        self,
-        h_res: Tensor,
-        original_residual: Tensor,
-        h_post: Tensor,
-        layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
-        dropout_prob: float,
-        training: bool,
-        fused: bool,
-        manager: 'CheckpointManager',
+            self,
+            h_res: Tensor,
+            original_residual: Tensor,
+            h_post: Tensor,
+            layer_output_with_bias: Tuple[Tensor, Optional[Tensor]],
+            dropout_prob: float,
+            training: bool,
+            fused: bool,
+            manager: 'CheckpointManager',
     ) -> Tensor:
         """
         Checkpointed variant of _fused_h_res_h_post_bda_native.
@@ -902,14 +897,14 @@ class HyperConnectionModule(MegatronModule):
         return output
 
     def apply_h_post_fuse(
-        self,
-        x_with_bias: Tuple[Tensor, Optional[Tensor]],
-        residual: Tensor,
-        post_mix: Tensor,
-        comb_mix: Tensor,
+            self,
+            x_with_bias: Tuple[Tensor, Optional[Tensor]],
+            residual: Tensor,
+            post_mix: Tensor,
+            comb_mix: Tensor,
     ) -> Tensor:
         """Fused `H_res @ residual + H_post * x` via TileKernels' `mhc_post`."""
-        from dcu_megatron.core.fusions.tile_kernels.ops.post import mhc_post
+        from tile_kernels.modeling.mhc.ops import mhc_post
 
         x, bias = x_with_bias
         assert bias is None, "HyperConnectionTKModule requires bias=None"
@@ -922,16 +917,16 @@ class HyperConnectionModule(MegatronModule):
         return out.reshape(s, b, self.n * C)
 
     def apply_h_post_fuse_with_checkpoint(
-        self,
-        x_with_bias: Tuple[Tensor, Optional[Tensor]],
-        residual: Tensor,
-        post_mix: Tensor,
-        comb_mix: Tensor,
-        manager: Optional['CheckpointManager'] = None,
+            self,
+            x_with_bias: Tuple[Tensor, Optional[Tensor]],
+            residual: Tensor,
+            post_mix: Tensor,
+            comb_mix: Tensor,
+            manager: Optional['CheckpointManager'] = None,
     ) -> Tensor:
         """
         Checkpointed variant with optional fallback to direct execution.
-        
+
         Args:
             x_with_bias: Tuple of (x, bias) - bias must be None for fused path
             residual: [s, b, n*C] - n-stream hidden states
@@ -941,35 +936,35 @@ class HyperConnectionModule(MegatronModule):
             force_checkpoint: If True, always use checkpoint; if False, use direct when manager is None
         """
         from megatron.core.tensor_parallel.random import CheckpointWithoutOutput
-        
+
         x, bias = x_with_bias
         assert bias is None, "HyperConnectionTKModule requires bias=None"
-        
+
         def _compute(x, post_mix, comb_mix):
-            from dcu_megatron.core.fusions.tile_kernels.ops.post import mhc_post
+            from tile_kernels.modeling.mhc.ops import mhc_post
             from megatron.core.utils import nvtx_range_push, nvtx_range_pop
-            
+
             s, b, C = x.shape
             n = self.n
             residual_tk = residual.view(s, b, n, C)
-            
+
             nvtx_range_push("HyperConnectionTKModule.apply_h_post_fuse.mhc_post")
             out = mhc_post(x.contiguous(), residual_tk, post_mix, comb_mix)
             nvtx_range_pop("HyperConnectionTKModule.apply_h_post_fuse.mhc_post")
-            
+
             return out.reshape(s, b, n * C)
-        
+
         # 决定是否使用 checkpoint
         use_checkpoint = manager is not None
-        
+
         if use_checkpoint:
             ckpt = CheckpointWithoutOutput(ckpt_manager=manager)
-            
+
             output = ckpt.checkpoint(_compute, x, post_mix, comb_mix)
         else:
             # 直接执行
             output = _compute(x, post_mix, comb_mix)
-        
+
         return output
 
 

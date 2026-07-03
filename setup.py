@@ -5,7 +5,7 @@ if sys.version_info < (3,):
     raise Exception("Python 2 is not supported by dcu-megatron.")
 
 __description__ = 'dcu-megatron of Sugon'
-__version__ = '0.15.0+das.opt1.dtk2604'
+__version__ = '0.17.0+das.opt1.dtk2604'
 __author__ = 'Sugon'
 __keywords__ = 'dcu-megatron, language, deep learning, NLP'
 __package_name__ = 'dcu-megatron'
@@ -34,6 +34,8 @@ setuptools.setup(
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
         # Additional Setting
         'Environment :: Console',
         'Natural Language :: English',

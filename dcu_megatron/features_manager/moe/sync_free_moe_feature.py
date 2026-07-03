@@ -63,6 +63,8 @@ class SyncFreeMoeFeature(AbstractFeature):
             if not args.use_primus_grouped_mlp:
                 warnings.warn(f"use-primus-fused-act-with-probs does not take effect when use_primus_grouped_mlp is not set")
 
+        return args
+
     def register_patches(self, patch_manager, args):
         if args.sync_free_moe:
             if args.use_primus_topk_router:

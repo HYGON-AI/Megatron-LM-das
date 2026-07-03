@@ -1,5 +1,6 @@
 import os
 import re
+import warnings
 
 from argparse import ArgumentParser
 from megatron.core.utils import is_te_min_version
@@ -48,8 +49,9 @@ class PipelineFeature(AbstractFeature):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument('--schedule-method', type=str,
                            default='vanilla',
-                           choices=['vanilla', 'dualpipev', 'seq1f1b', 'interleaved_seq1f1b', 'ripipe'],
-                           help='Use pipeline provided by megatron if schedule-method is set to vanilla')
+                           choices=['vanilla', 'dualpipev', 'seq1f1b', 'interleaved_seq1f1b', 'ripipe', 'zb_h1'],
+                           help='vanilla: use pipeline provided by megatron. '
+                           'zb_h1: use ZB-H1 schedule.')
         # MoE communication overlap arguments
         group.add_argument('--overlap-ep-comm-with-split-attn', action="store_true",
                            default=False,
@@ -85,6 +87,10 @@ class PipelineFeature(AbstractFeature):
         group.add_argument('--enable-a2a-overlap-only-in-1f1b-phase', action='store_true',
                            help='Enables moe a2a overlap only in the 1f1b phase.')
 
+        # 1f1b without interleaving
+        group.add_argument('--delay-1f1b-cooldown-wgrad-compute', action='store_true',
+                           help='Delay the wgrad compute in 1f1b cooldown stage to reduce bubble')
+
     def pre_validate_args(self, args):
         if args.schedule_method != "dualpipev":
             return args
@@ -94,7 +100,6 @@ class PipelineFeature(AbstractFeature):
         if args.num_layers_to_build is not None:
             assert args.pipeline_model_parallel_layout is None, "pipeline_model_parallel_layout must be none to use num_layers_to_build"
 
-        pp_size = args.pipeline_model_parallel_size * 2
         if args.num_layers is None and args.num_layers_to_build is not None:
             pp_size = args.pipeline_model_parallel_size
             if isinstance(args.num_layers_to_build, int):
@@ -107,6 +112,10 @@ class PipelineFeature(AbstractFeature):
 
     def validate_args(self, args):
         if args.schedule_method == "dualpipev":
+            if not args.delay_wgrad_compute:
+                warnings.warn(f"set delay_wgrad_compute to True when using dualpipev schedule")
+                args.delay_wgrad_compute = True
+
             if args.delay_wgrad_compute and args.overlap_grad_reduce:
                 assert bool(int(os.getenv("NVTE_OVERLAP_GRAD_REDUCE", "0"))), \
                     "NVTE_OVERLAP_GRAD_REDUCE should be set to 1 when --delay-wgrad-compute and --overlap-grad-reduce are set"
@@ -169,6 +178,26 @@ class PipelineFeature(AbstractFeature):
                 'untie embeddings and output weights'
         else:
             args.disable_backward_fusion = False
+
+        # 1f1b without interleaving
+        if (
+            args.schedule_method == "vanilla"
+            and args.delay_1f1b_cooldown_wgrad_compute
+        ):
+            assert args.virtual_pipeline_model_parallel_size is None, "delay_1f1b_cooldown_wgrad_compute is only supported with 1f1b_without_interleaving"
+            assert args.pipeline_model_parallel_size > 1, "delay_1f1b_cooldown_wgrad_compute is only supported with 1f1b_without_interleaving"
+            if not args.delay_wgrad_compute:
+                warnings.warn(f"set delay_wgrad_compute to True when delay_1f1b_cooldown_wgrad_compute is True")
+                args.delay_wgrad_compute = True
+
+        # ZB-H1
+        if args.schedule_method == "zb_h1":
+            assert args.virtual_pipeline_model_parallel_size is None
+            if not args.delay_wgrad_compute:
+                warnings.warn(f"set delay_wgrad_compute to True when using zb1p schedule")
+                args.delay_wgrad_compute = True
+
+        return args
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.pipeline_parallel.schedules import get_forward_backward_func_wrapper
@@ -368,3 +397,18 @@ class PipelineFeature(AbstractFeature):
                                           ScheduleNode.backward,
                                           ScheduleNode._backward,
                                           ScheduleNode._release_state,])
+
+        # 1f1b without interleaving
+        if (
+            args.schedule_method == "vanilla"
+            and args.delay_1f1b_cooldown_wgrad_compute
+        ):
+            from dcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_without_interleaving
+
+            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_without_interleaving',
+                                        forward_backward_pipelining_without_interleaving)
+
+        if args.schedule_method == "zb_h1":
+            from dcu_megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
+            patch_manager.register_patch('megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
+                                         DistributedDataParallel._make_backward_post_hook)

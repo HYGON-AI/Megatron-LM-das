@@ -14,7 +14,7 @@ class AbstractFeature:
         return args
 
     def validate_args(self, args):
-        pass
+        return args
 
     def post_validate_args(self, args):
         pass

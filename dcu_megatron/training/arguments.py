@@ -211,7 +211,7 @@ def validate_args_func_decorator(validate_args_func):
         args = argparse.Namespace(**args_dict)
 
         for feature in ADAPTOR_FEATURES:
-            feature.validate_args(args)
+            args = feature.validate_args(args)
 
         return args
 

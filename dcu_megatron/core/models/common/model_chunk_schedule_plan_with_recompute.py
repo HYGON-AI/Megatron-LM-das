@@ -249,7 +249,7 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
             is_last_layer_in_bwd=is_last_layer_in_bwd,
             block_level_wgrad_compute=block_level_wgrad_compute
         )
-    
+
     @staticmethod
     def run_overlap_fbr_layers(f_layer, b_layer, r_layer, f_input=None, b_grad=None, is_last_layer_in_bwd=False, block_level_wgrad_compute=False):
         """Schedule one-forward-one-backward operations for a single transformer layer.
