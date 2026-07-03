@@ -125,10 +125,15 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None)
         return None, None, None, None, None, None
 
     if (
-        get_args().schedule_method == "dualpipev"
+        not args.enable_vocab_parallel
+        and args.schedule_method == "dualpipev"
         and parallel_state.is_pipeline_last_stage(ignore_virtual=True)
     ):
         return None, None, None, None, None, None
+
+    embedding_model_chunk_id = 3 if args.schedule_method == "dualpipev" else 2
+    if (args.enable_vocab_parallel) and (get_virtual_vocab_parallel_chunk() != embedding_model_chunk_id):
+        return InputStore.get_batch(microbatch_id)
 
     # get batches based on the TP rank you are on
     batch = get_batch_on_this_tp_rank(
@@ -170,7 +175,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None)
     else: # Hybrid CP format
         batch, packed_seq_params = get_batch_on_this_hybrid_cp_rank(batch, local_cp_size)
 
-    if (get_args().enable_vocab_parallel) and (get_virtual_vocab_parallel_chunk() == 2):
+    if (args.enable_vocab_parallel) and (get_virtual_vocab_parallel_chunk() == embedding_model_chunk_id):
         InputStore.save_batch(microbatch_id, (*batch.values(), packed_seq_params))
 
     return (*batch.values(), packed_seq_params)

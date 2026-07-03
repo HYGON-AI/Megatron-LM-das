@@ -210,8 +210,9 @@ class PipelineFeature(AbstractFeature):
             )
             from dcu_megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayoutDualpipeV
 
-            patch_manager.register_patch(
-                'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
+            if not args.enable_vocab_parallel:
+                patch_manager.register_patch(
+                    'megatron.core.transformer.module.Float16Module.forward', dualpipev_fp16forward)
             patch_manager.register_patch(
                 'megatron.core.transformer.transformer_block.get_num_layers_to_build', get_num_layers_to_build)
             patch_manager.register_patch(

@@ -3,22 +3,20 @@ from typing import Iterator, List, Union, Optional, Callable
 
 import torch
 
+from megatron.training import get_args
 from megatron.core import parallel_state
-from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
-    FineGrainedActivationOffloadingInterface as off_interface,
-)
+from megatron.core.enums import ModelType
 from megatron.core.utils import (
-    get_attr_wrapped_model,
     get_model_config,
     get_model_type,
 )
 from megatron.core.pipeline_parallel.schedules import clear_embedding_activation_buffer, deallocate_output_tensor
 from megatron.core.pipeline_parallel.schedules import (
     backward_step,
-    set_current_microbatch,
     check_first_val_step,
     finish_embedding_wgrad_compute
 )
+from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.pipeline_parallel.utils import (
     set_streams,
     is_pp_first_stage,
@@ -26,448 +24,29 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.training import get_args
 
 from ..combined_1f1b import combined_forward_backward_step
 from dcu_megatron.core.parallel_state import set_dualpipe_chunk
 from dcu_megatron.core.models.common.language_module.language_module import set_shared_embedding_from_dual_chunk
+from .dualpipev_schedules import (
+    DualpipeVP2PCommunicator,
+    forward_step_no_model_graph,
+    get_send_handle,
+    get_recv_handle,
+    generate_dualpipev_schedule,
+)
+from dcu_megatron.core.parallel_state import (
+    get_lm_head_model_parallel_group,
+    set_virtual_vocab_parallel_chunk,
+)
+from ..utils import get_lm_head_res_reduce_stream, set_lm_head_res_reduce_stream
+from dcu_megatron.core.tensor_parallel.vocab_output_store import VocabOutputStore
 from dcu_megatron.core.tensor_parallel.vocab_input_store import VocabInputStore
-from dcu_megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
+from dcu_megatron.training.utils import print_rank_message
 
 
 # Types
 Shape = Union[List[int], torch.Size]
-
-
-def is_dualpipev_last_stage(model_chunk_id, is_first_stage):
-    return is_first_stage and model_chunk_id == (4 if get_args().enable_vocab_parallel else 1)
-
-
-class DualpipeVP2PCommunicator(P2PCommunicator):
-    def send_forward(self, output_tensor: torch.Tensor, tensor_shape, model_chunk_id, async_op=False):
-        """Send tensor to next rank in pipeline (forward send).
-
-        See _communicate for argument details.
-        """
-        config = self.config
-        tensor_send_next, tensor_send_prev = None, None
-        if model_chunk_id == 0:
-            if is_pp_last_stage(self.pp_group):
-                return None
-            tensor_send_next = output_tensor
-        else:
-            if is_pp_first_stage(self.pp_group):
-                return None
-            tensor_send_prev = output_tensor
-
-        if config.timers is not None:
-            config.timers('forward-send', log_level=2).start()
-
-        _, _, fwd_wait_handles = self._communicate(
-            tensor_send_next=tensor_send_next,
-            tensor_send_prev=tensor_send_prev,
-            recv_prev=False,
-            recv_next=False,
-            tensor_shape=tensor_shape,
-            wait_on_reqs=(not async_op)
-        )
-        if config.timers is not None:
-            config.timers('forward-send').stop()
-
-        return fwd_wait_handles
-
-    def send_forward_recv_forward(
-        self,
-        output_tensor: torch.Tensor,
-        tensor_shape: Shape,
-        model_chunk_id,
-        async_op=False,
-    ) -> torch.Tensor:
-        """Batched recv from previous rank and send to next rank in pipeline.
-
-        See _communicate for argument details.
-        """
-        config = self.config
-        recv_prev, recv_next = False, False
-        tensor_send_next, tensor_send_prev = None, None
-        if model_chunk_id == 0:
-            if not is_pp_last_stage(self.pp_group):
-                tensor_send_next = output_tensor
-            if not is_pp_first_stage(self.pp_group):
-                recv_prev = True
-
-        if model_chunk_id == 1:
-            if not is_pp_first_stage(self.pp_group):
-                tensor_send_prev = output_tensor
-            if not is_pp_last_stage(self.pp_group):
-                recv_next = True
-
-        if config.timers is not None:
-            config.timers('forward-send-forward-recv', log_level=2).start()
-        tensor_recv_prev, tensor_recv_next, fwd_wait_handles = self._communicate(
-            tensor_send_next=tensor_send_next,
-            tensor_send_prev=tensor_send_prev,
-            recv_prev=recv_prev,
-            recv_next=recv_next,
-            tensor_shape=tensor_shape,
-            wait_on_reqs=(not async_op),
-        )
-        if config.timers is not None:
-            config.timers('forward-send-forward-recv').stop()
-
-        if model_chunk_id == 0:
-            if not is_pp_first_stage(self.pp_group):
-                return tensor_recv_prev, fwd_wait_handles
-            elif get_args().enable_vocab_parallel:
-                tensor_recv_prev = VocabInputStore.forward_get(remove=False)
-                return tensor_recv_prev, fwd_wait_handles
-            else:
-                return None, fwd_wait_handles
-        else:
-            if not is_pp_last_stage(self.pp_group):
-                return tensor_recv_next, fwd_wait_handles
-            else:
-                return None, fwd_wait_handles
-
-    def send_backward(self, input_tensor_grad: torch.Tensor, tensor_shape, model_chunk_id, async_op=False):
-        """Send tensor to next rank in pipeline (forward send).
-
-        See _communicate for argument details.
-        """
-        config = self.config
-        tensor_send_next, tensor_send_prev = None, None
-        if model_chunk_id == 0:
-            if is_pp_first_stage(self.pp_group):
-                return None
-            tensor_send_prev = input_tensor_grad
-        else:
-            if is_pp_last_stage(self.pp_group):
-                return None
-            tensor_send_next = input_tensor_grad
-
-        if config.timers is not None:
-            config.timers('backward-send', log_level=2).start()
-        _, _, reqs = self._communicate(
-            tensor_send_next=tensor_send_next,
-            tensor_send_prev=tensor_send_prev,
-            recv_prev=False,
-            recv_next=False,
-            tensor_shape=tensor_shape,
-            wait_on_reqs=(not async_op)
-        )
-        if config.timers is not None:
-            config.timers('backward-send').stop()
-        return reqs
-
-    def recv_forward(self, tensor_shape: Shape, model_chunk_id, async_op=False):
-        """ Receive tensor from previous rank in pipeline (forward receive).
-
-        See _communicate for argument details.
-        """
-        config = self.config
-        recv_prev, recv_next = False, False
-        if model_chunk_id == 0:
-            recv_prev = True
-        else:
-            recv_next = True
-
-        if is_pp_first_stage(self.pp_group) and recv_prev:
-            tensor_recv_prev = None
-            if get_args().enable_vocab_parallel:
-                tensor_recv_prev = VocabInputStore.forward_get(remove=False)
-            return tensor_recv_prev, None
-        elif is_pp_last_stage(self.pp_group) and recv_next:
-            fwd_wait_handles = None
-            return None, fwd_wait_handles
-        else:
-            if config.timers is not None:
-                config.timers('forward-recv', log_level=2).start()
-            tensor_recv_prev, tensor_recv_next, fwd_wait_handles = self._communicate(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=recv_prev,
-                recv_next=recv_next,
-                tensor_shape=tensor_shape,
-                wait_on_reqs=(not async_op),
-            )
-            if config.timers is not None:
-                config.timers('forward-recv').stop()
-
-        if recv_prev:
-            return tensor_recv_prev, fwd_wait_handles
-        else:
-            return tensor_recv_next, fwd_wait_handles
-
-    def recv_backward(self, tensor_shape: Shape, model_chunk_id, async_op=False):
-        """Receive tensor from next rank in pipeline (backward receive).
-
-        See _communicate for argument details.
-        """
-        config = self.config
-        recv_prev, recv_next = False, False
-        if model_chunk_id == 0:
-            recv_next = True
-        else:
-            recv_prev = True
-
-        if (
-            (is_pp_first_stage(self.pp_group) and recv_prev)
-            or (is_pp_last_stage(self.pp_group) and recv_next)
-        ):
-            output_tensor_grad = None
-            bwd_wait_handles = None
-            return output_tensor_grad, bwd_wait_handles
-        else:
-
-            if config.timers is not None:
-                config.timers('backward-recv', log_level=2).start()
-            tensor_recv_prev, tensor_recv_next, bwd_wait_handles = self._communicate(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=recv_prev,
-                recv_next=recv_next,
-                tensor_shape=tensor_shape,
-                wait_on_reqs=(not async_op)
-            )
-            if config.timers is not None:
-                config.timers('backward-recv').stop()
-
-        if recv_prev:
-            return tensor_recv_prev, bwd_wait_handles
-        else:
-            return tensor_recv_next, bwd_wait_handles
-
-    def send_forward_recv_slave_forward(
-        self,
-        output_tensor: torch.Tensor,
-        tensor_shape: Shape,
-        fwd_model_chunk_id,
-        async_op=False,
-    ) -> torch.Tensor:
-        """Batched recv from previous rank and send to next rank in pipeline.
-        See _communicate for argument details.
-        """
-        config = self.config
-        recv_prev, recv_next = False, False
-        tensor_send_next, tensor_send_prev = None, None
-        if fwd_model_chunk_id == 0:
-            if is_pp_last_stage(self.pp_group):
-                return None, None
-            tensor_send_next = output_tensor
-            recv_next = True
-        if fwd_model_chunk_id == 1:
-            if is_pp_first_stage(self.pp_group):
-                tensor_recv_prev = None
-                if get_args().enable_vocab_parallel:
-                    tensor_recv_prev = VocabInputStore.forward_get(remove=False)
-                return tensor_recv_prev, None
-            tensor_send_prev = output_tensor
-            recv_prev = True
-        if config.timers is not None:
-            config.timers('forward-send-slave-forward-recv', log_level=2).start()
-        tensor_recv_prev, tensor_recv_next, fwd_wait_handles = self._communicate(
-            tensor_send_next=tensor_send_next,
-            tensor_send_prev=tensor_send_prev,
-            recv_prev=recv_prev,
-            recv_next=recv_next,
-            tensor_shape=tensor_shape,
-            wait_on_reqs=(not async_op),
-        )
-        if config.timers is not None:
-            config.timers('forward-send-slave-forward-recv').stop()
-
-        if fwd_model_chunk_id == 0:
-            return tensor_recv_next, fwd_wait_handles
-        else:
-            return tensor_recv_prev, fwd_wait_handles
-
-    def send_backward_recv_slave_backward(
-        self,
-        input_tensor_grad: torch.Tensor,
-        tensor_shape: Shape,
-        fwd_model_chunk_id,
-        async_op=False,
-    ) -> torch.Tensor:
-        """Batched recv from previous rank and send to next rank in pipeline.
-        See _communicate for argument details.
-        """
-        config = self.config
-        recv_prev, recv_next = False, False
-        tensor_send_next, tensor_send_prev = None, None
-        if fwd_model_chunk_id == 0:
-            if is_pp_last_stage(self.pp_group):
-                return None, None
-            tensor_send_next = input_tensor_grad
-            recv_next = True
-        if fwd_model_chunk_id == 1:
-            if is_pp_first_stage(self.pp_group):
-                return None, None
-            tensor_send_prev = input_tensor_grad
-            recv_prev = True
-        if config.timers is not None:
-            config.timers('forward-send-slave-forward-recv', log_level=2).start()
-        tensor_recv_prev, tensor_recv_next, fwd_wait_handles = self._communicate(
-            tensor_send_next=tensor_send_next,
-            tensor_send_prev=tensor_send_prev,
-            recv_prev=recv_prev,
-            recv_next=recv_next,
-            tensor_shape=tensor_shape,
-            wait_on_reqs=(not async_op),
-        )
-        if config.timers is not None:
-            config.timers('forward-send-slave-forward-recv').stop()
-
-        if fwd_model_chunk_id == 0:
-            return tensor_recv_next, fwd_wait_handles
-        else:
-            return tensor_recv_prev, fwd_wait_handles
-
-
-def get_send_handle(handles, model_chunk_id, forward=True):
-    send_handle = None
-    if handles is None:
-        return send_handle
-
-    if forward:
-        send_direction = "send_next" if model_chunk_id == 0 else "send_prev"
-        if send_direction in handles:
-            send_handle = handles.pop(send_direction)
-    else:
-        send_direction = "send_prev" if model_chunk_id == 0 else "send_next"
-        if send_direction in handles:
-            send_handle = handles.pop(send_direction)
-
-    return send_handle
-
-
-def get_recv_handle(handles, model_chunk_id, forward=True):
-    recv_handle = None
-    if handles is None:
-        return recv_handle
-
-    if forward:
-        recv_direction = "recv_prev" if model_chunk_id == 0 else "recv_next"
-        if recv_direction in handles:
-            recv_handle = handles.pop(recv_direction)
-    else:
-        recv_direction = "recv_next" if model_chunk_id == 0 else "recv_prev"
-        if recv_direction in handles:
-            recv_handle = handles.pop(recv_direction)
-
-    return recv_handle
-
-
-def generate_dualpipev_schedule(pp_size, num_microbatches):
-    num_microbatches = num_microbatches * 2
-    num_warmup_stages = [0] * pp_size
-    num_interleaved_forward_stages = [0] * pp_size
-    num_1b1w1f_stages = [0] * pp_size
-    num_overlap_stages = [0] * pp_size
-    num_1b1overlap_stages = [0] * pp_size
-    num_interleaved_backward_stages = [0] * pp_size
-    num_cooldown_stages = [0] * pp_size
-
-    args = get_args()
-    pp_size *= 2
-    for i in range(pp_size // 2):
-        num_warmup_stages[i] = pp_size - 2 - i * 2
-
-        num_interleaved_forward_stages[i] = i + 1  # 1f1f
-
-        num_1b1w1f_stages[i] = [pp_size // 2 - i - 1, False] # True: 1B1W1F. False: 1B1F, finally Ws
-
-        num_overlap_stages[i] = num_microbatches - pp_size * 2 + i * 2 + 2
-
-        num_1b1overlap_stages[i] = (pp_size // 2 - i - 1) * 2
-
-        num_interleaved_backward_stages[i] = i + 1
-
-        num_cooldown_stages[i] = [i, pp_size // 2 - i, i]
-
-        if args.enable_vocab_parallel:
-            if args.disable_backward_fusion:
-                num_interleaved_forward_stages[i] += 1
-                num_overlap_stages[i] -= 2
-                num_interleaved_backward_stages[i] += 2
-
-    schedule_all_stages = {
-        'warmup': num_warmup_stages,
-        'interleaved_forward': num_interleaved_forward_stages,
-        '1b1w1f': num_1b1w1f_stages,
-        'overlap': num_overlap_stages,
-        '1b1overlap': num_1b1overlap_stages,
-        'interleaved_backward': num_interleaved_backward_stages,
-        'cooldown': num_cooldown_stages
-    }
-
-    return schedule_all_stages
-
-
-def forward_step_no_model_graph(
-    forward_step_func,
-    model_chunk_id,
-    data_iterator,
-    model,
-    num_microbatches,
-    input_tensor,
-    forward_data_store,
-    config,
-    cp_group_size,
-    collect_non_loss_data=False,
-    checkpoint_activations_microbatch=None,
-    is_first_microbatch=False,
-    current_microbatch=None,
-    is_first_stage=False,
-    skip_loss_compute=False,
-):
-    if config.timers is not None:
-        config.timers('forward-compute', log_level=2).start()
-
-    if is_first_microbatch and hasattr(model, 'set_is_first_microbatch'):
-        model.set_is_first_microbatch()
-    if current_microbatch is not None:
-        set_current_microbatch(model, current_microbatch)
-
-    unwrap_output_tensor = False
-    if not isinstance(input_tensor, list):
-        input_tensor = [input_tensor]
-        unwrap_output_tensor = True
-
-    set_input_tensor = get_attr_wrapped_model(model, "set_input_tensor")
-    set_input_tensor(input_tensor)
-
-    if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
-    else:
-        context_manager = contextlib.nullcontext()
-    with context_manager:
-        if model_chunk_id == 1:
-            current_microbatch -= num_microbatches
-
-        if checkpoint_activations_microbatch is None:
-            output_tensor, loss_func = forward_step_func(data_iterator, model, microbatch_id=current_microbatch)
-        else:
-            output_tensor, loss_func = forward_step_func(
-                data_iterator, model, checkpoint_activations_microbatch, microbatch_id=current_microbatch
-            )
-
-    output_tensor, num_tokens = forward_step_calc_loss(
-        model,
-        output_tensor,
-        loss_func,
-        config,
-        None,
-        collect_non_loss_data,
-        num_microbatches,
-        forward_data_store,
-        cp_group_size,
-        is_dualpipev_last_stage(model_chunk_id, is_first_stage),
-        skip_loss_compute=skip_loss_compute,
-    )
-
-    if unwrap_output_tensor:
-        return output_tensor, num_tokens
-    return [output_tensor], num_tokens
 
 
 def forward_backward_pipelining_with_cutinhalf(
@@ -487,6 +66,8 @@ def forward_backward_pipelining_with_cutinhalf(
     pg_collection: Optional[ProcessGroupCollection] = None,
     force_all_reduce: Optional[bool] = False,
 ):
+    set_lm_head_res_reduce_stream()
+
     config = get_model_config(model[0])
     if p2p_communicator is None and pg_collection is None:
         p2p_communicator = DualpipeVP2PCommunicator(
@@ -522,15 +103,11 @@ def forward_backward_pipelining_with_cutinhalf(
         )
 
     if is_pp_first_stage(p2p_communicator.pp_group):
-        set_shared_embedding_from_dual_chunk(model[0], model[1])
+        set_shared_embedding_from_dual_chunk(model[2], model[3], enable_vocab_parallel=True)
 
     assert (
-        isinstance(model, list) and len(model) == 2
-    ), 'Dualpipe Schedule expects two model chunks'
-
-    assert (
-        isinstance(data_iterator, list) and len(data_iterator) == 2
-    ), 'Dualpipe Schedule expects two data_iterators'
+        isinstance(model, list) and len(model) == 5 if is_pp_first_stage(p2p_communicator.pp_group) else 4
+    ), 'Dualpipe Schedule expects 4 or 5 model chunks'
 
     config = get_model_config(model[0])
     config.batch_p2p_comm = False
@@ -603,9 +180,9 @@ def forward_backward_pipelining_with_cutinhalf(
 
     total_num_tokens = torch.tensor(0, dtype=torch.int).cuda()
     forward_data_store = []
-    input_tensors = [[], []]
-    output_tensors = [[], []]
-    output_tensor_grads = [[], []]
+    input_tensors = [[], [], [], []]
+    output_tensors = [[], [], [], []]
+    output_tensor_grads = [[], [], [], []]
 
     master_chunk_id = 0
     slave_chunk_id = 1
@@ -618,13 +195,408 @@ def forward_backward_pipelining_with_cutinhalf(
             comm_handle.wait()
         comm_handle = None
 
+    input_embedding_output_shape = None
+
+    comm_wait_tensor = torch.Tensor([0]).cuda()
+    comm_wait_tensor.record_stream(get_lm_head_res_reduce_stream())
+
+    embedding_model_chunk_id = 3
+    output_model_chunk_id = 2
+    loss_model_chunk_id = 4
+
+    def input_embedding_forward_step_helper(
+        microbatch_id,
+    ):
+        set_virtual_vocab_parallel_chunk(embedding_model_chunk_id)
+
+        input_tensor = [None]
+
+        if get_args().profile:
+            torch.cuda.nvtx.range_push(f"IF{microbatch_id}")
+
+        output_tensor, _ = forward_step_no_model_graph(
+            forward_step_func,
+            embedding_model_chunk_id,
+            data_iterator[0],
+            model[embedding_model_chunk_id],
+            num_microbatches,
+            input_tensor,
+            forward_data_store,
+            config,
+            cp_group_size=pg_collection.cp.size(),
+            collect_non_loss_data=collect_non_loss_data,
+            checkpoint_activations_microbatch=None,
+            is_first_microbatch=check_first_val_step(first_val_step, forward_only, microbatch_id == 0),
+            current_microbatch=microbatch_id,
+            is_first_stage=is_pp_first_stage(p2p_communicator.pp_group),
+            skip_loss_compute=True,
+        )
+
+        if get_args().profile:
+            torch.cuda.nvtx.range_pop()
+
+        nonlocal input_embedding_output_shape
+        input_embedding_output_shape = output_tensor[0].shape
+
+        reduced_output_tensor = output_tensor[0].clone().detach().to(dtype=config.pipeline_dtype).requires_grad_(True)
+
+        input_tensors[embedding_model_chunk_id].append(input_tensor)
+        output_tensors[embedding_model_chunk_id].append(output_tensor)
+        deallocate_output_tensor(output_tensor[0], config.deallocate_pipeline_outputs)
+
+        def callback():
+            nonlocal reduced_output_tensor
+
+            handle = torch.distributed.all_reduce(
+                reduced_output_tensor,
+                torch.distributed.ReduceOp.SUM,
+                group=get_lm_head_model_parallel_group(),
+                async_op=True,
+            )
+
+            if is_pp_first_stage(p2p_communicator.pp_group):
+                VocabInputStore.forward_store(reduced_output_tensor, handle)
+
+            return
+
+        return callback
+
+    def input_embedding_backward_step_helper(
+        microbatch_id
+    ):
+        set_virtual_vocab_parallel_chunk(embedding_model_chunk_id)
+
+        input_tensor = input_tensors[embedding_model_chunk_id].pop(0)
+        output_tensor = output_tensors[embedding_model_chunk_id].pop(0)
+
+        if is_pp_first_stage(p2p_communicator.pp_group):
+            output_tensor_grad = [VocabInputStore.backward_get()]
+        else:
+            output_tensor_grad = [
+                torch.empty(
+                    input_embedding_output_shape,
+                    dtype=config.pipeline_dtype,
+                    device=torch.cuda.current_device(),
+                )
+            ]
+
+        handle = torch.distributed.broadcast(
+            output_tensor_grad[0],
+            parallel_state.get_pipeline_model_parallel_first_rank(),
+            group=get_lm_head_model_parallel_group(),
+            async_op=True,
+        )
+
+        def callback():
+            handle.wait()
+
+            if get_args().profile:
+                torch.cuda.nvtx.range_push(f"IB{microbatch_id}")
+
+            try:
+                backward_step(
+                    input_tensor, output_tensor, output_tensor_grad, model_type, config,
+                )
+            except Exception as e:
+                raise Exception(f"{e} {input_tensor=}, {output_tensor=}, {output_tensor_grad=}")
+
+            if get_args().profile:
+                torch.cuda.nvtx.range_pop()
+
+        return callback
+
+    # Storing grad output of the loss reduce stage from B step to the next F step.
+    last_stage_forward_input_store = None
+    last_stage_backward_input_store = None
+    lm_head_reduce_output_store = None
+
+    broadcast_lm_head_output_handle = None
+    broadcast_lm_head_grad_input_handle = None
+
+    def _broadcast(item):
+        handle = None
+        if item is not None:
+            handle = torch.distributed.broadcast(
+                item,
+                parallel_state.get_pipeline_model_parallel_first_rank(),
+                group=get_lm_head_model_parallel_group(),
+                async_op=True,
+            )
+
+        return handle
+
+    def broadcast_lm_head_input(microbatch_id, output_tensor, grad_output):
+        """
+        Assumes `output_tensor` is retrieved from `last_stage_forward_input_store`.
+        We do not store it into `last_stage_forward_input_store` again.
+        """
+        nonlocal last_stage_backward_input_store, broadcast_lm_head_output_handle, broadcast_lm_head_grad_input_handle
+
+        assert is_pp_first_stage(p2p_communicator.pp_group), \
+            "lm head input must be broadcasted from the first stage"
+        assert not config.variable_seq_lengths, 'not supported yet'
+
+        # get_lm_head_res_reduce_stream().wait_stream(torch.cuda.current_stream())
+        if microbatch_id < num_microbatches:
+            if broadcast_lm_head_output_handle is not None:
+                broadcast_lm_head_output_handle.wait()
+
+            # with torch.cuda.stream(get_lm_head_res_reduce_stream()):
+            broadcast_lm_head_output_handle = _broadcast(output_tensor[0])
+
+        if not forward_only and microbatch_id > 0:
+            if broadcast_lm_head_grad_input_handle is not None:
+                broadcast_lm_head_grad_input_handle.wait()
+
+            # with torch.cuda.stream(get_lm_head_res_reduce_stream()):
+            broadcast_lm_head_grad_input_handle = _broadcast(grad_output[0])
+            last_stage_backward_input_store = grad_output[0]
+
+    def receive_lm_head_input(microbatch_id):
+        def _create_broadcast_tensor(shape, dtype):
+            return torch.empty(
+                shape,
+                dtype=dtype,
+                device=torch.cuda.current_device(),
+                requires_grad=True,
+            )
+
+        output_tensor = None
+        grad_output = None
+        if not is_pp_first_stage(p2p_communicator.pp_group):
+            handles = []
+
+            if microbatch_id < num_microbatches:
+                output_tensor = _create_broadcast_tensor(tensor_shape, config.pipeline_dtype)
+                handle = _broadcast(output_tensor)
+                handles.append(handle)
+
+            if not forward_only and microbatch_id > 0:
+                gathered_tensor_shapes = list(tensor_shape[:-1])
+                gathered_tensor_shapes[0] *= tp_group.size()
+                grad_output = _create_broadcast_tensor(gathered_tensor_shapes, torch.float32)
+                handle = _broadcast(grad_output)
+                handles.append(handle)
+
+        def callback():
+            nonlocal output_tensor, grad_output, handles, last_stage_backward_input_store, last_stage_forward_input_store
+
+            if not is_pp_first_stage(p2p_communicator.pp_group):
+
+                for handle in handles:
+                    if handle is not None:
+                        handle.wait()
+
+            if microbatch_id < num_microbatches:
+                if is_pp_first_stage(p2p_communicator.pp_group):
+                    output_tensor = last_stage_forward_input_store
+                    last_stage_forward_input_store = None
+            else:
+                output_tensor = None
+
+            if microbatch_id > 0:
+                # Ensure that the reduction is complete.
+                # torch.cuda.current_stream().wait_stream(get_lm_head_res_reduce_stream())
+
+                logits_max, sum_exp_logits, _, _ = lm_head_reduce_output_store
+
+                if not forward_only and is_pp_first_stage(p2p_communicator.pp_group):
+                    grad_output = last_stage_backward_input_store
+                    last_stage_backward_input_store = None
+            else:
+                sum_exp_logits = None
+                logits_max = None
+                grad_output = None
+
+            return [output_tensor], sum_exp_logits, logits_max, [grad_output]
+
+        return callback
+
+    def lm_head_step_helper(
+        microbatch_id,
+        lm_head_inputs,
+    ):
+        if get_args().profile:
+            torch.cuda.nvtx.range_push(f"S{microbatch_id}")
+
+        lm_head_input_tensor, sum_exp_logits, logits_max, grad_output = lm_head_inputs
+
+        set_virtual_vocab_parallel_chunk(output_model_chunk_id)
+        VocabOutputStore.microbatch_id = microbatch_id
+
+        grad_input = [None]
+        if not forward_only and microbatch_id > 0:
+            input_tensor = input_tensors[output_model_chunk_id].pop(0)
+            output_tensor = output_tensors[output_model_chunk_id].pop(0)
+
+            # Only for weight grad updates, input grad returned is ignored.
+            VocabOutputStore.backward_store(sum_exp_logits, logits_max, grad_output[0])
+
+            grad_input = backward_step(
+                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], model_type, config,
+            )
+
+        if microbatch_id < num_microbatches:
+            output_tensor, _ = forward_step_no_model_graph(
+                forward_step_func,
+                output_model_chunk_id,
+                data_iterator[0],
+                model[output_model_chunk_id],
+                num_microbatches,
+                lm_head_input_tensor,
+                forward_data_store,
+                config,
+                cp_group_size=pg_collection.cp.size(),
+                collect_non_loss_data=collect_non_loss_data,
+                checkpoint_activations_microbatch=None,
+                is_first_microbatch=check_first_val_step(first_val_step, forward_only, microbatch_id == 0),
+                current_microbatch=microbatch_id,
+                is_first_stage=is_pp_first_stage(p2p_communicator.pp_group),
+                skip_loss_compute=True,
+            )
+            output_tensor = [output_tensor[0].clone()]
+            sum_exp_logits, logits_max, predicted_logits, target_mask, softmax_grad_input, \
+                ground_truth_grad_input = VocabOutputStore.forward_get()
+
+            input_tensors[output_model_chunk_id].append(lm_head_input_tensor)
+            output_tensors[output_model_chunk_id].append(output_tensor)
+            deallocate_output_tensor(output_tensor[0], config.deallocate_pipeline_outputs)
+
+            if get_args().disable_backward_fusion:
+                lm_head_res = (logits_max, sum_exp_logits, predicted_logits, target_mask,
+                               grad_input[0])
+            else:
+                lm_head_res = (logits_max, sum_exp_logits, predicted_logits, target_mask,
+                           softmax_grad_input, ground_truth_grad_input)
+        else:
+            if get_args().disable_backward_fusion:
+                lm_head_res = (None, None, None, None, grad_input[0])
+            else:
+                lm_head_res = None
+
+        if get_args().profile:
+            torch.cuda.nvtx.range_pop()
+
+        return lm_head_res
+
+    def reduce_lm_head_res_alg1(microbatch_id, logits_max, sum_exp_logits, predicted_logits, target_mask, grad_input):
+        """
+        Reduces `logits_max`, `sum_exp_logits`, `predicted_logits` and
+        `grad_input` among all pipeline parallel ranks.
+        """
+        # get_lm_head_res_reduce_stream().wait_stream(torch.cuda.current_stream())
+        # with torch.cuda.stream(get_lm_head_res_reduce_stream()):
+        if microbatch_id < num_microbatches:
+
+            local_logits_max = logits_max.clone()
+            torch.distributed.all_reduce(
+                logits_max,
+                torch.distributed.ReduceOp.MAX,
+                group=get_lm_head_model_parallel_group(),
+                async_op=False,
+            )
+            local_logits_max -= logits_max
+
+            predicted_logits += local_logits_max
+            predicted_logits[target_mask] = 0.0
+            torch.distributed.all_reduce(
+                predicted_logits,
+                torch.distributed.ReduceOp.SUM,
+                group=get_lm_head_model_parallel_group(),
+                async_op=False,
+            )
+
+            local_logits_max.exp_()
+            sum_exp_logits.mul_(local_logits_max)
+            torch.distributed.all_reduce(
+                sum_exp_logits,
+                torch.distributed.ReduceOp.SUM,
+                group=get_lm_head_model_parallel_group(),
+                async_op=False,
+            )
+
+            # for tensor in (logits_max, sum_exp_logits, predicted_logits, target_mask):
+            #     tensor.record_stream(get_lm_head_res_reduce_stream())
+
+        if not forward_only and microbatch_id > 0:
+            torch.distributed.all_reduce(
+                grad_input,
+                torch.distributed.ReduceOp.SUM,
+                group=get_lm_head_model_parallel_group(),
+                async_op=False,
+            )
+
+            # grad_input.record_stream(get_lm_head_res_reduce_stream())
+
+        return logits_max, sum_exp_logits, predicted_logits, grad_input
+
+    def loss_calculation_helper(
+        microbatch_id,
+    ):
+        if not is_pp_first_stage(p2p_communicator.pp_group):
+            return
+
+        nonlocal lm_head_reduce_output_store, lm_head_reduce_output_store
+
+        # Ensure that the reduction is complete.
+        # torch.cuda.current_stream().wait_stream(get_lm_head_res_reduce_stream())
+
+        _, sum_exp_logits, predicted_logits, _ = lm_head_reduce_output_store
+
+        # Calculate the loss. Then, execute the function that reduces the losses.
+
+        input_tensor = torch.log(sum_exp_logits) - predicted_logits
+        input_tensor = [input_tensor.detach().requires_grad_(True)]
+
+        set_virtual_vocab_parallel_chunk(loss_model_chunk_id)
+
+        output_tensor, _ = forward_step_no_model_graph(
+            forward_step_func,
+            loss_model_chunk_id,
+            data_iterator[0],
+            model[loss_model_chunk_id],
+            num_microbatches,
+            input_tensor,
+            forward_data_store,
+            config,
+            cp_group_size=pg_collection.cp.size(),
+            collect_non_loss_data=collect_non_loss_data,
+            checkpoint_activations_microbatch=None,
+            is_first_microbatch=check_first_val_step(first_val_step, forward_only, microbatch_id == 0),
+            current_microbatch=microbatch_id,
+            is_first_stage=is_pp_first_stage(p2p_communicator.pp_group),
+        )
+
+        if not forward_only:
+            output_tensor_grad = backward_step(
+                input_tensor, output_tensor, [None], model_type, config,
+            )
+        else:
+            output_tensor_grad = [None]
+
+        if get_args().disable_backward_fusion:
+            if microbatch_id < num_microbatches:
+                nonlocal last_stage_forward_input_store
+                broadcast_lm_head_input(microbatch_id + 1, [last_stage_forward_input_store],
+                                        [output_tensor_grad[0]])
+            elif not forward_only:
+                broadcast_lm_head_input(microbatch_id + 1, None,
+                                        [output_tensor_grad[0]])
+        else:
+            return output_tensor_grad
+
     def forward_step_helper(model_chunk_id, cur_microbatch, checkpoint_activations_microbatch=False):
         set_dualpipe_chunk(model_chunk_id)
+        set_virtual_vocab_parallel_chunk(model_chunk_id)
+
         if not forward_only:
             offset = cur_bwd_chunk_microbatch[model_chunk_id]
             input_tensor = input_tensors[model_chunk_id][cur_microbatch - offset]
         else:
             input_tensor = input_tensors[model_chunk_id][0]
+
+        if model_chunk_id == master_chunk_id and rank == 0:
+            input_tensor = None
 
         first_microbatch_id = 0 if model_chunk_id == master_chunk_id else num_microbatches
         is_first_microbatch = check_first_val_step(
@@ -647,6 +619,7 @@ def forward_backward_pipelining_with_cutinhalf(
             is_first_microbatch=is_first_microbatch,
             current_microbatch=cur_microbatch,
             is_first_stage=is_pp_first_stage(pp_group),
+            skip_loss_compute=True,
         )
         output_tensors[model_chunk_id].append(output_tensor)
 
@@ -656,6 +629,15 @@ def forward_backward_pipelining_with_cutinhalf(
             input_tensors[model_chunk_id].pop(0)
             output_tensors[model_chunk_id].pop()
 
+        if (
+            is_pp_first_stage(p2p_communicator.pp_group)
+            and model_chunk_id == slave_chunk_id
+        ):
+            nonlocal last_stage_forward_input_store
+            last_stage_forward_input_store = output_tensor.clone().detach().to(config.pipeline_dtype).requires_grad_(True)
+            if cur_microbatch == num_microbatches:
+                broadcast_lm_head_input(cur_microbatch - num_microbatches, [last_stage_forward_input_store], None)
+
         return output_tensor
 
     def backward_step_helper(model_chunk_id, compute_wgrad=False):
@@ -663,9 +645,21 @@ def forward_backward_pipelining_with_cutinhalf(
         output_tensor = output_tensors[model_chunk_id].pop(0)
         output_tensor_grad = output_tensor_grads[model_chunk_id].pop(0)
 
+        if rank == 0 and model_chunk_id == slave_chunk_id:
+            # Ensure that the reduction is complete.
+            # torch.cuda.current_stream().wait_stream(get_lm_head_res_reduce_stream())    # worse performance
+
+            _, _, _, grad_input = lm_head_reduce_output_store
+            # Calculate the input grads of the lm head layer, without calling backward.
+            input_tensor_grad = [grad_input]
+            output_tensor_grad = input_tensor_grad
+
         input_tensor_grad = backward_step(
             input_tensor, output_tensor, output_tensor_grad, config
         )
+
+        if rank == 0 and model_chunk_id == master_chunk_id:
+            VocabInputStore.backward_store(input_tensor_grad)
 
         if compute_wgrad:
             model[model_chunk_id].backward_dw()
@@ -752,7 +746,6 @@ def forward_backward_pipelining_with_cutinhalf(
         post_backward=None,
         checkpoint_activations_microbatch=None,
         block_level_wgrad_compute=False,
-        disable_overlap_moe_expert_parallel_comm=False,
     ):
         """
         wrap forward_helper、backward_helper、combined_forward_backward_helper in a unified way
@@ -762,27 +755,6 @@ def forward_backward_pipelining_with_cutinhalf(
             assert (
                 checkpoint_activations_microbatch is None
             ), "checkpoint_activations_microbatch not supported when overlap_moe_expert_parallel_comm is true"
-
-            if disable_overlap_moe_expert_parallel_comm:
-                output_tensor = None
-                if fwd_model_chunk_id is not None:
-                    output_tensor, _, _ = combined_forward_backward_helper(
-                        fwd_model_chunk_id=fwd_model_chunk_id,
-                        pre_forward=pre_forward,
-                        post_forward=post_forward,
-                    )
-
-                input_tensor_grad, chunk_backward_dw_func = None, None
-                if bwd_model_chunk_id is not None:
-                    _, input_tensor_grad, chunk_backward_dw_func = combined_forward_backward_helper(
-                        bwd_model_chunk_id=bwd_model_chunk_id,
-                        pre_backward=pre_backward,
-                        post_backward=post_backward,
-                        block_level_wgrad_compute=block_level_wgrad_compute,
-                    )
-
-                return output_tensor, input_tensor_grad, chunk_backward_dw_func
-
             return combined_forward_backward_helper(
                 fwd_model_chunk_id=fwd_model_chunk_id,
                 bwd_model_chunk_id=bwd_model_chunk_id,
@@ -835,12 +807,25 @@ def forward_backward_pipelining_with_cutinhalf(
     bwd_wait_send_handles = [None, None]
     checkpoint_activations_microbatch = None
 
+    num_input_embedding_forward_steps_remaining = num_microbatches
+    num_input_embedding_backward_steps_remaining = num_microbatches
+
+    for i in range(rank + 1):
+        input_embedding_forward_step_helper(i)()
+        num_input_embedding_forward_steps_remaining -= 1
+
     # Run warmup forward passes
     input_tensor, _ = p2p_communicator.recv_forward(tensor_shape, master_chunk_id)
     input_tensors[master_chunk_id].append(input_tensor)
     is_slave_only = False
     fwd_wait_handles_warmup = None
     for i in range(schedule['warmup'][rank]):
+
+        input_embedding_forward_step_helper(
+            num_microbatches - num_input_embedding_forward_steps_remaining
+        )()
+        num_input_embedding_forward_steps_remaining -= 1
+
         wait_comm_handle(fwd_wait_recv_handles[master_chunk_id])
 
         output_tensor, _, _ = forward_backward_helper_wrapper(
@@ -874,7 +859,15 @@ def forward_backward_pipelining_with_cutinhalf(
         break
 
     # Run interleaved forward passes for two model chunk
+    num_forward_backward_calculated = 0
+    num_remaining_s_pass = num_microbatches
     for i in range(schedule['interleaved_forward'][rank]):
+        if num_forward_backward_calculated <= rank:
+            input_embedding_forward_step_helper(
+                num_microbatches - num_input_embedding_forward_steps_remaining
+            )()
+            num_input_embedding_forward_steps_remaining -= 1
+
         # master forward
         is_slave_only = (cur_fwd_chunk_microbatch[master_chunk_id] == num_chunk_max_microbatch[master_chunk_id])
         if not is_slave_only:
@@ -883,6 +876,31 @@ def forward_backward_pipelining_with_cutinhalf(
                 fwd_model_chunk_id=master_chunk_id,
                 checkpoint_activations_microbatch=checkpoint_activations_microbatch,
             )
+
+        num_forward_backward_calculated += 1
+
+        if (
+            num_forward_backward_calculated > rank
+            and (num_forward_backward_calculated - rank) % 2 == 0
+        ):
+            if num_remaining_s_pass < num_microbatches:
+                loss_calculation_helper(num_microbatches - num_remaining_s_pass - 1)
+
+            lm_head_inputs = receive_lm_head_input(num_microbatches - num_remaining_s_pass)()
+            lm_head_res = lm_head_step_helper(num_microbatches - num_remaining_s_pass, lm_head_inputs)
+
+            if get_args().disable_backward_fusion:
+                lm_head_res = reduce_lm_head_res_alg1(num_microbatches - num_remaining_s_pass, *lm_head_res)
+
+            lm_head_reduce_output_store = lm_head_res
+
+            if num_remaining_s_pass == num_microbatches:
+                input_embedding_forward_step_helper(
+                    num_microbatches - num_input_embedding_forward_steps_remaining
+                )()
+                num_input_embedding_forward_steps_remaining -= 1
+
+            num_remaining_s_pass -= 1
 
         # prepare input for slave chunk
         if not is_pp_last_stage(p2p_communicator.pp_group):
@@ -908,15 +926,46 @@ def forward_backward_pipelining_with_cutinhalf(
             wait_comm_handle(fwd_wait_handles_warmup)
             fwd_wait_handles_warmup = None
 
+        if num_forward_backward_calculated <= rank:
+            input_embedding_forward_step_helper(
+                num_microbatches - num_input_embedding_forward_steps_remaining
+            )()
+            num_input_embedding_forward_steps_remaining -= 1
+
         # slave forward
         output_tensor_slave, _, _ = forward_backward_helper_wrapper(
             fwd_model_chunk_id=slave_chunk_id,
             checkpoint_activations_microbatch=checkpoint_activations_microbatch,
         )
 
+        num_forward_backward_calculated += 1
+        if (
+            num_forward_backward_calculated > rank
+            and (num_forward_backward_calculated - rank) % 2 == 0
+        ):
+            if num_remaining_s_pass < num_microbatches:
+                loss_calculation_helper(num_microbatches - num_remaining_s_pass - 1)
+
+            lm_head_inputs = receive_lm_head_input(num_microbatches - num_remaining_s_pass)()
+            lm_head_res = lm_head_step_helper(num_microbatches - num_remaining_s_pass, lm_head_inputs)
+
+            if get_args().disable_backward_fusion:
+                lm_head_res = reduce_lm_head_res_alg1(num_microbatches - num_remaining_s_pass, *lm_head_res)
+
+            lm_head_reduce_output_store = lm_head_res
+
+            if num_remaining_s_pass == num_microbatches:
+                input_embedding_forward_step_helper(
+                    num_microbatches - num_input_embedding_forward_steps_remaining
+                )()
+                num_input_embedding_forward_steps_remaining -= 1
+
+            num_remaining_s_pass -= 1
+
         wait_comm_handle(fwd_wait_send_handles[slave_chunk_id])
         fwd_wait_handles = p2p_communicator.send_forward(output_tensor_slave, tensor_shape, slave_chunk_id, async_op=True)
         fwd_wait_send_handles[slave_chunk_id] = get_send_handle(fwd_wait_handles, slave_chunk_id, forward=True)
+
         if not forward_only:
             deallocate_output_tensor(output_tensor_slave, config.deallocate_pipeline_outputs)
 
@@ -936,12 +985,16 @@ def forward_backward_pipelining_with_cutinhalf(
         output_tensor_grad, _ = p2p_communicator.recv_backward(tensor_shape, slave_chunk_id)
         output_tensor_grads[slave_chunk_id].append(output_tensor_grad)
 
+    chunk_backward_dw_funcs = []
     for i in range(schedule['1b1w1f'][rank][0]):
         if not forward_only:
             _, input_tensor_grad, chunk_backward_dw_func = forward_backward_helper_wrapper(
                 bwd_model_chunk_id=slave_chunk_id,
                 block_level_wgrad_compute=True,
             )
+
+            if not schedule['1b1w1f'][rank][1]:
+                chunk_backward_dw_funcs.append((chunk_backward_dw_func, False))
 
             bwd_wait_handles = p2p_communicator.send_backward(input_tensor_grad, tensor_shape, slave_chunk_id, async_op=True)
             bwd_wait_send_handles[slave_chunk_id] = get_send_handle(bwd_wait_handles, slave_chunk_id, forward=False)
@@ -951,16 +1004,43 @@ def forward_backward_pipelining_with_cutinhalf(
             input_tensors[slave_chunk_id].append(fwd_recv_buffer[0])
             fwd_recv_buffer[0] = None
 
-            if chunk_backward_dw_func is not None:
+            if (
+                schedule['1b1w1f'][rank][1]
+                and chunk_backward_dw_func is not None
+            ):
                 chunk_backward_dw_func()
                 del chunk_backward_dw_func
-
-            wait_comm_handle(bwd_wait_send_handles[slave_chunk_id])
         else:
             fwd_recv_buffer[0], fwd_wait_handles = p2p_communicator.recv_forward(tensor_shape, slave_chunk_id, async_op=True)
             fwd_wait_recv_handles[slave_chunk_id] = get_recv_handle(fwd_wait_handles, slave_chunk_id, forward=True)
             input_tensors[slave_chunk_id].append(fwd_recv_buffer[0])
             fwd_recv_buffer[0] = None
+
+        num_forward_backward_calculated += 1
+        if (
+            not forward_only
+            and not schedule['1b1w1f'][rank][1]
+            and num_forward_backward_calculated > pp_size + rank + 3
+        ):
+            chunk_backward_dw_func, _ = chunk_backward_dw_funcs.pop(0)
+            if chunk_backward_dw_func is not None:
+                chunk_backward_dw_func()
+                del chunk_backward_dw_func
+
+        if (num_forward_backward_calculated - rank) % 2 == 0:
+            loss_calculation_helper(num_microbatches - num_remaining_s_pass - 1)
+
+            lm_head_inputs = receive_lm_head_input(num_microbatches - num_remaining_s_pass)()
+            lm_head_res = lm_head_step_helper(num_microbatches - num_remaining_s_pass, lm_head_inputs)
+
+            if get_args().disable_backward_fusion:
+                lm_head_res = reduce_lm_head_res_alg1(num_microbatches - num_remaining_s_pass, *lm_head_res)
+
+            lm_head_reduce_output_store = lm_head_res
+            num_remaining_s_pass -= 1
+
+        if not forward_only:
+            wait_comm_handle(bwd_wait_send_handles[slave_chunk_id])
 
         # foward
         wait_comm_handle(fwd_wait_recv_handles[slave_chunk_id])
@@ -979,6 +1059,32 @@ def forward_backward_pipelining_with_cutinhalf(
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
         fwd_wait_send_handles[slave_chunk_id] = get_send_handle(fwd_wait_handles, slave_chunk_id, forward=True)
 
+        num_forward_backward_calculated += 1
+        if (
+            not forward_only
+            and not schedule['1b1w1f'][rank][1]
+            and num_forward_backward_calculated > pp_size + rank + 3
+        ):
+            chunk_backward_dw_func, _ = chunk_backward_dw_funcs.pop(0)
+            if chunk_backward_dw_func is not None:
+                chunk_backward_dw_func()
+                del chunk_backward_dw_func
+
+        if (
+            i != schedule['1b1w1f'][rank][0] - 1
+            and (num_forward_backward_calculated - rank) % 2 == 0
+        ):
+            loss_calculation_helper(num_microbatches - num_remaining_s_pass - 1)
+
+            lm_head_inputs = receive_lm_head_input(num_microbatches - num_remaining_s_pass)()
+            lm_head_res = lm_head_step_helper(num_microbatches - num_remaining_s_pass, lm_head_inputs)
+
+            if get_args().disable_backward_fusion:
+                lm_head_res = reduce_lm_head_res_alg1(num_microbatches - num_remaining_s_pass, *lm_head_res)
+
+            lm_head_reduce_output_store = lm_head_res
+            num_remaining_s_pass -= 1
+
     # check whether forward data transmission is completed.
     wait_comm_handle(fwd_wait_send_handles[slave_chunk_id])
 
@@ -986,13 +1092,9 @@ def forward_backward_pipelining_with_cutinhalf(
     prev_step_backward_only = False
     fwd_model_chunk_id = master_chunk_id
     bwd_model_chunk_id = slave_chunk_id
-    num_overlap_steps = schedule['overlap'][rank] + schedule['1b1overlap'][rank]
-    if not forward_only:
-        num_overlap_steps += schedule['interleaved_backward'][rank]
+    num_overlap_steps = schedule['overlap'][rank] + schedule['1b1overlap'][rank] + schedule['interleaved_backward'][rank]
+    num_bw_steps = 0
     for step_id in range(num_overlap_steps):
-        from megatron.training import get_args
-        disable_overlap_moe_expert_parallel_comm = get_args().enable_a2a_overlap_only_in_1f1b_phase and (step_id>=schedule['overlap'][rank])
-
         only_bwd = False
         if cur_fwd_chunk_microbatch[fwd_model_chunk_id] == num_chunk_max_microbatch[fwd_model_chunk_id]:
             only_bwd = True
@@ -1074,6 +1176,56 @@ def forward_backward_pipelining_with_cutinhalf(
 
             return input_tensor_grad
 
+        if (
+            num_remaining_s_pass >= 0
+            and (num_bw_steps + rank) % 2 == 0
+        ):
+            loss_calculation_helper(num_microbatches - num_remaining_s_pass - 1)
+
+            if forward_only and num_remaining_s_pass == 0:
+                break
+
+            receive_lm_head_input_callback = receive_lm_head_input(num_microbatches - num_remaining_s_pass)
+
+            if (
+                not forward_only
+                and (num_bw_steps - rank) // 2 > 2
+            ):
+                input_embedding_backward_callback = input_embedding_backward_step_helper(
+                    num_microbatches - num_input_embedding_backward_steps_remaining
+                )
+
+                num_input_embedding_backward_steps_remaining -= 1
+            else:
+                input_embedding_backward_callback = lambda: None
+
+            if num_bw_steps >= rank and num_input_embedding_forward_steps_remaining > 0:
+                input_embedding_forward_step_helper(
+                    num_microbatches - num_input_embedding_forward_steps_remaining
+                )()
+                num_input_embedding_forward_steps_remaining -= 1
+
+            input_embedding_backward_callback()
+
+            lm_head_inputs = receive_lm_head_input_callback()
+            lm_head_res = lm_head_step_helper(num_microbatches - num_remaining_s_pass, lm_head_inputs)
+
+            if get_args().disable_backward_fusion:
+                lm_head_res = reduce_lm_head_res_alg1(num_microbatches - num_remaining_s_pass, *lm_head_res)
+
+            lm_head_reduce_output_store = lm_head_res
+            num_remaining_s_pass -= 1
+
+            if num_remaining_s_pass == 0:
+                if config.grad_sync_func is not None:
+                    enable_grad_sync()
+                    config.grad_sync_func[2](model[2].parameters())
+                    disable_grad_sync()
+
+        if forward_only and step_id >= num_overlap_steps - schedule['interleaved_backward'][rank]:
+            num_bw_steps += 1
+            continue
+
         if not only_bwd:
             if step_id == 0 and is_pp_last_stage(p2p_communicator.pp_group):
                 if cur_fwd_chunk_microbatch[master_chunk_id] < num_chunk_max_microbatch[master_chunk_id]:
@@ -1104,7 +1256,6 @@ def forward_backward_pipelining_with_cutinhalf(
                     post_backward=pp_post_backward,
                     checkpoint_activations_microbatch=checkpoint_activations_microbatch,
                     block_level_wgrad_compute=(bwd_model_chunk_id == 1 and is_pp_first_stage(p2p_communicator.pp_group)),
-                    disable_overlap_moe_expert_parallel_comm=disable_overlap_moe_expert_parallel_comm,
                 )
 
                 if chunk_backward_dw_func is not None:
@@ -1137,12 +1288,12 @@ def forward_backward_pipelining_with_cutinhalf(
                     pre_backward=pp_pre_backward,
                     post_backward=pp_post_backward,
                     block_level_wgrad_compute=False,
-                    disable_overlap_moe_expert_parallel_comm=disable_overlap_moe_expert_parallel_comm,
                 )
 
         # swap fwd & bwd chunks
         fwd_model_chunk_id, bwd_model_chunk_id = bwd_model_chunk_id, fwd_model_chunk_id
         prev_step_backward_only = only_bwd
+        num_bw_steps += 1
 
     # Run cooldown phases
     if not forward_only:
@@ -1153,7 +1304,6 @@ def forward_backward_pipelining_with_cutinhalf(
                 config.grad_sync_func[slave_chunk_id](model[slave_chunk_id].parameters())
                 disable_grad_sync()
 
-        chunk_backward_dw_funcs = []
         for i in range(schedule['cooldown'][rank][0]):
             wait_comm_handle(bwd_wait_recv_handles[bwd_model_chunk_id])
 
@@ -1162,6 +1312,13 @@ def forward_backward_pipelining_with_cutinhalf(
                 block_level_wgrad_compute=True,
             )
             chunk_backward_dw_funcs.append((chunk_backward_dw_func, i == schedule['cooldown'][rank][0] - 1))
+
+            num_bw_steps += 1
+            if (num_bw_steps + rank) % 2 == 0:
+                input_embedding_backward_step_helper(
+                    num_microbatches - num_input_embedding_backward_steps_remaining
+                )()
+                num_input_embedding_backward_steps_remaining -= 1
 
             if is_pp_last_stage(p2p_communicator.pp_group) and bwd_model_chunk_id == slave_chunk_id:
                 output_tensor_grad = input_tensor_grad
@@ -1192,6 +1349,13 @@ def forward_backward_pipelining_with_cutinhalf(
             )
             chunk_backward_dw_funcs.append((chunk_backward_dw_func, False))
 
+            num_bw_steps += 1
+            if (num_bw_steps + rank) % 2 == 0:
+                input_embedding_backward_step_helper(
+                    num_microbatches - num_input_embedding_backward_steps_remaining
+                )()
+                num_input_embedding_backward_steps_remaining -= 1
+
             bwd_wait_handles = p2p_communicator.send_backward(input_tensor_grad, tensor_shape, master_chunk_id, async_op=True)
             bwd_wait_send_handles[master_chunk_id] = get_send_handle(bwd_wait_handles, master_chunk_id, forward=False)
             # weight backward
@@ -1199,6 +1363,14 @@ def forward_backward_pipelining_with_cutinhalf(
             if chunk_backward_dw_func is not None:
                 chunk_backward_dw_func()
                 del chunk_backward_dw_func
+
+            num_bw_steps += 1
+            if (num_bw_steps + rank) % 2 == 0:
+                input_embedding_backward_step_helper(
+                    num_microbatches - num_input_embedding_backward_steps_remaining
+                )()
+                num_input_embedding_backward_steps_remaining -= 1
+
             wait_comm_handle(bwd_wait_send_handles[master_chunk_id])
 
             if is_last_slave_chunk:
@@ -1218,6 +1390,14 @@ def forward_backward_pipelining_with_cutinhalf(
             if chunk_backward_dw_func is not None:
                 chunk_backward_dw_func()
                 del chunk_backward_dw_func
+
+            num_bw_steps += 1
+            if (num_bw_steps + rank) % 2 == 0:
+                input_embedding_backward_step_helper(
+                    num_microbatches - num_input_embedding_backward_steps_remaining
+                )()
+                num_input_embedding_backward_steps_remaining -= 1
+
             if is_last_slave_chunk:
                 # Launch grad reductions.
                 if config.grad_sync_func is not None:
@@ -1225,10 +1405,16 @@ def forward_backward_pipelining_with_cutinhalf(
                     config.grad_sync_func[slave_chunk_id](model[slave_chunk_id].parameters())
                     disable_grad_sync()
 
+        if num_input_embedding_backward_steps_remaining > 0:
+            input_embedding_backward_step_helper(
+                num_microbatches - num_input_embedding_backward_steps_remaining
+            )()
+
     # launch any remaining grad reductions.
     if config.grad_sync_func is not None:
         enable_grad_sync()
         config.grad_sync_func[master_chunk_id](model[master_chunk_id].parameters())
+        config.grad_sync_func[3](model[3].parameters())
 
     if config.finalize_model_grads_func is not None and not forward_only:
         # If defer_embedding_wgrad_compute is enabled we need to do the

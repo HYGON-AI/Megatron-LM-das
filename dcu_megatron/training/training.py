@@ -219,26 +219,41 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                 this_model.vp_stage = i
                 model.append(this_model)
 
-        elif args.enable_vocab_parallel:
-            pre_process = is_pp_first_stage(pg_collection.pp)
-
-            model = [
-                model_provider_func(
-                    pre_process=pre_process,
+        elif args.schedule_method == "dualpipev":
+            model = []
+            if args.enable_vocab_parallel:
+                args.dualpipev_first_chunk = True
+                first_model = model_provider_func(
+                    pre_process=is_pp_first_stage(pg_collection.pp),
                     post_process=False,
+                    vp_stage=0,
                     config=config,
                     pg_collection=pg_collection,
-                    split_vocab_embedding=pre_process,
-                    include_layer_norm=is_pp_last_stage(pg_collection.pp),
-                ),
-                model_provider_func(
+                    split_vocab_embedding=is_pp_first_stage(pg_collection.pp),
+                )
+                model.append(first_model)
+
+                args.dualpipev_first_chunk = False
+                second_model = model_provider_func(
+                    pre_process=False,
+                    post_process=False,
+                    vp_stage=1,
+                    config=config,
+                    pg_collection=pg_collection,
+                    include_layer_norm=is_pp_first_stage(pg_collection.pp),
+                )
+                model.append(second_model)
+
+                output_chunk = model_provider_func(
                     pre_process=False,
                     post_process=True,
                     config=config,
                     pg_collection=pg_collection,
                     noop_block=True,
-                ),
-                model_provider_func(
+                )
+                model.append(output_chunk)
+
+                embedding_chunk = model_provider_func(
                     pre_process=False,
                     post_process=False,
                     config=config,
@@ -246,25 +261,23 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                     split_vocab_embedding=True,
                     noop_block=True,
                 )
-            ]
-            model[0].model_type = model_type
-            model[1].model_type = model_type
-            model[2].model_type = model_type
-            if is_pp_last_stage(pg_collection.pp):
-                model.append(
-                    model_provider_func(
+                model.append(embedding_chunk)
+
+                if is_pp_first_stage(pg_collection.pp):
+                    loss_chunk = model_provider_func(
                         pre_process=False,
                         post_process=False,
                         config=config,
                         pg_collection=pg_collection,
                         noop_block=True,
                     )
-                )
-                model[3].model_type = model_type
+                    model.append(loss_chunk)
 
-        elif args.schedule_method == "dualpipev":
+                for chunk in model:
+                    chunk.model_type = model_type
 
-            model = []
+                return model
+
             args.dualpipev_first_chunk = True
             first_model = model_provider_func(
                 pre_process=is_pp_first_stage(pg_collection.pp),
@@ -288,6 +301,51 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             model.append(second_model)
 
         else:
+            if args.enable_vocab_parallel:
+                pre_process = is_pp_first_stage(pg_collection.pp)
+
+                model = [
+                    model_provider_func(
+                        pre_process=pre_process,
+                        post_process=False,
+                        config=config,
+                        pg_collection=pg_collection,
+                        split_vocab_embedding=pre_process,
+                        include_layer_norm=is_pp_last_stage(pg_collection.pp),
+                    ),
+                    model_provider_func(
+                        pre_process=False,
+                        post_process=True,
+                        config=config,
+                        pg_collection=pg_collection,
+                        noop_block=True,
+                    ),
+                    model_provider_func(
+                        pre_process=False,
+                        post_process=False,
+                        config=config,
+                        pg_collection=pg_collection,
+                        split_vocab_embedding=True,
+                        noop_block=True,
+                    )
+                ]
+                model[0].model_type = model_type
+                model[1].model_type = model_type
+                model[2].model_type = model_type
+                if is_pp_last_stage(pg_collection.pp):
+                    model.append(
+                        model_provider_func(
+                            pre_process=False,
+                            post_process=False,
+                            config=config,
+                            pg_collection=pg_collection,
+                            noop_block=True,
+                        )
+                    )
+                    model[3].model_type = model_type
+
+                return model
+
             pre_process = is_pp_first_stage(pg_collection.pp)
             post_process = is_pp_last_stage(pg_collection.pp)
             model = model_provider_func(
@@ -345,7 +403,34 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         config = get_model_config(model[0])
-        model = [Float16Module(config, model_module) for model_module in model]
+        if args.enable_vocab_parallel:
+            is_dualpipev = args.schedule_method == "dualpipev"
+            has_loss_chunk = False
+            if (
+                is_dualpipev and is_pp_first_stage(pg_collection.pp)
+                or (not is_dualpipev and is_pp_last_stage(pg_collection.pp))
+            ):
+                has_loss_chunk = True
+                loss_chunk = Float16Module(config, model[4] if is_dualpipev else model[3])
+
+            if is_dualpipev:
+                model = [
+                    Float16Module(config, model[0]),
+                    Float16Module(config, model[1]),
+                    Float16Module(config, model[2], force_output_fp32=True),
+                    Float16Module(config, model[3], is_embedding_chunk=True),
+                ]
+            else:
+                model = [
+                    Float16Module(config, model[0]),
+                    Float16Module(config, model[1], force_output_fp32=True),
+                    Float16Module(config, model[2], is_embedding_chunk=True),
+                ]
+
+            if has_loss_chunk:
+                model.append(loss_chunk)
+        else:
+            model = [Float16Module(config, model_module) for model_module in model]
 
         if args.enable_hyper_connections and args.mhc_use_tilekernels:
             for model_module in model:
