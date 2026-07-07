@@ -29,10 +29,11 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.training import get_args
 
 from ..combined_1f1b import combined_forward_backward_step
-from dcu_megatron.core.parallel_state import set_dualpipe_chunk
 from dcu_megatron.core.models.common.language_module.language_module import set_shared_embedding_from_dual_chunk
-from dcu_megatron.core.tensor_parallel.vocab_input_store import VocabInputStore
+from dcu_megatron.core.parallel_state import set_dualpipe_chunk
 from dcu_megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
+from dcu_megatron.core.tensor_parallel.vocab_input_store import VocabInputStore
+from dcu_megatron.core.transformer.enums import DualpipeVChunkType
 
 
 # Types
@@ -40,7 +41,8 @@ Shape = Union[List[int], torch.Size]
 
 
 def is_dualpipev_last_stage(model_chunk_id, is_first_stage):
-    return is_first_stage and model_chunk_id == (4 if get_args().enable_vocab_parallel else 1)
+    loss_chunk = DualpipeVChunkType.loss if get_args().enable_vocab_parallel else DualpipeVChunkType.second_block
+    return is_first_stage and model_chunk_id == loss_chunk.value
 
 
 class DualpipeVP2PCommunicator(P2PCommunicator):

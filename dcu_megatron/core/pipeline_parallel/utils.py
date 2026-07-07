@@ -177,3 +177,21 @@ class ScheduleNode():
         self.outputs = None
         del self.forward_func
         del self.backward_func
+
+
+LM_HEAD_RES_REDUCE_STREAM = None
+
+def get_lm_head_res_reduce_stream():
+    global LM_HEAD_RES_REDUCE_STREAM
+    return LM_HEAD_RES_REDUCE_STREAM
+
+
+def set_lm_head_res_reduce_stream(stream=None):
+    global LM_HEAD_RES_REDUCE_STREAM
+    if LM_HEAD_RES_REDUCE_STREAM is not None:
+        return
+
+    if stream is None:
+        stream = torch.cuda.Stream(device="cuda")
+
+    LM_HEAD_RES_REDUCE_STREAM = stream

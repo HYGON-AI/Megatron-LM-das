@@ -42,7 +42,7 @@ from dcu_megatron.core.parallel_state import (
 from ..utils import get_lm_head_res_reduce_stream, set_lm_head_res_reduce_stream
 from dcu_megatron.core.tensor_parallel.vocab_output_store import VocabOutputStore
 from dcu_megatron.core.tensor_parallel.vocab_input_store import VocabInputStore
-from dcu_megatron.training.utils import print_rank_message
+from dcu_megatron.core.transformer.enums import DualpipeVChunkType
 
 
 # Types
@@ -184,8 +184,8 @@ def forward_backward_pipelining_with_cutinhalf(
     output_tensors = [[], [], [], []]
     output_tensor_grads = [[], [], [], []]
 
-    master_chunk_id = 0
-    slave_chunk_id = 1
+    master_chunk_id = DualpipeVChunkType.first_block.value
+    slave_chunk_id = DualpipeVChunkType.second_block.value
     cur_fwd_chunk_microbatch = [0, num_microbatches]
     cur_bwd_chunk_microbatch = [0, num_microbatches]
     num_chunk_max_microbatch = [num_microbatches, num_microbatches * 2]
@@ -200,9 +200,9 @@ def forward_backward_pipelining_with_cutinhalf(
     comm_wait_tensor = torch.Tensor([0]).cuda()
     comm_wait_tensor.record_stream(get_lm_head_res_reduce_stream())
 
-    embedding_model_chunk_id = 3
-    output_model_chunk_id = 2
-    loss_model_chunk_id = 4
+    embedding_model_chunk_id = DualpipeVChunkType.embedding.value
+    output_model_chunk_id = DualpipeVChunkType.ouput.value
+    loss_model_chunk_id = DualpipeVChunkType.loss.value
 
     def input_embedding_forward_step_helper(
         microbatch_id,
@@ -295,7 +295,7 @@ def forward_backward_pipelining_with_cutinhalf(
 
             try:
                 backward_step(
-                    input_tensor, output_tensor, output_tensor_grad, model_type, config,
+                    input_tensor, output_tensor, output_tensor_grad, config,
                 )
             except Exception as e:
                 raise Exception(f"{e} {input_tensor=}, {output_tensor=}, {output_tensor_grad=}")
@@ -433,7 +433,7 @@ def forward_backward_pipelining_with_cutinhalf(
             VocabOutputStore.backward_store(sum_exp_logits, logits_max, grad_output[0])
 
             grad_input = backward_step(
-                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], model_type, config,
+                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], config,
             )
 
         if microbatch_id < num_microbatches:
@@ -569,7 +569,7 @@ def forward_backward_pipelining_with_cutinhalf(
 
         if not forward_only:
             output_tensor_grad = backward_step(
-                input_tensor, output_tensor, [None], model_type, config,
+                input_tensor, output_tensor, [None], config,
             )
         else:
             output_tensor_grad = [None]
