@@ -89,8 +89,7 @@ def _add_extra_network_size_args(parser):
     group.add_argument('--normalization', default='LayerNorm',
                        choices=['LayerNorm', 'RMSNorm', 'LightopRMSNorm'],
                        help='Which normalization technique to use.')
-    group.add_argument('--use-qk-norm', action='store_true',default=False,
-                       help='Enable RMSNorm on Q, K before RoPE')
+
     return parser
 
 
