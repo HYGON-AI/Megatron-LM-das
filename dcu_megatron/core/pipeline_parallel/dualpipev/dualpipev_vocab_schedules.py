@@ -295,7 +295,7 @@ def forward_backward_pipelining_with_cutinhalf(
 
             try:
                 backward_step(
-                    input_tensor, output_tensor, output_tensor_grad, model_type, config,
+                    input_tensor, output_tensor, output_tensor_grad, config,
                 )
             except Exception as e:
                 raise Exception(f"{e} {input_tensor=}, {output_tensor=}, {output_tensor_grad=}")
@@ -433,7 +433,7 @@ def forward_backward_pipelining_with_cutinhalf(
             VocabOutputStore.backward_store(sum_exp_logits, logits_max, grad_output[0])
 
             grad_input = backward_step(
-                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], model_type, config,
+                input_tensor, output_tensor, [grad_output[0].transpose(0, 1)], config,
             )
 
         if microbatch_id < num_microbatches:
@@ -569,7 +569,7 @@ def forward_backward_pipelining_with_cutinhalf(
 
         if not forward_only:
             output_tensor_grad = backward_step(
-                input_tensor, output_tensor, [None], model_type, config,
+                input_tensor, output_tensor, [None], config,
             )
         else:
             output_tensor_grad = [None]
