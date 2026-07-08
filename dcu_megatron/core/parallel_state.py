@@ -14,7 +14,6 @@ from megatron.core import parallel_state
 from megatron.core.parallel_state import (
     RankGenerator,
     overwrite_nccl_comm_cfgs,
-    get_nccl_options,
 )
 
 
@@ -49,6 +48,46 @@ _FUNC_NAME_DICT = {
     'isend' : 'send_recv_pp', 
     'irecv' : 'send_recv_pp', 
 }
+
+
+def get_nccl_options(pg_name, nccl_comm_cfgs):
+    """Set the NCCL process group options.
+
+    Args:
+        pg_name (str): process group name
+        nccl_comm_cfgs (dict): nccl communicator configurations
+    When an option (e.g., max_ctas) is not found in the config, use the NCCL default setting.
+    """
+    nccl_options = None
+    if get_args().enable_vocab_parallel:
+        nccl_options = torch.distributed.ProcessGroupNCCL.Options()
+    if pg_name in nccl_comm_cfgs:
+        # When fields in nccl_options.config are not specified, NCCL applies default settings.
+        # The default values for Hopper GPUs are as follows:
+        # cga_cluster_size = 4, max_ctas = 32, min_ctas = 1
+        # Default values may differ between GPU generations and NCCL versions.
+        if nccl_options is None:
+            nccl_options = torch.distributed.ProcessGroupNCCL.Options(
+                is_high_priority_stream=nccl_comm_cfgs[pg_name].get("is_high_priority_stream", False)
+            )
+        if "cga_cluster_size" in nccl_comm_cfgs[pg_name]:
+            nccl_options.config.cga_cluster_size = nccl_comm_cfgs[pg_name]["cga_cluster_size"]
+        if "max_ctas" in nccl_comm_cfgs[pg_name]:
+            nccl_options.config.max_ctas = nccl_comm_cfgs[pg_name]["max_ctas"]
+        if "min_ctas" in nccl_comm_cfgs[pg_name]:
+            nccl_options.config.min_ctas = nccl_comm_cfgs[pg_name]["min_ctas"]
+        if "net_name" in nccl_comm_cfgs[pg_name]:
+            nccl_options.config.net_name = nccl_comm_cfgs[pg_name]["net_name"]
+            # verify net_name value
+            if nccl_options.config.net_name.lower() not in ["ib", "socket"]:
+                raise RuntimeError(
+                    f"net_name ({nccl_options.config.net_name}) is not supported."
+                    f"Accepted values: 'IB' or 'socket'."
+                )
+
+    if get_args().enable_vocab_parallel and pg_name == "pp":
+        nccl_options.is_high_priority_stream = True
+    return nccl_options
 
 
 def create_group(

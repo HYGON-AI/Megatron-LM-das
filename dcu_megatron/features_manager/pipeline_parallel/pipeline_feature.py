@@ -309,13 +309,15 @@ class PipelineFeature(AbstractFeature):
                                               PipelineParallelLayerLayoutDualpipeV.get_num_stages_from_str])
 
         if args.enable_vocab_parallel:
-            from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper
+            from dcu_megatron.core.parallel_state import destroy_model_parallel_wrapper, get_nccl_options
             from dcu_megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
             from dcu_megatron.core.transformer.module import Float16Module
 
             patch_manager.register_patch('megatron.core.parallel_state.destroy_model_parallel',
                                         destroy_model_parallel_wrapper,
                                         create_dummy=True)
+            patch_manager.register_patch('megatron.core.parallel_state.get_nccl_options',
+                                        get_nccl_options)
             patch_manager.register_cls_funcs('megatron.core.pipeline_parallel.p2p_communication.P2PCommunicator',
                                              [P2PCommunicator._communicate,
                                               P2PCommunicator.recv_forward,

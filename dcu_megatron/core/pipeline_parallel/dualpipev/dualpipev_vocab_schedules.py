@@ -201,7 +201,7 @@ def forward_backward_pipelining_with_cutinhalf(
     comm_wait_tensor.record_stream(get_lm_head_res_reduce_stream())
 
     embedding_model_chunk_id = DualpipeVChunkType.embedding.value
-    output_model_chunk_id = DualpipeVChunkType.ouput.value
+    output_model_chunk_id = DualpipeVChunkType.output.value
     loss_model_chunk_id = DualpipeVChunkType.loss.value
 
     def input_embedding_forward_step_helper(
