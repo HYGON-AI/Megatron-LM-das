@@ -45,7 +45,6 @@ from megatron.core.pipeline_parallel.utils import (
 from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 from megatron.core.timers import Timer
 
-from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
 from .ripipe_schedules import forward_backward_ripipe_pipelining
 from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
 from dcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
@@ -75,6 +74,10 @@ def get_forward_backward_func_wrapper(fn):
 
             return fn(pp_size=pp_size, vp_size=vp_size)
         elif args.schedule_method == "dualpipev":
+            if args.enable_vocab_parallel:
+                from .dualpipev.dualpipev_vocab_schedules import forward_backward_pipelining_with_cutinhalf
+            else:
+                from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
             return forward_backward_pipelining_with_cutinhalf
         elif args.schedule_method == "seq1f1b":
             return seq1f1b_forward_backward_pipelining_without_interleaving

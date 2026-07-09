@@ -133,14 +133,21 @@ def get_shared_embedding_from_dual_chunk():
     return _SHARED_EMBEDDING
 
 
-def set_shared_embedding_from_dual_chunk(model1, model2):
+def set_shared_embedding_from_dual_chunk(model1, model2, enable_vocab_parallel=False):
     global _SHARED_EMBEDDING
     if _SHARED_EMBEDDING is not None:
         return
 
     model1 = unwrap_model(model1)
     model2 = unwrap_model(model2)
-    if model1.pre_process:
-        _SHARED_EMBEDDING = model1.embedding.word_embeddings.weight
-    elif model2.pre_process:
-        _SHARED_EMBEDDING = model2.embedding.word_embeddings.weight
+
+    if enable_vocab_parallel:
+        if model1.split_vocab_embedding:
+            _SHARED_EMBEDDING = model1.embedding.word_embeddings.weight
+        elif model2.split_vocab_embedding:
+            _SHARED_EMBEDDING = model2.embedding.word_embeddings.weight
+    else:
+        if model1.pre_process:
+            _SHARED_EMBEDDING = model1.embedding.word_embeddings.weight
+        elif model2.pre_process:
+            _SHARED_EMBEDDING = model2.embedding.word_embeddings.weight

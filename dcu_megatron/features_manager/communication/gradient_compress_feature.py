@@ -33,8 +33,12 @@ class GradientCompressFeature(AbstractFeature):
 
     def register_patches(self, patch_manager, args):
         from dcu_megatron.core.distributed.finalize_model_grads import finalize_model_grads
-        from dcu_megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup, _ParamAndGradBuffer, \
-            _ParamAndGradBucket
+        from dcu_megatron.core.distributed.param_and_grad_buffer import (
+            _param_and_grad_bucket_init_wrapper,
+            _param_and_grad_bucket_group_init_wrapper,
+            _ParamAndGradBucketGroup,
+            _ParamAndGradBuffer,
+        )
         from dcu_megatron.training.training import save_checkpoint_and_time_wrapper
         from dcu_megatron.training.initialize import initialize_megatron_wrapper
 
@@ -43,13 +47,16 @@ class GradientCompressFeature(AbstractFeature):
             patch_manager.register_patch('megatron.core.distributed.finalize_model_grads.finalize_model_grads',
                                         finalize_model_grads)
             patch_manager.register_cls_funcs('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup',
-                                             [_ParamAndGradBucketGroup.__init__,
-                                              _ParamAndGradBucketGroup.start_grad_sync,
+                                             [_ParamAndGradBucketGroup.start_grad_sync,
                                               _ParamAndGradBucketGroup.finish_grad_sync,])
             patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer._new_bucket',
                                         _ParamAndGradBuffer._new_bucket)
-            patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucket',
-                                        _ParamAndGradBucket)
+            patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucket.__init__',
+                                        _param_and_grad_bucket_init_wrapper,
+                                        apply_wrapper=True)
+            patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup.__init__',
+                                        _param_and_grad_bucket_group_init_wrapper,
+                                        apply_wrapper=True)
 
             patch_manager.register_patch('megatron.training.training.save_checkpoint_and_time',
                                         save_checkpoint_and_time_wrapper,

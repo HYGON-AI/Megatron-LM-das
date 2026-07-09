@@ -9,6 +9,7 @@ from .recompute.activation_function import RecomputeActivationFeature
 from .basic.megatron_basic import MegatronBasicFeature
 from .basic.minimum_basic import MinimumBasicFeature
 from .transformer.hyper_connection_feature import HyperConnectionFeature
+from .moe.sync_free_moe_feature import SyncFreeMoeFeature
 
 ADAPTOR_FEATURES = [
     PipelineFeature(),
@@ -22,4 +23,5 @@ ADAPTOR_FEATURES = [
     MegatronBasicFeature(),
     MinimumBasicFeature(),
     HyperConnectionFeature(),
+    SyncFreeMoeFeature(),
 ]

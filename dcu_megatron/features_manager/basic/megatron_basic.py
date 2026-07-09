@@ -59,6 +59,7 @@ class MegatronBasicFeature(AbstractFeature):
 
     def register_core_distributed_patches(self, patch_manager, args):
         from dcu_megatron.core.distributed.param_and_grad_buffer import _ParamAndGradBucketGroup
+
         patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup.finish_grad_sync',
             _ParamAndGradBucketGroup.finish_grad_sync)
         patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup.start_grad_sync',

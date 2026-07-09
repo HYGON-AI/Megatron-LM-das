@@ -2,15 +2,18 @@
 
 import logging
 from contextlib import nullcontext
-from typing import List, Optional, Tuple
+from functools import wraps
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch.distributed import _coalescing_manager
 
-from megatron.core.utils import log_single_rank
-from megatron.core.distributed.param_and_grad_buffer import BufferType, shard_buffer
+from megatron.core.distributed.param_and_grad_buffer import (
+    BufferType,
+    _ParamAndGradBucket,
+    shard_buffer,
+)
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
-from megatron.core.distributed.reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accumulation
 from megatron.core.distributed.param_and_grad_buffer import dist_reduce_scatter_func
 from megatron.training.global_vars import get_args
 from megatron.training import get_timers
@@ -18,23 +21,9 @@ from megatron.training import get_timers
 logger = logging.getLogger(__name__)
 
 
-class _ParamAndGradBucket:
-    """
-    Bucket to keep track of a subset of the model's parameters and gradients.
-
-    Args:
-        params: List of parameters whose gradients are collated in this bucket.
-        param_data: View in _ParamAndGradBuffer.param_data that this bucket is responsible for.
-        grad_data: View in _ParamAndGradBuffer.grad_data that this bucket is responsible for.
-        offset: Offset of this bucket's view in the larger _ParamAndGradBuffer.
-        numel_unpadded: Number of unpadded elements in bucket.
-        gradient_scaling_factor: This factor is utilized to scale gradients prior to their
-            communication. Its application is twofold: it facilitates the averaging of gradients
-            and the scaling of gradients in the context of the Mixture of Experts (MoE) model.
-        bucket_id: Index of bucket in buffer.
-    """
-
-    def __init__(
+def _param_and_grad_bucket_init_wrapper(_param_and_grad_bucket_init_func):
+    @wraps(_param_and_grad_bucket_init_func)
+    def wrapper(
         self,
         params: List[torch.nn.Parameter],
         param_data: Optional[torch.Tensor],
@@ -43,117 +32,53 @@ class _ParamAndGradBucket:
         numel_unpadded: int,
         gradient_scaling_factor: float,
         bucket_id: int,
+        param_index_map: Dict[torch.nn.Parameter, tuple],
+        params_with_extra_main_grads: List[torch.nn.Parameter],
         components: Optional[List[Tuple[torch.nn.Parameter, int, torch.Size]]] = None,
     ):
-        self.params_list = params
-        self.params = set(params)
-        # Make sure there are no duplicate params.
-        assert len(self.params_list) == len(self.params)
-        self.param_data = param_data
-        self.grad_data = grad_data
-        # The distributed optimizer needs to keep track of this bucket's offset
-        # within the full grad_buffer.
-        self.offset = offset
-        self.numel_unpadded = numel_unpadded
-        self.gradient_scaling_factor = gradient_scaling_factor
-        self.bucket_id = bucket_id
+        _param_and_grad_bucket_init_func(
+            self,
+            params,
+            param_data,
+            grad_data,
+            offset,
+            numel_unpadded,
+            gradient_scaling_factor,
+            bucket_id,
+            param_index_map,
+            params_with_extra_main_grads,
+        )
+
         if components is not None:
             self.components = components
         else:
             self.components = []
 
+    return wrapper
 
-class _ParamAndGradBucketGroup:
-    """
-    Put multiple buckets into a group so that their communications can be aggregated together.
-    Provides functionality to register when params in the bucket group have grads ready to be
-    synced; an asynchronous communication call is automatically launched when _all_ params in
-    the bucket group have grads ready.
 
-    Args:
-        buckets: A list of buckets.
-        ddp_config: DistributedDataParallel config object.
-        collective_group: intra_distributed_optimizer_instance_group if using distributed
-            optimizer, data_parallel_group if not.
-        collective_group_size: World size using the intra data-parallel group.
-    """
-
-    def __init__(
+def _param_and_grad_bucket_group_init_wrapper(_param_and_grad_bucket_group_init_func):
+    @wraps(_param_and_grad_bucket_group_init_func)
+    def wrapper(
         self,
         buckets: List[_ParamAndGradBucket],
         ddp_config: DistributedDataParallelConfig,
         collective_group: torch.distributed.ProcessGroup,
         collective_group_size: int,
     ):
-        self.buckets = buckets
-        self.ddp_config = ddp_config
+        _param_and_grad_bucket_group_init_func(
+            self,
+            buckets,
+            ddp_config,
+            collective_group,
+            collective_group_size,
+        )
         self.timers = get_timers()
 
-        if self.ddp_config.use_distributed_optimizer:
-            self.intra_distributed_optimizer_instance_group = collective_group
-            self.intra_distributed_optimizer_instance_size = collective_group_size
-            self.intra_distributed_optimizer_instance_rank = collective_group.rank()
-        else:
-            self.data_parallel_group = collective_group
+    return wrapper
 
-        # State for bookkeeping: params is the set of parameters this bucket group is
-        # responsible for, param_to_bucket maps params to the corresponding bucket.
-        self.param_to_bucket = {}
-        self.params = set()
-        for bucket in self.buckets:
-            for param in bucket.params_list:
-                self.param_to_bucket[param] = bucket
-                self.params.add(param)
 
-        self.next_param_gather_bucket_group = None
-
-        if self.ddp_config.num_distributed_optimizer_instances > 1:
-            self.inter_distributed_optimizer_instance_group = None
-            self.communication_stream = None
-            assert (
-                not self.ddp_config.reduce_scatter_with_fp32_accumulation
-            ), "RS w/ FP32 accumulation not supported with num_distributed_optimizer_instances > 1"
-
-        global dist_reduce_scatter_func
-        if self.ddp_config.reduce_scatter_with_fp32_accumulation:
-            dist_reduce_scatter_func = reduce_scatter_with_fp32_accumulation
-            log_single_rank(
-                logger,
-                logging.INFO,
-                "Using reduce_scatter_with_fp32_accumulation as reduce-scatter implementation",
-            )
-
-        # per_param_grad_ready_counts is a dict mapping parameters to number of times
-        # `register_grad_ready` is called for that parameter *when
-        # self.is_last_microbatch is True*. Should be 1 for most params but could be greater
-        # than 1 if control flow passes through the same parameter multiple times. We lazily
-        # populate this in the first batch, hence the .is_first_batch attribute.
-        # When overlap_grad_reduce is True, communication (all-reduce or reduce-scatter)
-        # is issued when per_param_grad_ready_counts equals golden_per_param_grad_ready_counts.
-        # In other words, communication is dispatched as soon as all gradients in this bucket
-        # are *ready*, as marked by the backward hook.
-        # The set of keys in per_param_grad_ready_counts should be equal to `params`.
-        self.golden_per_param_grad_ready_counts = {}
-        self.per_param_grad_ready_counts = {}
-        self.is_last_microbatch = True
-        self.is_first_batch = True
-
-        # Other metadata to keep track of collectives.
-        self.param_gather_handle = None
-        self.param_gather_dispatched = False
-        self.grad_reduce_handle = None
-
-        # Each time a local shard is created from bucket.param_data or bucket.grad_data, it
-        # introduces some CPU overheads. We use these two lists to cache the created local
-        # shards to avoid unnecessary CPU operations. This does not increase GPU memory usage
-        # because it only saves a slice view, which shares the same memory with bucket.param_data
-        # or bucket.grad_data.
-        self.cached_param_buffer_shard_list = [None] * len(self.buckets)
-        self.cached_grad_buffer_shard_list = [None] * len(self.buckets)
-
-        self.initial_error = False
-        self.max_rank_error = 0.0
-        self.min_rank_error = 0.0
+class _ParamAndGradBucketGroup:
 
     def start_grad_sync(self, force_all_reduce: Optional[bool] = False):
         """
@@ -173,6 +98,14 @@ class _ParamAndGradBucketGroup:
         assert (
             self.grad_reduce_handle is None
         ), "Should not have multiple communication calls outstanding at once"
+
+        # Copy accumulated .main_grad into communication buffer before collective if
+        # .main_grad is not in .grad_data already (e.g., because we want to do local
+        # gradient accumulation in a higher precision).
+        for bucket in self.buckets:
+            for param in bucket.params_with_extra_main_grads:
+                if getattr(param, 'main_grad_copy_in_grad_buffer', None) is not None:
+                    param.main_grad_copy_in_grad_buffer.copy_(param.main_grad)
 
         if self.ddp_config.check_for_nan_in_grad or self.ddp_config.check_for_large_grads:
             self.check_grads(
@@ -211,10 +144,10 @@ class _ParamAndGradBucketGroup:
             # need to overlap communication.
             stream_context = torch.cuda.stream(self.communication_stream)
 
-            # The RS/AR communication stream needs to wait for the default stream
+            # The RS/AR communication stream needs to wait for the current stream
             # to complete its gradient computation before launching the next
             # gradient reduction collective.
-            self.communication_stream.wait_stream(torch.cuda.default_stream())
+            self.communication_stream.wait_stream(torch.cuda.current_stream())
         else:
             stream_context = nullcontext()
 
@@ -346,6 +279,7 @@ class _ParamAndGradBucketGroup:
         # If overlap_grad_reduce is False, start (and finish) synchronous communication call here.
         if not self.ddp_config.overlap_grad_reduce:
             self.start_grad_sync(force_all_reduce=force_all_reduce)
+            self._copy_back_extra_main_grads()
             return
         # If first batch, start asynchronous communication here. register_grad_ready() launches
         # asynchronous communication only once self.golden_per_param_grad_ready_counts is
@@ -355,7 +289,8 @@ class _ParamAndGradBucketGroup:
         # When using multiple DistOpt instances, we don't need to sync here as we launch
         # communications on a separate communication stream.
         if self.ddp_config.num_distributed_optimizer_instances > 1:
-            torch.cuda.default_stream().wait_stream(self.communication_stream)
+            torch.cuda.current_stream().wait_stream(self.communication_stream)
+            self._copy_back_extra_main_grads()
             return
 
         if self.grad_reduce_handle is None:
@@ -381,6 +316,8 @@ class _ParamAndGradBucketGroup:
             self.grad_reduce_handle.wait()
             self.grad_reduce_handle = None
 
+        self._copy_back_extra_main_grads()
+
 
 class _ParamAndGradBuffer:
 
@@ -391,6 +328,7 @@ class _ParamAndGradBuffer:
         end_index: int,
         numel_unpadded: int,
         bucket_id: int,
+        bucket_params_with_extra_main_grads: List[torch.Tensor],
     ) -> _ParamAndGradBucket:
         """
         Helper function that creates a new bucket. Also updates param->bucket mapping.
@@ -432,6 +370,8 @@ class _ParamAndGradBuffer:
             numel_unpadded=numel_unpadded,
             gradient_scaling_factor=self.gradient_scaling_factor,
             bucket_id=bucket_id,
+            param_index_map=self.param_index_map,
+            params_with_extra_main_grads=bucket_params_with_extra_main_grads,
             components=components,
         )
         for bucket_param in bucket_params:
