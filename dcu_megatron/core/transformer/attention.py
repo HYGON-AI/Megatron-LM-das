@@ -2,7 +2,6 @@ from typing import Optional, Tuple, Union
 from functools import wraps
 
 import torch
-import transformer_engine as te
 from torch import Tensor
 from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_attn_varlen_backward
 
@@ -1009,37 +1008,3 @@ class Attention():
         nvtx_range_pop(suffix="linear_proj")
 
         return output, bias
-
-
-def self_attention_get_query_key_value_tensors_wrapper(func):
-    @wraps(func)
-    def wrapper(
-        self,
-        hidden_states: Tensor,
-        key_value_states: Tensor | None = None,
-        output_gate: bool = False,
-        split_qkv: bool = True,
-    ):
-        output = func(
-            self,
-            hidden_states=hidden_states,
-            key_value_states=key_value_states,
-            output_gate=output_gate,
-            split_qkv=split_qkv
-        )
-        if output_gate:
-            query, key, value, gate = output
-        else:
-            query, key, value = output
-
-        if self.config.use_qk_norm:
-            qk_norm = te.pytorch.RMSNorm(normalized_shape=query.shape[-1]).cuda()
-            query = qk_norm(query).type_as(query)
-            key = qk_norm(key).type_as(key)
-
-        if output_gate:
-            return query, key, value, gate
-        else:
-            return query, key, value
-
-    return wrapper

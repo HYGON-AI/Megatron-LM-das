@@ -93,7 +93,7 @@ class MegatronBasicFeature(AbstractFeature):
     def register_core_transformers_patches(self, patch_manager, args):
         from dcu_megatron.core.transformer.transformer_config import transformer_config_post_init_wrapper
         from dcu_megatron.core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
-        from dcu_megatron.core.transformer.attention import attention_init_wrapper, self_attention_get_query_key_value_tensors_wrapper
+        from dcu_megatron.core.transformer.attention import attention_init_wrapper
         from dcu_megatron.core.transformer.moe.experts import TEGroupedMLP
 
         # Transformer config, add new params
@@ -104,10 +104,6 @@ class MegatronBasicFeature(AbstractFeature):
                                     moe_layer_init_wrapper)
         patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
                                     moe_layer_forward_wrapper)
-        # use_qk_norm
-        patch_manager.register_patch('megatron.core.transformer.attention.SelfAttention.get_query_key_value_tensors',
-                                    self_attention_get_query_key_value_tensors_wrapper,
-                                    apply_wrapper=True)
         # fused gelu and mul
         patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
                                     TEGroupedMLP.forward)
