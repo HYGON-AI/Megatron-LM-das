@@ -59,10 +59,10 @@ try:
 except ImportError:
     has_nvidia_modelopt = False
 
-from dcu_megatron.core.parallel_state import get_virtual_vocab_parallel_chunk
-from dcu_megatron.core.transformer.enums import DualpipeVChunkType
+from hcu_megatron.core.parallel_state import get_virtual_vocab_parallel_chunk
+from hcu_megatron.core.transformer.enums import DualpipeVChunkType
 from input_store import InputStore
-from dcu_megatron import megatron_adaptor
+from hcu_megatron import megatron_adaptor
 
 stimer = StragglerDetector()
 

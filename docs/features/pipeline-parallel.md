@@ -1,5 +1,5 @@
 ## 流水线并行
-dcu megatron对megatron已有流水线调度策略进行了优化，并提供一些额外的流水线方法。
+hcu megatron对megatron已有流水线调度策略进行了优化，并提供一些额外的流水线方法。
 
 ### 背景
 在interleaved 1f1b的稳态阶段，前/反向计算交替执行。针对moe模型，如果训练时开启ep并行，ep间的a2a通信耗时会在端到端时间中占据相当比重，对训练效率造成很大影响，如下图所示。
@@ -29,7 +29,7 @@ dcu megatron对megatron已有流水线调度策略进行了优化，并提供一
 </figure>
 
 ### interleaved 1f1b支持moe a2a overlap
-dcu megatron支持基于interleaved 1f1b的moe a2a overlap，如需使用该特性，训练时需要在脚本中增加以下参数：
+hcu megatron支持基于interleaved 1f1b的moe a2a overlap，如需使用该特性，训练时需要在脚本中增加以下参数：
 ```
 --overlap-moe-expert-parallel-comm
 ```
@@ -61,21 +61,21 @@ export NVTE_OVERLAP_GRAD_REDUCE=1
 ```
 
 ### 拆分attn，缓解tp与ep竞争
-针对图2中的调度排布，如果训练时同时开启tp和ep，ep会与attn部分的tp重叠，为了解决该问题，dcu megatron将attn部分拆分为三部分：（1）qkv计算，（2）core attn计算和（3）proj计算，并重新组织调度排布，如下图所示。
+针对图2中的调度排布，如果训练时同时开启tp和ep，ep会与attn部分的tp重叠，为了解决该问题，hcu megatron将attn部分拆分为三部分：（1）qkv计算，（2）core attn计算和（3）proj计算，并重新组织调度排布，如下图所示。
 <figure style="text-align:center;">
   <img src=../source/images/moe_a2a_overlap_split_attn.png alt="示例图" style="width: 70%; height: auto;"/>
   <figcaption>
   图5. attn计算拆分为三部分
   </figcaption>
 </figure>
-dcu megatron默认使用该调度方案。如考虑使用图2中的调度方案(megatron v0.14及后续版本提供)，需要在训练脚本中增加以下参数:  
+hcu megatron默认使用该调度方案。如考虑使用图2中的调度方案(megatron v0.14及后续版本提供)，需要在训练脚本中增加以下参数:
 
 ```
 --overlap-ep-comm-with-split-attn
 ```
 
 ### dualpipev流水线
-dcu megatron提供dualpipev流水线调度，每个stage上有两个模型chunk，如下图所示。
+hcu megatron提供dualpipev流水线调度，每个stage上有两个模型chunk，如下图所示。
 <figure style="text-align:center;">
   <img src=../source/images/dualpipev.png alt="示例图"/>
   <figcaption>
@@ -105,7 +105,7 @@ dualpipev可通过指定每个stage中transformer层数的方式对网络进行�
 </figure>
 
 ### ZB-H1流水线
-dcu megatron支持ZB-H1流水线调度，通过拆分参数/激活值梯度计算，减少流水线气泡，具体见[Zero Bubble Pipeline Parallelism](https://github.com/sail-sg/zero-bubble-pipeline-parallelism/tree/zero-bubble-v0.1.0)。
+hcu megatron支持ZB-H1流水线调度，通过拆分参数/激活值梯度计算，减少流水线气泡，具体见[Zero Bubble Pipeline Parallelism](https://github.com/sail-sg/zero-bubble-pipeline-parallelism/tree/zero-bubble-v0.1.0)。
 ZB-H1流水线显存占用与1f1b流水线相同，在小batch情形下，训练性能有明显提升。使用该流水线调度时，需要在脚本中增加以下参数:
 ```
 --schedule-method zb_h1
@@ -116,7 +116,7 @@ ZB-H1流水线显存占用与1f1b流水线相同，在小batch情形下，训练
 2、不支持开启vp。
 
 ### 1f1b流水线优化
-dcu megatron支持对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能。
+hcu megatron支持对1f1b流水线cooldown阶段的参数/激活值梯度计算进行拆分，提升小batch情形下的训练性能。
 开启该特性，需要在脚本中增加以下参数:
 ```
 --delay-1f1b-cooldown-wgrad-compute

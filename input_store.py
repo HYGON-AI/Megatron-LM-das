@@ -1,8 +1,8 @@
 from megatron.core import mpu
 from megatron.training import get_args
 
-from dcu_megatron.core import parallel_state
-from dcu_megatron.core.transformer.enums import DualpipeVChunkType
+from hcu_megatron.core import parallel_state
+from hcu_megatron.core.transformer.enums import DualpipeVChunkType
 
 
 class InputStore:

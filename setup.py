@@ -2,13 +2,13 @@ import sys
 import setuptools
 
 if sys.version_info < (3,):
-    raise Exception("Python 2 is not supported by dcu-megatron.")
+    raise Exception("Python 2 is not supported by hcu-megatron.")
 
-__description__ = 'dcu-megatron of Sugon'
+__description__ = 'hcu-megatron of Sugon'
 __version__ = '0.17.0+das.opt1.dtk2604'
 __author__ = 'Sugon'
-__keywords__ = 'dcu-megatron, language, deep learning, NLP'
-__package_name__ = 'dcu-megatron'
+__keywords__ = 'hcu-megatron, language, deep learning, NLP'
+__package_name__ = 'hcu-megatron'
 __contact_names__ = 'Sugon'
 
 try:
@@ -42,7 +42,7 @@ setuptools.setup(
         'Operating System :: OS Independent',
     ],
     python_requires='>=3.8',
-    packages=setuptools.find_namespace_packages(include=["dcu_megatron", "dcu_megatron.*"]),
+    packages=setuptools.find_namespace_packages(include=["hcu_megatron", "hcu_megatron.*"]),
     # Add in any packaged data.
     include_package_data=True,
     install_package_data=True,
