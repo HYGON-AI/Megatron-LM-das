@@ -206,8 +206,7 @@ def validate_args_func_decorator(validate_args_func):
         args_dict = vars(args)
         for key, value in ORIGIN_ARG_VALUES.items():
             if key in args_dict:
-                args_dict[key] = value
-        args = argparse.Namespace(**args_dict)
+                setattr(args, key, value)
 
         for feature in ADAPTOR_FEATURES:
             args = feature.validate_args(args)
