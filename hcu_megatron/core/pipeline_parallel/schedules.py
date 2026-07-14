@@ -1,21 +1,18 @@
 import contextlib
+import queue
 from functools import wraps
 
 import torch
 from functools import partial
-from typing import Callable, Dict, Iterator, List, Optional, Union
+from typing import Callable, Iterator, List, Optional, Union
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.process_groups_config import (
     MultiModuleProcessGroupCollection,
     ProcessGroupCollection,
 )
 from megatron.core.utils import (
-    drain_embedding_wgrad_compute,
     get_attr_wrapped_model,
     get_model_config,
-    get_model_type,
-    nvtx_range_pop,
-    nvtx_range_push,
 )
 from megatron.core.pipeline_parallel.multimodule_communicator import MultiModulePipelineCommunicator
 from megatron.core.pipeline_parallel.schedules import (
@@ -886,7 +883,6 @@ def forward_backward_pipelining_zbh1(
         data_iterator = data_iterator[0]
 
     config = get_model_config(model)
-    config.batch_p2p_comm = False
     if config.overlap_p2p_comm:
         raise ValueError(
             "Non-interleaved pipeline parallelism does not support overlapping p2p communication"
@@ -1020,8 +1016,6 @@ def forward_backward_pipelining_zbh1(
 
         return input_tensor_grad, backward_dw
 
-    backward_func = backward_step_helper
-
     recv_tensor_shapes = get_tensor_shapes(
         seq_length=seq_length,
         micro_batch_size=micro_batch_size,
@@ -1103,7 +1097,7 @@ def forward_backward_pipelining_zbh1(
         )
 
     # Run 1F1B in steady state.
-    chunk_backward_dw_funcs = []
+    chunk_backward_dw_funcs = queue.Queue()
     pipeline_parallel_rank = p2p_communicator.pp_group.rank()
     for i in range(num_microbatches_remaining):
         last_iteration = i == (num_microbatches_remaining - 1)
@@ -1155,9 +1149,10 @@ def forward_backward_pipelining_zbh1(
             # the backward pass.
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
-            input_tensor_grad, cur_backward_dw_func = backward_func(
+            input_tensor_grad, cur_backward_dw_func = backward_step_helper(
                 input_tensor, output_tensor, output_tensor_grad, config
             )
+            chunk_backward_dw_funcs.put(cur_backward_dw_func)
 
             if last_iteration:
                 input_tensor = None
@@ -1165,13 +1160,9 @@ def forward_backward_pipelining_zbh1(
                     input_tensor_grad, p2p_communicator.is_pp_first_stage
                 )
 
-            if p2p_communicator.is_pp_first_stage:
-                cur_backward_dw_func()
-            else:
-                if len(chunk_backward_dw_funcs) == pipeline_parallel_rank:
-                    backward_dw_func, micro_batch_id = chunk_backward_dw_funcs.pop(0)
-                    backward_dw_func()
-                chunk_backward_dw_funcs.append((cur_backward_dw_func, i))
+            if chunk_backward_dw_funcs.qsize() > pipeline_parallel_rank:
+                backward_dw_func = chunk_backward_dw_funcs.get()
+                backward_dw_func()
 
             if not last_iteration:
                 input_tensor = p2p_communicator.send_backward_recv_forward(
@@ -1188,23 +1179,21 @@ def forward_backward_pipelining_zbh1(
                 send_tensor_shapes, p2p_communicator.is_pp_last_stage
             )
 
-            input_tensor_grad, cur_backward_dw_func = backward_func(
+            input_tensor_grad, cur_backward_dw_func = backward_step_helper(
                 input_tensor, output_tensor, output_tensor_grad, config
             )
+            chunk_backward_dw_funcs.put(cur_backward_dw_func)
 
             p2p_communicator.send_backward(input_tensor_grad, p2p_communicator.is_pp_first_stage)
 
-            if p2p_communicator.is_pp_first_stage:
-                cur_backward_dw_func()
-            else:
-                backward_dw_func, micro_batch_id = chunk_backward_dw_funcs.pop(0)
-                backward_dw_func()
-                chunk_backward_dw_funcs.append((cur_backward_dw_func, i + num_microbatches_remaining))
+            backward_dw_func = chunk_backward_dw_funcs.get()
+            backward_dw_func()
 
         # comupte wgrad for remaining micro-batches
-        for i in range(p2p_communicator.current_stage):
-            backward_dw_func, micro_batch_id = chunk_backward_dw_funcs.pop(0)
-            backward_dw_func()
+        if not forward_only:
+            for i in range(p2p_communicator.current_stage):
+                backward_dw_func = chunk_backward_dw_funcs.get()
+                backward_dw_func()
 
         # Launch any remaining grad reductions.
         if no_sync_context is not None:

@@ -1,8 +1,10 @@
+from megatron.core import parallel_state
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
+    get_gpt_layer_with_inference_spec,
     get_gpt_mtp_block_spec,
     get_gpt_decoder_layer_specs,
 )
@@ -12,8 +14,9 @@ from megatron.core.models.gpt.experimental_attention_variant_module_specs import
 from megatron.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
     get_gpt_heterogeneous_layer_spec,
 )
+from megatron.core.pipeline_parallel.utils import is_pp_first_stage
 from megatron.core.transformer.spec_utils import import_module
-from megatron.training import get_args, print_rank_0
+from megatron.training import print_rank_0
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
 
@@ -33,6 +36,11 @@ def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None, pg_
             config = core_transformer_config_from_yaml(args, "language_model")
         else:
             config = core_transformer_config_from_args(args)
+
+    # save memory
+    if args.schedule_method == "zb_h1" and is_pp_first_stage(parallel_state.get_pipeline_model_parallel_group()):
+        config.delay_wgrad_compute = False
+
     if args.use_legacy_models:
         model = megatron.legacy.model.GPTModel(
             config,
@@ -131,36 +139,25 @@ def _get_transformer_layer_spec(use_te, config):
     """
     enable_hyper_connection = getattr(config, 'enable_hyper_connections', False)
     if use_te:
+        kwargs = {
+            "qk_l2_norm": config.qk_l2_norm,
+            "use_kitchen": config.use_kitchen,
+            "use_te_activation_func": config.use_te_activation_func,
+            "use_kitchen_attention": config.use_kitchen_attention,
+            "kitchen_attention_backend": config.kitchen_attention_backend,
+            "mla_down_proj_fusion": getattr(config, "mla_down_proj_fusion", False),
+        }
         if enable_hyper_connection:
-            return get_gpt_layer_with_transformer_engine_spec(
-                config.num_moe_experts,
-                config.moe_grouped_gemm,
-                config.qk_layernorm,
-                config.multi_latent_attention,
-                config.experimental_attention_variant,
-                qk_l2_norm=config.qk_l2_norm,
-                use_kitchen=config.use_kitchen,
-                use_te_activation_func=config.use_te_activation_func,
-                use_kitchen_attention=config.use_kitchen_attention,
-                kitchen_attention_backend=config.kitchen_attention_backend,
-                mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
-                enable_hyper_connection=config.enable_hyper_connections,
-            )
-        else:
-            return get_gpt_layer_with_transformer_engine_spec(
-                config.num_moe_experts,
-                config.moe_grouped_gemm,
-                config.qk_layernorm,
-                config.multi_latent_attention,
-                config.experimental_attention_variant,
-                qk_l2_norm=config.qk_l2_norm,
-                use_kitchen=config.use_kitchen,
-                use_te_activation_func=config.use_te_activation_func,
-                use_kitchen_attention=config.use_kitchen_attention,
-                kitchen_attention_backend=config.kitchen_attention_backend,
-                mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
-                # enable_hyper_connection=config.enable_hyper_connections,
-            )
+            kwargs.update({"enable_hyper_connection": config.enable_hyper_connections})
+
+        return get_gpt_layer_with_transformer_engine_spec(
+            config.num_moe_experts,
+            config.moe_grouped_gemm,
+            config.qk_layernorm,
+            config.multi_latent_attention,
+            config.experimental_attention_variant,
+            **kwargs
+        )
     elif config.transformer_impl == "inference_optimized":
         return get_gpt_layer_with_inference_spec(
             config.qk_layernorm,
