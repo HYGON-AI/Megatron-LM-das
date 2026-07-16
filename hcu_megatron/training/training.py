@@ -131,7 +131,7 @@ from megatron.training.training import (
     disable_forward_pre_hook,
     save_checkpoint_and_time,
     enable_forward_pre_hook,
-    num_floating_point_operations,
+    num_floating_point_operations as _upstream_num_floating_point_operations,
     evaluate_and_print_results,
     post_training_step_callbacks,
     dummy_train_step,
@@ -149,6 +149,231 @@ from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data
 from ..core.distributed.power_sgd import EFLayoutManager
 
 stimer = StragglerDetector()
+
+
+# Field-name patterns that identify runtime / parallelism / offload / distributed
+# knobs on TransformerConfig. These are owned by Megatron CLI args (not by HF
+# config.json), so when --use-bridge is enabled we overlay them from
+# core_transformer_config_from_args(args) onto the provider produced by AutoBridge.
+# Architecture fields (num_layers / hidden_size / num_attention_heads / vocab_size
+# / activation_func / ...) intentionally match none of these patterns and remain
+# HF-derived. New parallelism / offload fields added upstream flow through
+# automatically without editing this list.
+_BRIDGE_RUNTIME_FIELD_PATTERNS = (
+    "_parallel_size",
+    "parallel_sizes",
+    "sequence_parallel",
+    "hybrid_context_parallel",
+    "max_seqlen_per_dp_cp_rank",
+    "num_layers_in_first_pipeline_stage",
+    "num_layers_in_last_pipeline_stage",
+    "offload",
+    "cpu_offload",
+    "use_precision_aware_optimizer",
+    "gradient_accumulation_fusion",
+    "moe_router_force_load_balancing",
+)
+
+
+def _bridge_select_runtime_field_names(provider, transformer_config):
+    """Return the set of field names to overlay from `transformer_config` onto `provider`.
+
+    Computed as the intersection of both dataclasses' fields, filtered by
+    `_BRIDGE_RUNTIME_FIELD_PATTERNS`.
+    """
+    provider_names = {f.name for f in dataclasses.fields(provider)}
+    tc_names = {f.name for f in dataclasses.fields(transformer_config)}
+    common = provider_names & tc_names
+    return {n for n in common if any(pat in n for pat in _BRIDGE_RUNTIME_FIELD_PATTERNS)}
+
+
+def _bridge_apply_runtime_overrides(provider, transformer_config, args):
+    """Overlay Megatron args-derived runtime settings onto an AutoBridge provider.
+
+    Mirrors the mechanism in
+    `megatron.bridge.training.utils.omegaconf_utils.apply_overrides`: build a dict of
+    override values, then hand it to that helper (which walks nested dataclasses and
+    skips unknown fields). `_NO_COPY_KEYS` handles (e.g. `_pg_collection`) are re-bound
+    by reference to preserve shared state; everything else is deep-copied so the
+    ephemeral `transformer_config` and the provider don't alias.
+
+    RoPE / TE-op-fuser switches are read from `args` rather than hardcoded.
+    """
+    import copy
+    from megatron.bridge.training.utils.omegaconf_utils import apply_overrides
+
+    runtime_names = _bridge_select_runtime_field_names(provider, transformer_config)
+    no_copy_keys = getattr(provider, "_NO_COPY_KEYS", set())
+
+    overrides = {}
+    for name in runtime_names:
+        value = getattr(transformer_config, name)
+        if value is None:
+            continue
+        if name in no_copy_keys:
+            # Preserve shared references — deep-copying would break already-initialized
+            # process groups.
+            setattr(provider, name, value)
+            continue
+        overrides[name] = copy.deepcopy(value)
+
+    apply_overrides(provider, overrides, excluded_fields={})
+
+    # RoPE kernel selection: TE fused RoPE does not support 3D positional encodings
+    # (mRoPE), so leave those providers alone.
+    pos_type = getattr(provider, "position_embedding_type", None)
+    if pos_type != "mrope":
+        if hasattr(args, "apply_rope_fusion"):
+            provider.apply_rope_fusion = args.apply_rope_fusion
+        if pos_type != "yarn":
+            arg_pos_type = getattr(args, "position_embedding_type", None)
+            if arg_pos_type:
+                provider.position_embedding_type = arg_pos_type
+
+    # TE FusedMLP: fuses chunk+SiLU/GeLU+multiply into one kernel for GLU-style FFN.
+    provider.use_transformer_engine_op_fuser = getattr(
+        args, "use_transformer_engine_op_fuser", True
+    )
+
+
+# ------------------------------------------------------------------------------
+# VLM FLOPs accounting (wrapper over Megatron-LM's num_floating_point_operations)
+# ------------------------------------------------------------------------------
+# Rationale: upstream num_floating_point_operations only counts the language
+# model. When training a VLM through the bridge (--use-bridge with a provider
+# exposing vision_config), ViT + patch embed + vision->language projector FLOPs
+# are omitted, biasing the reported throughput low. We stash the vision meta on
+# `args` during setup_and_model_and_optimizer, then a same-name wrapper adds the
+# vision term on top of the upstream LLM total. Local same-module functions
+# (training_log, checkpoint_and_decide_exit, ...) automatically bind to this
+# wrapper by Python name resolution; Megatron-LM's internal callers keep the
+# upstream version, which is fine because dcu_megatron uses its own train loop.
+
+
+def _bridge_extract_vision_meta(provider):
+    """Extract the vision fields needed for FLOPs from a bridge provider.
+
+    Returns a plain dict (not a config object) to keep args serialization safe
+    and to avoid coupling the FLOPs code to Bridge classes. Returns None if the
+    provider has no vision_config (pure LLM providers).
+    """
+    vision_cfg = getattr(provider, "vision_config", None)
+    if vision_cfg is None:
+        return None
+
+    return {
+        "num_layers": (
+            getattr(vision_cfg, "num_hidden_layers", None)
+            or getattr(vision_cfg, "depth", None)
+        ),
+        "hidden_size": (
+            getattr(vision_cfg, "hidden_size", None)
+            or getattr(vision_cfg, "embed_dim", None)
+        ),
+        "num_heads": (
+            getattr(vision_cfg, "num_heads", None)
+            or getattr(vision_cfg, "num_attention_heads", None)
+        ),
+        "intermediate_size": getattr(vision_cfg, "intermediate_size", None),
+        "patch_size": (
+            getattr(provider, "patch_size", None)
+            or getattr(vision_cfg, "patch_size", 14)
+        ),
+        "spatial_merge_size": (
+            getattr(provider, "spatial_merge_size", None)
+            or getattr(vision_cfg, "spatial_merge_size", 1)
+        ),
+        "temporal_patch_size": getattr(provider, "temporal_patch_size", 1),
+        # projector output dim = language hidden size (Qwen VL merger target)
+        "llm_hidden_size": provider.hidden_size,
+    }
+
+
+def _vit_layer_flops(batch_size, num_image_tokens, hidden_size, num_heads,
+                     intermediate_size, swiglu=False):
+    """FLOPs for one ViT block: full self-attn (no causal factor) + MLP.
+
+    Coefficients:
+      - 3x for fwd+bwd (wgrad + dgrad)
+      - 2x for GEMM mnk
+    """
+    del num_heads  # Not used; ViT self-attn is MHA and cost only depends on hidden_size.
+    ffn_expansion = 3 if swiglu else 2
+    attn_fwd = (
+        num_image_tokens * hidden_size * (3 * hidden_size)          # qkv proj
+        + 2 * hidden_size * num_image_tokens * num_image_tokens     # QK^T + AV
+        + num_image_tokens * hidden_size * hidden_size              # o proj
+    )
+    mlp_fwd = ffn_expansion * num_image_tokens * hidden_size * intermediate_size
+    return 2 * batch_size * 3 * (attn_fwd + mlp_fwd)
+
+
+def _vision_module_flops(batch_size, vision_meta, image_tokens_per_sample):
+    """Total FLOPs added by ViT + patch embed + vision->language projector.
+
+    Returns 0 whenever any prerequisite is missing (no vision_meta, no image
+    tokens), preserving the LLM-only code path bit-for-bit.
+    """
+    if vision_meta is None or not image_tokens_per_sample:
+        return 0
+
+    hs = vision_meta["hidden_size"]
+    n_layers = vision_meta["num_layers"]
+    n_heads = vision_meta["num_heads"]
+    inter = vision_meta["intermediate_size"] or (4 * hs)
+    patch = vision_meta["patch_size"]
+    t_patch = vision_meta.get("temporal_patch_size", 1) or 1
+    spatial = vision_meta.get("spatial_merge_size", 1) or 1
+    llm_hs = vision_meta["llm_hidden_size"]
+
+    vit_flops = n_layers * _vit_layer_flops(
+        batch_size, image_tokens_per_sample, hs, n_heads, inter, swiglu=False,
+    )
+    # patch embed conv: per patch cost = 2 * (t_patch * patch^2 * in_channels=3) * hs,
+    # 3x for fwd+bwd
+    patch_embed_flops = (
+        2 * 3 * batch_size * image_tokens_per_sample
+        * (t_patch * patch * patch * 3) * hs
+    )
+    # vision->language projector (merger): merges spatial^2 vision tokens into one output token,
+    # in_features = hs * spatial^2, out_features = llm_hs
+    merged_tokens = (
+        image_tokens_per_sample // (spatial * spatial) if spatial > 0
+        else image_tokens_per_sample
+    )
+    projector_flops = (
+        2 * 3 * batch_size * merged_tokens * (hs * spatial * spatial) * llm_hs
+    )
+    return vit_flops + patch_embed_flops + projector_flops
+
+
+def _estimate_image_tokens_per_sample(args):
+    """Preference order:
+      (1) runtime signal on args (populated by forward_step, Phase 2 -- not wired yet)
+      (2) --image-tokens-per-sample CLI (opt-in static value)
+      (3) 0 (keeps LLM-only path)
+    """
+    runtime = getattr(args, "_bridge_image_tokens_per_sample", None)
+    if runtime is not None:
+        return int(runtime)
+    static = getattr(args, "image_tokens_per_sample", None)
+    if static is not None:
+        return int(static)
+    return 0
+
+
+def num_floating_point_operations(args, batch_size):
+    """Wrapper around Megatron-LM's num_floating_point_operations that also
+    accounts for VLM vision-side compute when the bridge exposes vision_config.
+
+    Falls back to the upstream LLM total whenever `args._bridge_vision` is
+    absent or the effective image-tokens-per-sample is 0 (both are true for
+    every pure LLM run, so this is a bit-for-bit no-op there).
+    """
+    llm_flops = _upstream_num_floating_point_operations(args, batch_size)
+    vision_meta = getattr(args, "_bridge_vision", None)
+    image_tokens = _estimate_image_tokens_per_sample(args)
+    return llm_flops + _vision_module_flops(batch_size, vision_meta, image_tokens)
 
 
 def build_train_valid_test_data_iterators_wrapper(func):
@@ -562,7 +787,6 @@ def setup_model_and_optimizer(
     skip_optimizer = args.skip_train and (not args.perform_rl_step or args.no_load_optim)
     wrap_with_ddp = not skip_optimizer
     if args.use_bridge:
-        import copy
         from megatron.bridge import AutoBridge
         from megatron.training.arguments import core_transformer_config_from_args
         if args.bridge_hf_model is None:
@@ -570,34 +794,18 @@ def setup_model_and_optimizer(
         bridge = AutoBridge.from_hf_pretrained(args.bridge_hf_model)
         provider = bridge.to_megatron_provider(load_weights=args.load_weights, hf_path=args.bridge_hf_model)
         if hasattr(provider, "finalize"):
-            # 将args的并行config复制过去, 跟模型参数有关的不覆盖
-            transformer_config = core_transformer_config_from_args(args) # args的config
-            provider._COPY_KEYS = {
-                'tensor_model_parallel_size', 'pipeline_model_parallel_size', 'virtual_pipeline_model_parallel_size', 'sequence_parallel', 'context_parallel_size',
-                'hierarchical_context_parallel_sizes', 'max_seqlen_per_dp_cp_rank', 'hybrid_context_parallel',
-                'expert_model_parallel_size', 'expert_tensor_parallel_size',
-                'num_layers_in_first_pipeline_stage', 'num_layers_in_last_pipeline_stage',
-                'fine_grained_activation_offloading', 'offload_modules', 'min_offloaded_tensor_size',
-                'optimizer_cpu_offload', 'use_precision_aware_optimizer', 'optimizer_offload_fraction', 'use_torch_optimizer_for_cpu_offload',
-                'gradient_accumulation_fusion',
-            }
-            for key, value in transformer_config.__dict__.items():
-                if value is None:
-                    continue
-                if key in provider._NO_COPY_KEYS:
-                    # Keep the same reference to avoid losing initialized process groups.
-                    setattr(provider, key, value)
-                if key in provider._COPY_KEYS:
-                    setattr(provider, key, copy.deepcopy(value))
-            # 启用 TE fused RoPE（mRoPE 除外，TE 不支持 3D 位置编码）
-            pos_type = getattr(provider, "position_embedding_type", None)
-            if pos_type != "mrope":
-                provider.apply_rope_fusion = True
-                if pos_type != "yarn":
-                    provider.position_embedding_type = "rope"
-            # 启用 TE FusedMLP，GLU 的 chunk+SiLU+multiply 融合为 1 kernel
-            provider.use_transformer_engine_op_fuser = True
+            # Overlay Megatron args-derived runtime knobs (parallelism / offload /
+            # distributed) onto the HF-derived provider. Architecture fields stay
+            # HF-owned. See `_bridge_apply_runtime_overrides` for the selection rule.
+            transformer_config = core_transformer_config_from_args(args)
+            _bridge_apply_runtime_overrides(provider, transformer_config, args)
             provider.finalize()
+            # Stash vision meta so the FLOPs wrapper can include ViT/patch-embed/
+            # projector cost in throughput reporting. None for pure LLM providers.
+            args._bridge_vision = _bridge_extract_vision_meta(provider)
+            if torch.distributed.get_rank() in [0]:
+                print(f"transformer_config: {transformer_config}")
+                print(f"provider: {provider}")
 
         kwargs = {} # copy from get_model(): wrap_with_ddp
         for f in dataclasses.fields(DistributedDataParallelConfig):

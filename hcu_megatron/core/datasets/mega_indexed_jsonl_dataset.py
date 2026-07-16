@@ -1,6 +1,3 @@
-# copyright (c) 2024 tencent inc. all rights reserved.
-# xiaotaoliu@tencent.com, nrwu@tencent.com
-
 from datetime import datetime
 from types import SimpleNamespace
 import glob
@@ -226,11 +223,6 @@ class BaseIndexedJsonlDataset(TorchIterableDataset):
         shuffle_buffer_size=1000,        # HuggingFace shuffle buffer 大小（当前未直接使用）
         seed=0,                          # 随机种子
         train=False,                     # True=训练集, False=验证/测试集
-        retention_rates_per_domains=None,  # 各 domain 的保留率（domain 级别的 dropout）
-        enable_pareto=[],                # 各 domain 是否启用 Pareto 采样
-        pareto_alphas=[],                # Pareto alpha 参数
-        pareto_scales=[],                # Pareto scale 参数
-        pareto_score_scales=[],          # Pareto score scale 参数
         top_domains_to_cut=1,            # domain 调度微调时，修改几个最大的 domain
     ):
         assert isinstance(path_likes, list)
@@ -255,20 +247,6 @@ class BaseIndexedJsonlDataset(TorchIterableDataset):
         self.consumed_by_this_rank = get_consumed_by_this_rank(
             train_data_consuming_progresses, self.rank, len(path_likes), num_workers
         )
-
-        self.retention_rates_per_domains = retention_rates_per_domains
-        self.flag_on_pareto_sampling = False
-        self.enable_pareto = enable_pareto
-        self.pareto_alphas = pareto_alphas
-        self.pareto_scales = pareto_scales
-        self.pareto_score_scales = pareto_score_scales
-        if len(self.enable_pareto) > 0:
-            assert self.train, f"only train dataset can enable pareto"
-            assert len(domain_probabilities) == len(self.enable_pareto)
-            assert len(domain_probabilities) == len(self.pareto_alphas)
-            assert len(domain_probabilities) == len(self.pareto_scales)
-            assert len(domain_probabilities) == len(self.pareto_score_scales)
-            self.flag_on_pareto_sampling = True
 
         self.print_domain_id_map()
 
@@ -318,11 +296,6 @@ class BaseIndexedJsonlDataset(TorchIterableDataset):
             }
             if self.domain_probabilities:
                 d['domain_probabilities'] = self.domain_probabilities[domain_id]
-            if self.flag_on_pareto_sampling:
-                d['enable_pareto'] = self.enable_pareto[domain_id]
-                d['pareto_alphas'] = self.pareto_alphas[domain_id]
-                d['pareto_scales'] = self.pareto_scales[domain_id]
-                d['pareto_score_scales'] = self.pareto_score_scales[domain_id]
             domain_id_map.append(d)
         domain_id_map_str = type(self).__name__ + ' id / domain mapping ' + json.dumps(
             domain_id_map, indent=4
@@ -491,11 +464,6 @@ class MegaIndexedJsonlDataset(BaseIndexedJsonlDataset):
         shuffle_buffer_size=1000,
         seed=0,
         train=False,
-        retention_rates_per_domains=None,
-        enable_pareto=[],
-        pareto_alphas=[],
-        pareto_scales=[],
-        pareto_score_scales=[],
         top_domains_to_cut=1,
     ):
         self.tokenizer = tokenizer
@@ -513,11 +481,6 @@ class MegaIndexedJsonlDataset(BaseIndexedJsonlDataset):
             shuffle_buffer_size=shuffle_buffer_size,
             seed=seed,
             train=train,
-            retention_rates_per_domains=retention_rates_per_domains,
-            enable_pareto=enable_pareto,
-            pareto_alphas=pareto_alphas,
-            pareto_scales=pareto_scales,
-            pareto_score_scales=pareto_score_scales,
             top_domains_to_cut=top_domains_to_cut,
         )
 
@@ -661,11 +624,6 @@ class MegaIndexedJsonlDatasetMM(BaseIndexedJsonlDataset):
         shuffle_buffer_size=1000,
         seed=0,
         train=False,
-        retention_rates_per_domains=None,
-        enable_pareto=[],
-        pareto_alphas=[],
-        pareto_scales=[],
-        pareto_score_scales=[],
         top_domains_to_cut=1,
     ):
         super().__init__(
@@ -681,11 +639,6 @@ class MegaIndexedJsonlDatasetMM(BaseIndexedJsonlDataset):
             shuffle_buffer_size=shuffle_buffer_size,
             seed=seed,
             train=train,
-            retention_rates_per_domains=retention_rates_per_domains,
-            enable_pareto=enable_pareto,
-            pareto_alphas=pareto_alphas,
-            pareto_scales=pareto_scales,
-            pareto_score_scales=pareto_score_scales,
             top_domains_to_cut=top_domains_to_cut,
         )
 
