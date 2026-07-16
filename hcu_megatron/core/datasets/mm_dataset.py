@@ -1,6 +1,3 @@
-# copyright (c) 2025 tencent inc. all rights reserved.
-# guanyouhe@tencent.com
-
 import os
 import io
 import re
@@ -12,11 +9,7 @@ from PIL import PngImagePlugin
 import torch
 from torch.utils.data import IterableDataset as TorchIterableDataset
 
-from hcu_megatron.core.datasets.mega_indexed_jsonl_dataset_v3 import MegaIndexedJsonlDatasetMM
-try:
-    from hcu_megatron.core.datasets.tools.lmdb_read_cli import fetch_images_from_lmdb
-except ImportError:
-    fetch_images_from_lmdb = None
+from hcu_megatron.core.datasets.mega_indexed_jsonl_dataset import MegaIndexedJsonlDatasetMM
 
 tar_file_cache = {}  # tar_filepath: (tar_context, access_cnt)
 tar_file_cache_size = 25
@@ -67,7 +60,7 @@ def fetch_image(
     return image
 
 
-def fetch_images(images: list[dict], tar_dir: str, lmdb_port=None) -> list[Image.Image]:
+def fetch_images(images: list[dict], tar_dir: str) -> list[Image.Image]:
     # NOTE(guanyouhe): 这里图片附加信息过大会导致打开图片失败，修改一下这个值就好
     if PngImagePlugin.MAX_TEXT_CHUNK < 1024 * 1024 * 1024:
         print(
@@ -75,11 +68,7 @@ def fetch_images(images: list[dict], tar_dir: str, lmdb_port=None) -> list[Image
         )
         PngImagePlugin.MAX_TEXT_CHUNK = 1024 * 1024 * 1024  # 1GB
 
-    if lmdb_port is not None:
-        img_lists = fetch_images_from_lmdb(images, lmdb_port)
-    else:
-        img_lists = [fetch_image(ele, tar_dir) for ele in images]
-    return img_lists
+    return [fetch_image(ele, tar_dir) for ele in images]
 
 
 def convert_pattern(
@@ -153,7 +142,7 @@ def remove_bos(text):
 ```
 要求：
 1. 可以没有图片
-2. images 也可以只写 image_path 绝对路径，使用 lmdb 时也可以使用相对路径
+2. images 也可以只写 image_path 绝对路径
 3. 每一条样本都要是有效样本，图片必须能正常读出来
 4. conversations[-1] 默认为 label
 '''
@@ -176,15 +165,9 @@ class MultiModalDataset(TorchIterableDataset):
         shuffle_buffer_size=1000,
         seed=0,
         train=False,
-        retention_rates_per_domains=None,
-        enable_pareto=[],
-        pareto_alphas=[],
-        pareto_scales=[],
-        pareto_score_scales=[],
         top_domains_to_cut=1,
         processor=None,
         tar_dir="/",
-        lmdb_port=None,
         image_token_id=None,
         moe_pad_with_random_token=False,
     ):
@@ -201,11 +184,6 @@ class MultiModalDataset(TorchIterableDataset):
             shuffle_buffer_size=shuffle_buffer_size,
             seed=seed,
             train=train,
-            retention_rates_per_domains=retention_rates_per_domains,
-            enable_pareto=enable_pareto,
-            pareto_alphas=pareto_alphas,
-            pareto_scales=pareto_scales,
-            pareto_score_scales=pareto_score_scales,
             top_domains_to_cut=top_domains_to_cut,
         )
         self.tokenizer = tokenizer
@@ -213,7 +191,6 @@ class MultiModalDataset(TorchIterableDataset):
         self.image_processor = processor.image_processor if processor is not None else None
         self.max_seq_len = max_seq_len
         self.tar_dir = tar_dir
-        self.lmdb_port = lmdb_port
         self.image_token_id = image_token_id
         self.moe_pad_with_random_token = moe_pad_with_random_token
 

@@ -1,11 +1,3 @@
-# coding=utf-8
-
-# Copyright (c) 2024 Tencent Inc. All Rights Reserved.
-# Author: xiaotaoliu@tencent.com, nrwu@tencent.com
-#
-# 本文件来自 Megatron-LM：https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/utils.py
-# ，仅仅包含了简单的 helper 函数，避免直接依赖具体版本的 Megatron。
-
 from datetime import datetime
 from typing import Tuple
 import random

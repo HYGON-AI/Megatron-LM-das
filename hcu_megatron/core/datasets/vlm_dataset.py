@@ -1,5 +1,3 @@
-# copyright (c) 2024 tencent inc. all rights reserved.
-# guanyouhe@tencent.com
 from copy import deepcopy
 import math
 from typing import Dict, Sequence, Optional, Tuple
@@ -548,7 +546,7 @@ class QwenVLDataset(MultiModalDataset):
             # ── 加载图片 ──
             imgs = None
             if 'images' in json_data and len(json_data['images']) > 0:
-                imgs = fetch_images(json_data['images'], self.tar_dir, self.lmdb_port)
+                imgs = fetch_images(json_data['images'], self.tar_dir)
                 # 图片有效性校验：None / 过小 / 宽高比过大 → 跳过
                 imgs_valid = True
                 for img in imgs:
@@ -823,7 +821,7 @@ class GemmaVLDataset(MultiModalDataset):
             # ── 加载图片 ──
             imgs = None
             if "images" in json_data and len(json_data["images"]) > 0:
-                imgs = fetch_images(json_data["images"], self.tar_dir, self.lmdb_port)
+                imgs = fetch_images(json_data["images"], self.tar_dir)
                 imgs_valid = True
                 for img in imgs:
                     if img is None:
@@ -1229,14 +1227,9 @@ def build_train_valid_test_datasets(
     从 args 中读取数据路径、domain 配比、processor 配置等，根据 model_arch 选择对应的 Dataset 类。
     """
     train_path_likes = args.data_path
-    eval_path_likes = args.px_eval_data_path
-    domain_probabilities = args.px_domain_probabilities
-    retention_rates_per_domains = getattr(args, "px_train_apply_pareto", None)
-    domain_names = args.px_train_data_domain_names
-    enable_pareto = getattr(args, "px_train_apply_pareto", [])
-    pareto_alpha = getattr(args, "px_train_pareto_alpha", [])
-    pareto_scale = getattr(args, "px_train_pareto_scale", [])
-    pareto_score_scale = getattr(args, "train_pareto_score_scale", [])
+    eval_path_likes = args.vlm_eval_data_path
+    domain_probabilities = args.vlm_domain_probabilities
+    domain_names = args.vlm_train_data_domain_names
     processor = get_processor(args)
     mask_history = args.mask_history
     max_seq_length = args.seq_length
@@ -1259,17 +1252,11 @@ def build_train_valid_test_datasets(
         dp_rank=dp_rank,
         dp_size=dp_size,
         num_workers=args.num_workers,
-        shuffle_buffer_size=args.px_shuffle_buffer_size,
+        shuffle_buffer_size=args.vlm_shuffle_buffer_size,
         seed=args.seed,
-        retention_rates_per_domains=retention_rates_per_domains,
-        enable_pareto=enable_pareto,
-        pareto_alphas=pareto_alpha,
-        pareto_scales=pareto_scale,
-        pareto_score_scales=pareto_score_scale,
-        top_domains_to_cut=args.px_top_domains_to_cut,
+        top_domains_to_cut=args.vlm_top_domains_to_cut,
         processor=processor,
         tar_dir=args.tarfile_path,
-        lmdb_port=args.lmdb_port,
         image_token_id=getattr(args, 'image_token_id', None),
         moe_pad_with_random_token=getattr(args, 'moe_pad_with_random_token', False),
     )
@@ -1292,13 +1279,12 @@ def build_train_valid_test_datasets(
         eval_ds = DatasetCls(
             path_likes=eval_path_likes,
             domain_probabilities=[1.0],
-            domain_names=args.px_eval_data_domain_names,
+            domain_names=args.vlm_eval_data_domain_names,
             global_batch_size=args.global_batch_size,
             train_data_consuming_progresses=None,
             train=False,
             **common_kwargs,
         )
-        assert args.px_reset_dataloader_at_start_of_eval, "需要--px-reset-dataloader-at-start-of-eval来保保证每次eval的数据是一样的"
     test_ds = None
 
     return train_ds, eval_ds, test_ds
@@ -1344,14 +1330,14 @@ def build_train_valid_test_data_iter(
         train_dataloader = torch.utils.data.DataLoader(
             train_ds, batch_size=batch_size, num_workers=args.num_workers,
             drop_last=True, pin_memory=True, collate_fn=collate_func,
-            prefetch_factor=args.px_dataloader_prefetch_factor,
+            prefetch_factor=args.vlm_dataloader_prefetch_factor,
         )
         eval_dataloader = None
         if eval_ds is not None:
             eval_dataloader = torch.utils.data.DataLoader(
                 eval_ds, batch_size=batch_size, num_workers=args.num_workers,
                 drop_last=True, pin_memory=True, collate_fn=collate_func,
-                prefetch_factor=args.px_dataloader_prefetch_factor,
+                prefetch_factor=args.vlm_dataloader_prefetch_factor,
             )
         test_dataloader = None
         if use_for_hf:
@@ -1406,7 +1392,7 @@ def build_train_valid_test_data_iter(
     train_dataloader = torch.utils.data.DataLoader(
         train_ds, batch_size=batch_size, num_workers=args.num_workers,
         drop_last=True, pin_memory=True, collate_fn=collate_func,
-        prefetch_factor=args.px_dataloader_prefetch_factor,
+        prefetch_factor=args.vlm_dataloader_prefetch_factor,
     )
 
     eval_dataloader = None
@@ -1418,7 +1404,7 @@ def build_train_valid_test_data_iter(
             drop_last=True,
             pin_memory=True,
             collate_fn=collate_func,
-            prefetch_factor=args.px_dataloader_prefetch_factor,
+            prefetch_factor=args.vlm_dataloader_prefetch_factor,
         )
     test_dataloader = None
     if test_ds is not None:
@@ -1429,7 +1415,7 @@ def build_train_valid_test_data_iter(
             drop_last=True,
             pin_memory=True,
             collate_fn=collate_func,
-            prefetch_factor=args.px_dataloader_prefetch_factor,
+            prefetch_factor=args.vlm_dataloader_prefetch_factor,
         )
     if use_for_hf:
         return train_dataloader, eval_dataloader, test_dataloader

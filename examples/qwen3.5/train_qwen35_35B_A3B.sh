@@ -50,6 +50,9 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=4
 
+export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
+export TRITON_HOME=/tmp
+
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
@@ -75,6 +78,21 @@ GPT_MODEL_ARGS=(
     # --load-weights
 )
 
+MOE_ARGS=(
+    --num-experts 128
+    --moe-ffn-hidden-size 768
+    --moe-router-topk 8
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 1e-3
+    --moe-token-dispatcher-type alltoall # flex # 
+    # --moe-flex-dispatcher-backend deepep 
+    # --moe-enable-deepep
+    # --moe-deepep-num-sms 48
+    --moe-permute-fusion
+    --moe-grouped-gemm
+    --moe-router-fusion
+)
+
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
@@ -91,7 +109,6 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --use-qk-norm
     --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
@@ -104,22 +121,23 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 2
-    --pipeline-model-parallel-size 4
-    # --decoder-first-pipeline-num-layers 4
-    # --decoder-last-pipeline-num-layers 32
-    --context-parallel-size 1
-    --expert-model-parallel-size 8
-    --expert-tensor-parallel-size 1
-    --use-distributed-optimizer 
+    --tensor-model-parallel-size 1
     --sequence-parallel
+    --context-parallel-size 1
+    --pipeline-model-parallel-size 4
+
+    --expert-tensor-parallel-size 1
+    --expert-model-parallel-size 8
+    --moe-router-force-load-balancing
+    
+    --use-distributed-optimizer
 )
 
 DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --dataloader-type external
-    --px-data-config-path ${DATA_PATH}
+    --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
     # --data-path ${DATA_PATH}
@@ -156,6 +174,7 @@ HIP_PROFIE_ARGS=(
 
 APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
     ${GPT_MODEL_ARGS[@]} \
+    ${MOE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${DATA_ARGS[@]} \

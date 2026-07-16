@@ -174,6 +174,12 @@ def _add_extra_mbridge_args(parser):
                        help='The HuggingFace model path for initializing the bridge module')
     group.add_argument('--load-weights', action='store_true',
                        help='Whether to load weights for the bridge module when initializing the model')
+    group.add_argument('--image-tokens-per-sample', type=int, default=None,
+                       help='Number of image (post-merger) tokens per sample used to include '
+                            'ViT + patch-embed + projector FLOPs in throughput accounting. '
+                            'Only takes effect together with --use-bridge and a VLM provider that '
+                            'exposes vision_config. Leave unset (default None) to keep the '
+                            'LLM-only FLOPs baseline.')
     return parser
 
 
