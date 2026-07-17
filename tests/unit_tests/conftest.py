@@ -30,7 +30,7 @@ def pytest_addoption(parser):
         default='nccl',
         choices=['nccl', 'gloo'],
         help='Which backend to use for distributed training.')
-    
+
 
 @pytest.fixture(scope='session')
 def distributed_args(request):
