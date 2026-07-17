@@ -108,7 +108,7 @@ for i in $(seq $UNIT_TEST_REPEAT); do
     CMD=$(echo python -m torch.distributed.run ${DISTRIBUTED_ARGS[@]} \
         -m coverage run \
         --data-file=.coverage.unit_tests \
-        --source=dcu_megatron/core \
+        --source=hcu_megatron/core \
         -m pytest \
         -xvs \
         $(echo "$BUCKET" | sed 's|/\*\*/\*\.py$||'))

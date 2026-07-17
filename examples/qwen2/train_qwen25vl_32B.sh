@@ -114,7 +114,7 @@ DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --dataloader-type external
-    --px-data-config-path ${DATA_PATH}
+    --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen2.5vl
     --processor-path ${TOKENIZER_MODEL_PATH}
     # --data-path ${DATA_PATH}

@@ -41,7 +41,7 @@ WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge-0.4.0/src:$PYTHONPATH
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
 
 # default env
 export GLOG_minloglevel=3
@@ -51,6 +51,8 @@ export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=4
 # export MIOPEN_FIND_MODE=3 # 1: 查找最快算法，可能导致第一次运行不稳定；2: 固定算法，保证每次运行稳定但可能不是最快的；3: 先查找再固定算法，兼顾稳定和性能
 
+export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
+export TRITON_HOME=/tmp
 
 DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -63,24 +65,39 @@ GPT_MODEL_ARGS=(
     --seq-length 4096
     --num-layers 48
     --hidden-size 2048
-    --ffn-hidden-size 768 
+    --ffn-hidden-size 6144 
+    --moe-ffn-hidden-size 768
     --num-attention-heads 32
-    --num-experts 128
-    --max-position-embeddings 262144
+    --max-position-embeddings 40960
+    --num-query-groups 4
+    --group-query-attention
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
+    --kv-channels 128
 
     --use-bridge
     --bridge-hf-model ${TOKENIZER_MODEL_PATH}
     # --load-weights
 )
 
+MOE_ARGS=(
+    --num-experts 128
+    --moe-router-topk 8
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 1e-3
+    --moe-token-dispatcher-type alltoall
+    --moe-permute-fusion
+    --moe-grouped-gemm
+    --moe-router-fusion
+    --moe-router-force-load-balancing
+)
+
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 32
+    --global-batch-size 64
     --train-iters 50
     --weight-decay 0.1 
     --adam-beta1 0.9 
@@ -106,10 +123,10 @@ TRAINING_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 1
     --sequence-parallel
-    --pipeline-model-parallel-size 1
+    --pipeline-model-parallel-size 2
 
     --context-parallel-size 1
-    --expert-model-parallel-size 1
+    --expert-model-parallel-size 8
     --expert-tensor-parallel-size 1
 
     --use-distributed-optimizer
@@ -119,7 +136,7 @@ DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --dataloader-type external
-    --px-data-config-path ${DATA_PATH}
+    --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
     # --data-path ${DATA_PATH}
@@ -157,6 +174,7 @@ HIP_PROFIE_ARGS=(
 
 APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
     ${GPT_MODEL_ARGS[@]} \
+    ${MOE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${DATA_ARGS[@]} \

@@ -21,7 +21,7 @@ from megatron.training.global_vars import (
 )
 from tests.unit_tests.test_utilities import Utils
 
-from dcu_megatron.megatron_adaptor import get_adaptor_args, repatch
+from hcu_megatron.megatron_adaptor import get_adaptor_args, repatch
 
 
 def create_test_adaptor_args():

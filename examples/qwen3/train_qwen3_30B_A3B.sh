@@ -44,7 +44,8 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge-0.4.0/src:$PYTHONPATH
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
+
 
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
 export TRITON_HOME=/tmp
@@ -71,16 +72,16 @@ GPT_MODEL_ARGS=(
     --untie-embeddings-and-output-weights
     --kv-channels 128
 
-    # --use-bridge
-    # --bridge-hf-model ${TOKENIZER_MODEL_PATH}
-    # # --load-weights
+    --use-bridge
+    --bridge-hf-model ${TOKENIZER_MODEL_PATH}
+    # --load-weights
 )
 
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
     --micro-batch-size 1
-    --global-batch-size 32
+    --global-batch-size 64
     --train-iters 50
     --weight-decay 0.1 
     --adam-beta1 0.9 
@@ -113,11 +114,12 @@ MOE_ARGS=(
     --moe-permute-fusion
     --moe-grouped-gemm
     --moe-router-fusion
+    --moe-router-force-load-balancing
 )
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --pipeline-model-parallel-size 2
     --expert-model-parallel-size 8
     --expert-tensor-parallel-size 1
     --context-parallel-size 1
@@ -146,8 +148,8 @@ EVAL_AND_LOGGING_ARGS=(
 TORCH_PROFIE_ARGS=(
     --profile
     --profile-ranks 0
-    --profile-step-start 3
-    --profile-step-end 4
+    --profile-step-start 5
+    --profile-step-end 6
     --profile-dir torch_prof_qwen3_30B_A3B_tp1-pp1-ep8-etp1-cp1_pretrain
     --use-pytorch-profiler
     --pytorch-profiler-collect-callstack

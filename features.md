@@ -1,4 +1,4 @@
-# Dcu Megatron
+# Hcu Megatron
 
 ## 使用方式
 
@@ -9,8 +9,8 @@
 1、git方式下载
 
 ```shell
-git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/dcu_megatron.git 或
-git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoolkit/deeplearing/dcu_megatron.git
+git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/hcu_megatron.git 或
+git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoolkit/deeplearing/hcu_megatron.git
 ```
 
 2、离线下载
@@ -19,7 +19,7 @@ git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoo
 
 2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
 
-2.3 将Megatron-LM离线代码包解压到dcu_megatron目录下的Megatron-LM目录
+2.3 将Megatron-LM离线代码包解压到hcu_megatron目录下的Megatron-LM目录
 
 
 
@@ -47,7 +47,7 @@ examples/
 torch >= 2.6.0
 
 ## 项目介绍
-本项目通过替换megatron的函数或类，引入新的特性或者实现更好的性能。替换的函数或类注册在dcu_megatron/adaptor/megatron_adaptor.py。
+本项目通过替换megatron的函数或类，引入新的特性或者实现更好的性能。替换的函数或类注册在hcu_megatron/adaptor/megatron_adaptor.py。
 
 + 支持函数替换
 
@@ -149,7 +149,7 @@ def unpermute(
 + 在模型规格较大时，我们通常使用重计算降低显存占用，但是性能下降较严重，这里我们通过在前向计算时将激活值offload到CPU，在反向计算时，再将激活值copy到dcu来减少显存占用。具体见[激活值offload](./docs/features/async-activation-offload.md)
 
 ### 项目支持指定重计算层
-+ megatron支持对所有transformer/mtp层进行重计算，该情形下模型训练显存占用小，但是训练性能通常较差。为了在显存满足要求的同时，提高模型训练性能，dcu megatron支持对指定tranformer/mtp层进行重计算。使用该重计算方式，需要开启以下参数：
++ megatron支持对所有transformer/mtp层进行重计算，该情形下模型训练显存占用小，但是训练性能通常较差。为了在显存满足要求的同时，提高模型训练性能，hcu megatron支持对指定tranformer/mtp层进行重计算。使用该重计算方式，需要开启以下参数：
 ```
 --recompute-granularity full
 --recompute-layer-ids 0 4 8 12   # 对第0、4、8和12 transformer层进行重计算（从0开始对tranformer层进行编号）

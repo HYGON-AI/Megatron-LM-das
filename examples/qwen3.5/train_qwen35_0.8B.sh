@@ -91,7 +91,6 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --use-qk-norm
     --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
@@ -115,7 +114,7 @@ DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --dataloader-type external
-    --px-data-config-path ${DATA_PATH}
+    --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
     # --data-path ${DATA_PATH}

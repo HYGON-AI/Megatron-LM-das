@@ -59,12 +59,12 @@ try:
 except ImportError:
     has_nvidia_modelopt = False
 
-from dcu_megatron.core.parallel_state import get_virtual_vocab_parallel_chunk
+from hcu_megatron.core.parallel_state import get_virtual_vocab_parallel_chunk
 from input_store import InputStore
-from dcu_megatron import megatron_adaptor
+from hcu_megatron import megatron_adaptor
 
-from dcu_megatron.core.datasets.vlm_dataset import build_train_valid_test_data_iter
-from dcu_megatron.core.datasets.vlm_args import _add_dataset_extra_args, parse_dataset_config
+from hcu_megatron.core.datasets.vlm_dataset import build_train_valid_test_data_iter
+from hcu_megatron.core.datasets.vlm_args import add_vlm_extra_args, parse_dataset_config
 
 stimer = StragglerDetector()
 
@@ -156,6 +156,18 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None)
         labels = split_data_cp_rank(labels, args.context_parallel_size, 1)
         loss_mask = split_data_cp_rank(loss_mask, args.context_parallel_size, 1)
         assert attention_mask is None, "if attention_mask is not None, it should be split too"
+    if has_image and image_grid_thw is not None:
+        # image_grid_thw shape: [num_images_in_batch, 3]  (t, h, w in vision patch units)
+        # 每张图的 vision tokens 数 = t*h*w；merger 之后语言侧看到的 = t*h*w / (spatial_merge_size^2)
+        spatial = getattr(args, "spatial_merge_size", 2) or 1
+        total_vision_tokens = int(image_grid_thw.prod(dim=-1).sum().item())
+        total_llm_side_tokens = total_vision_tokens // (spatial * spatial)
+        bs = tokens.size(0)
+        # 我们的 flops wrapper 假设的是 \"per-sample image tokens\"，跟 batch 相乘得总数
+        args._bridge_image_tokens_per_sample = total_vision_tokens // max(bs, 1)
+    else:
+        args._bridge_image_tokens_per_sample = 0
+        
     return (
         tokens, labels, loss_mask, attention_mask, position_ids, imgs, image_grid_thw,
         image_input_mask, images_padded, cp_img_num
@@ -311,30 +323,6 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
     )
     return train_iter, valid_iter, test_iter
 
-def add_qwen3vl_extra_args(parser):
-    # parser = gpatch_extra_args(parser)
-    # 数据集参数
-    parser = _add_dataset_extra_args(parser)
-    """Extra arguments."""
-    group = parser.add_argument_group(title='qwen3vl arguments')
-    group.add_argument("--hf-model-path", type=str, default=None, help="")
-    group.add_argument("--model-arch", type=str, default="qwen2vl", choices=["qwen2vl", "qwen2.5vl", "qwen3vl", "gemma3vl"],
-                       help="model architecture, which determines the default processor and tokenizer if not specified")
-
-    group.add_argument("--processor-path", type=str, default=None, help="")
-    group.add_argument("--tarfile-path", type=str, default="/", help="")
-    group.add_argument("--min-pixels-num", type=int, default=None, help="min image width * height")
-    group.add_argument("--max-pixels-num", type=int, default=None, help="max image width * height")
-    group.add_argument("--video-min-frames", type=int, default=None, help="min video frames")
-    group.add_argument("--video-max-frames", type=int, default=None, help="max video frames")
-    group.add_argument("--video-min-pixels", type=int, default=None, help="min video frame num_frame * width * height")
-    group.add_argument("--video-max-pixels", type=int, default=None, help="max video frame num_frame * width * height")
-    group.add_argument("--lmdb-port", type=int, default=None, help="lmdb server port")
-    group.add_argument('--spatial-merge-size', type=int, default=2, help='spatial merge size')
-    group.add_argument("--mask-history", action='store_true', help="多轮对话只取最后一轮对话为label")
-
-    return parser
-
 
 if __name__ == "__main__":
     # Timestamp right after entering __main__ block (after all imports/library setup)
@@ -355,6 +343,6 @@ if __name__ == "__main__":
         ModelType.encoder_or_decoder,
         forward_step,
         args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
-        extra_args_provider=add_qwen3vl_extra_args,
+        extra_args_provider=add_vlm_extra_args,
         store=store,
     )

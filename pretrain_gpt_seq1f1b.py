@@ -12,7 +12,7 @@ from megatron.core import parallel_state
 from megatron.core import tensor_parallel
 from megatron.training import get_args, print_rank_0, get_timers, get_tokenizer
 from megatron.training import inprocess_restart
-from dcu_megatron.core.pipeline_parallel.seq1f1b.sp_utils import get_splits
+from hcu_megatron.core.pipeline_parallel.seq1f1b.sp_utils import get_splits
 from megatron.core.enums import ModelType
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig, MockGPTDataset
