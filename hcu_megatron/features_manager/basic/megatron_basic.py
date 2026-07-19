@@ -105,8 +105,6 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
                                     moe_layer_forward_wrapper)
         # fused gelu and mul
-        patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
-                                    TEGroupedMLP.forward)
         patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.bias_act_func',
                                     TEGroupedMLP.bias_act_func)
         # (1) cpu offload. (2) seq1f1b

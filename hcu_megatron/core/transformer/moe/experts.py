@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from megatron.core import tensor_parallel
 from megatron.core.activations import squared_relu
 from megatron.core.fusions.fused_bias_geglu import quick_gelu, weighted_bias_quick_geglu_impl
@@ -11,6 +11,7 @@ from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.moe.experts import GroupedMLPSubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
 from megatron.core.typed_torch import apply_module
@@ -63,13 +64,81 @@ class TEGroupedMLP():
 
         return intermediate_parallel
 
+
+class PrimusTurboGroupedMLP(TEGroupedMLP):
+    def __init__(
+        self,
+        num_local_experts: int,
+        config: TransformerConfig,
+        submodules: GroupedMLPSubmodules,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        args = get_args()
+
+        super().__init__(
+            num_local_experts,
+            config,
+            submodules,
+            pg_collection,
+        )
+
+        self.use_primus_fused_act_with_probs = args.use_primus_fused_act_with_probs
+
+    def bias_act_func_with_mask(
+        self,
+        intermediate_parallel: torch.Tensor,
+        bias_parallel: torch.Tensor,
+        permuted_probs: torch.Tensor,
+        tokens_per_experts: Union[torch.Tensor, None] = None,
+    ):
+        if self.use_primus_fused_act_with_probs:
+            from hcu_megatron.primus.backends.megatron.core.extensions.primus_turbo import (
+                fused_bias_act_with_probs,
+            )
+
+            assert (
+                tokens_per_experts is not None
+            ), "tokens_per_experts is required when `use_primus_fused_act_with_probs` is True."
+
+            if self.activation_func == F.silu and self.config.gated_linear_unit:
+                activation = "silu"
+            elif self.activation_func == F.gelu and self.config.gated_linear_unit:
+                activation = "gelu"
+            else:
+                raise ValueError(
+                    "Only support fusion of swiglu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
+                )
+
+            # `forward()` unsqueeze(-1)'s `permuted_probs` to [tokens, 1] so the non-fused
+            # asserts ndim == 1. Squeeze back to 1D for the fused kernel only.
+            probs_1d = permuted_probs.squeeze(-1) if permuted_probs.dim() == 2 else permuted_probs
+            # dtype is handled inside the fused kernel
+            return fused_bias_act_with_probs(
+                intermediate_parallel, bias_parallel, probs_1d, tokens_per_experts, activation
+            )
+        else:
+            # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
+            return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
+
+    @staticmethod
+    def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
+        if bias_parallel is None:
+            return intermediate_parallel
+
+        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
+        tokens_per_expert_cpu = tokens_per_expert.tolist()
+
+        return super()._apply_bias(
+            intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
+        )
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
         tokens_per_expert: torch.Tensor,
         permuted_probs: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Forward of TEGroupedMLP
+        """Forward of PrimusGroupedMLP
 
         Args:
             permuted_local_hidden_states (torch.Tensor): The permuted input hidden states of the
@@ -80,14 +149,18 @@ class TEGroupedMLP():
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        tokens_per_expert: list[int] = tokens_per_expert.tolist()
         if self.config.fp8 or self.config.fp4:
-            actual_tokens_per_expert = tokens_per_expert
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
-                permuted_local_hidden_states, tokens_per_expert
+            # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
+            tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
+            actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
+            permuted_local_hidden_states, tokens_per_expert_cpu = self.quantization_padding(
+                permuted_local_hidden_states, tokens_per_expert_cpu
             )
             permuted_probs, _ = self.quantization_padding(
-                permuted_probs.unsqueeze(-1), actual_tokens_per_expert
+                permuted_probs.unsqueeze(-1), actual_tokens_per_expert_cpu
+            )
+            tokens_per_expert = torch.tensor(
+                tokens_per_expert_cpu, device=permuted_local_hidden_states.device
             )
         else:
             permuted_probs = permuted_probs.unsqueeze(-1)
@@ -118,13 +191,13 @@ class TEGroupedMLP():
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
+                # NOTE: use the bias_act_func_with_mask instead of the bias_act_func to reduce the extra compute when stage of `sync_free_moe` is 3.
                 bias_act_output = self.activation_checkpoint.checkpoint(
-                    self.bias_act_func, fc1_output, bias_parallel, permuted_probs
+                    self.bias_act_func_with_mask, fc1_output, bias_parallel, permuted_probs, tokens_per_expert
                 )
         else:
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = self.bias_act_func(fc1_output, bias_parallel, permuted_probs)
-
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
@@ -132,148 +205,13 @@ class TEGroupedMLP():
         # Delay the offload of the moe act until after the linear_fc2 has been computed
         # to make sure the fc1_output is reloaded to GPU before recomputing moe_act.
         if self.offload_moe_act:
-            output = off_interface.group_commit(
-                output, name="moe_act", forced_released_tensors=[fc1_output]
-            )
+            output = off_interface.group_commit(output, name="moe_act", forced_released_tensors=[fc1_output])
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if self.config.fp8 or self.config.fp4:
-            output = self.quantization_unpadding(output, actual_tokens_per_expert)
+        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+            output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None
 
         return output, output_bias
-
-
-class PrimusTurboGroupedMLP():
-    def __init__(
-        self,
-        num_local_experts: int,
-        config: TransformerConfig,
-        pg_collection: Optional[ProcessGroupCollection] = None,
-    ):
-        import primus_turbo.pytorch as pt
-
-        args = get_args()
-
-        super().__init__(
-            num_local_experts,
-            config,
-            pg_collection,
-        )
-        self.use_primus_fused_act_with_probs = args.use_primus_fused_act_with_probs
-
-        self.grouped_gemm = pt.ops.grouped_gemm
-
-        if self.use_primus_fused_act_with_probs:
-            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
-
-            if self.config.activation_func == F.silu:
-                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
-            elif self.config.activation_func == F.gelu:
-                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
-            else:
-                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
-
-            def _activation_func_with_probs(x, probs, tokens_per_experts):
-                assert x.ndim == 2
-                assert probs.ndim == 1
-                num_tokens = x.shape[0]
-                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
-                return turbo_fused_act_with_probs(x, probs, row_mask)
-
-            self.activation_func_with_probs = _activation_func_with_probs
-
-    def forward(
-        self,
-        permuted_local_hidden_states: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-        permuted_probs: torch.Tensor,
-    ):
-        """Forward step of the GroupedMLP."""
-        if self.activation_recompute:
-            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-
-        if self.config.moe_apply_probs_on_input:
-            assert (
-                self.config.moe_router_topk == 1
-            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
-            original_dtype = permuted_local_hidden_states.dtype
-            permuted_local_hidden_states = permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
-            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
-            # Probs already applied, so reset to 1.
-            permuted_probs = torch.ones_like(permuted_probs)
-
-        gemm_kargs = [dict(), dict()]
-
-        if permuted_local_hidden_states.nelement() != 0:
-            # Reshape the weights for the grouped GEMMs.
-            w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
-            w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
-
-            tokens_per_expert = tokens_per_expert.to(w1.device)
-            assert w1.is_contiguous(), "w1 must be contiguous"
-            assert w2.is_contiguous(), "w2 must be contiguous"
-
-            fc1_output = self.grouped_gemm(
-                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
-            )
-            if self.activation_recompute:
-                if self.use_primus_fused_act_with_probs:
-                    intermediate_parallel = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs,
-                        fc1_output,
-                        permuted_probs,
-                        tokens_per_expert,
-                    )
-                else:
-                    intermediate_parallel = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
-                    )
-
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
-                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
-            else:
-                if self.use_primus_fused_act_with_probs:
-                    intermediate_parallel = self.activation_func_with_probs(
-                        fc1_output, permuted_probs, tokens_per_expert
-                    )
-                else:
-                    intermediate_parallel = self.activation_func_with_probs(
-                        fc1_output, permuted_probs.unsqueeze(-1)
-                    )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
-        else:
-            # No token is allocated for local experts.
-            assert torch.count_nonzero(tokens_per_expert) == 0
-            # Make sure params of experts still have gradients even given zero tokens.
-            assert (
-                not self.patch_zero_bubble and not self.patch_primus_pipeline
-            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
-            w1 = self.weight1.view(self.config.hidden_size, -1)
-            w2 = self.weight2.view(-1, self.config.hidden_size)
-            h = torch.matmul(permuted_local_hidden_states, w1)
-            if self.activation_recompute:
-                if self.use_primus_fused_act_with_probs:
-                    h = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
-                    )
-                else:
-                    h = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
-                    )
-                fc2_output = torch.matmul(h, w2)
-                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
-            else:
-                if self.use_primus_fused_act_with_probs:
-                    h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
-                else:
-                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
-                fc2_output = torch.matmul(h, w2)
-
-        return fc2_output, None
