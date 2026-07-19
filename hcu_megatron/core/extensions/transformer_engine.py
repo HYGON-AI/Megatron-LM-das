@@ -15,7 +15,7 @@ else:
     from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 
 try:
-    import primus.backends.transformer_engine.pytorch.triton.permutation as triton_permutation
+    import hcu_megatron.primus.backends.transformer_engine.pytorch.triton.permutation as triton_permutation
 except ImportError:
     warnings.warn(f"Failed to import primus.backends.transformer_engine.pytorch.triton.permutation")
 

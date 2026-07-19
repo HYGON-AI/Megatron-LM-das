@@ -28,6 +28,12 @@ class SyncFreeMoeFeature(AbstractFeature):
                            help='use PrimusTurboGroupedMLP')
         group.add_argument('--use-primus-fused-act-with-probs', action='store_true', default=False,
                            help='use fused act with probs provided by primus turbo')
+        group.add_argument('--turbo-deepep-num-cu', type=int, default=32,
+                           help='the number of CUs to use for Primus-Turbo DeepEP')
+        group.add_argument('--turbo-deepep-use-comm-stream', action='store_true', default=False,
+                           help='Primus-Turbo DeepEP will use an internal stream to dispatch/combine when enabled, '
+                                'default used current_stream. Both set`enable_primus_turbo=True` and '
+                                '`use_turbo_deepep=True` first')
 
     def pre_validate_args(self, args):
         if args.sync_free_moe and args.use_primus_fused_act_with_probs:
