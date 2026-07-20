@@ -216,8 +216,8 @@ def all_to_all(
         quant_scale_dtype="bf16",
     ):
     """Wrapper for autograd function"""
+    args = get_args()
     if use_quantize_comm is None:
-        args = get_args()
         use_quantize_comm = args.use_quantize_comm if hasattr(args, "use_quantize_comm") else False
         quant_comm_bits = args.quant_comm_bits
         quant_group_size = args.quant_group_size

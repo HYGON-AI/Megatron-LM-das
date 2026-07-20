@@ -26,7 +26,7 @@ def te_spec_provider_grouped_mlp_modules_wrapper(fn):
             )
 
         if (
-            args.use_turbo_grouped_gemm
+            args.use_primus_grouped_gemm
             and moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None
         ):

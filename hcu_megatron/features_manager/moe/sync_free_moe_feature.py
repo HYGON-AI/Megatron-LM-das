@@ -38,7 +38,7 @@ class SyncFreeMoeFeature(AbstractFeature):
     def pre_validate_args(self, args):
         if args.sync_free_moe and args.use_primus_fused_act_with_probs:
             args.turbo_sync_free_moe_stage = 3
-        elif args.use_primus_deepep or args.use_turbo_grouped_gemm:
+        elif args.use_primus_deepep or args.use_primus_grouped_gemm:
             args.turbo_sync_free_moe_stage = 2
         elif args.use_primus_topk_router or args.use_primus_moe_permute_fusion:
             args.turbo_sync_free_moe_stage = 1
@@ -59,15 +59,15 @@ class SyncFreeMoeFeature(AbstractFeature):
             if args.use_primus_deepep:
                 warnings.warn(f"use-primus-deepep does not take effect when enable-sync-free-moe is not set")
 
-            if args.use_turbo_grouped_gemm:
-                warnings.warn(f"use-primus-grouped-mlp does not take effect when enable-sync-free-moe is not set")
+            if args.use_primus_grouped_gemm:
+                warnings.warn(f"use-primus-grouped-gemm does not take effect when enable-sync-free-moe is not set")
 
             if args.use_primus_fused_act_with_probs:
                 warnings.warn(f"use-primus-fused-act-with-probs does not take effect when enable-sync-free-moe is not set")
 
         if args.use_primus_fused_act_with_probs:
-            if not args.use_turbo_grouped_gemm:
-                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when use_turbo_grouped_gemm is not set")
+            if not args.use_primus_grouped_gemm:
+                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when use_primus_grouped_gemm is not set")
 
         return args
 
@@ -105,7 +105,7 @@ class SyncFreeMoeFeature(AbstractFeature):
                 patch_manager.register_patch("megatron.core.transformer.moe.token_dispatcher.MoEFlexTokenDispatcher",
                                              PrimusTurboDeepEPTokenDispatcher)
 
-            if args.use_primus_grouped_mlp:
+            if args.use_primus_grouped_gemm:
                 from hcu_megatron.core.extensions.transformer_engine_spec_provider import te_spec_provider_grouped_mlp_modules_wrapper
 
                 patch_manager.register_patch("megatron.core.extensions.transformer_engine_spec_provider.TESpecProvider.grouped_mlp_modules",
