@@ -55,6 +55,14 @@ def add_vlm_extra_args(parser):
     model_group.add_argument('--spatial-merge-size', type=int, default=2, help='spatial merge size')
     model_group.add_argument("--mask-history", action='store_true', help="多轮对话只取最后一轮对话为label")
 
+    # ── 微调冻结开关(与 Bridge provider 上的同名字段对齐,由 _bridge_apply_vlm_overrides 覆盖) ──
+    model_group.add_argument("--freeze-language-model", action='store_true', default=False,
+                             help="Freeze language model weights during fine-tuning")
+    model_group.add_argument("--freeze-vision-model", action='store_true', default=False,
+                             help="Freeze vision encoder weights during fine-tuning")
+    model_group.add_argument("--freeze-vision-projection", action='store_true', default=False,
+                             help="Freeze vision-to-language projection weights during fine-tuning")
+
     # ── 数据配置入口 ──
     parser.add_argument(
         "--vlm-data-config-path", type=str, default=None,

@@ -172,6 +172,15 @@ _BRIDGE_RUNTIME_FIELD_PATTERNS = (
     "use_precision_aware_optimizer",
     "gradient_accumulation_fusion",
     "moe_router_force_load_balancing",
+    # Activation recomputation — chosen at training time per memory budget,
+    # not baked into the HF checkpoint. Providers inherit these from
+    # TransformerConfig with defaults of None, so without overlay the CLI
+    # --recompute-* flags silently no-op under --use-bridge.
+    "recompute_granularity",
+    "recompute_method",
+    "recompute_num_layers",
+    "recompute_modules",
+    "distribute_saved_activations",
 )
 
 
@@ -234,6 +243,35 @@ def _bridge_apply_runtime_overrides(provider, transformer_config, args):
     provider.use_transformer_engine_op_fuser = getattr(
         args, "use_transformer_engine_op_fuser", True
     )
+
+    # VLM-specific overrides (fields that live on the provider but not on
+    # TransformerConfig, so they won't flow through the runtime-field overlay).
+    _bridge_apply_vlm_overrides(provider, args)
+
+
+# Fields declared on VLM providers (e.g. Qwen{2.5,3,3.5}VLModelProvider) but not on
+# TransformerConfig / core_transformer_config_from_args. Each entry is applied only
+# when both the CLI arg and the provider field exist, so pure-LLM providers are
+# untouched.
+_BRIDGE_VLM_OVERRIDE_FIELDS = (
+    "freeze_language_model",
+    "freeze_vision_model",
+    "freeze_vision_projection",
+)
+
+
+def _bridge_apply_vlm_overrides(provider, args):
+    """Overlay VLM-only training-strategy fields from CLI args onto a bridge provider.
+
+    These fields (e.g. `freeze_language_model`) are defined on VLM providers such as
+    Qwen2.5VL/Qwen3VL but do not exist on `TransformerConfig`, so the runtime-field
+    intersection in `_bridge_select_runtime_field_names` cannot pick them up.
+    We setattr each one individually, guarded on both sides so pure-LLM providers
+    and older CLI args stay unaffected.
+    """
+    for name in _BRIDGE_VLM_OVERRIDE_FIELDS:
+        if hasattr(provider, name) and hasattr(args, name):
+            setattr(provider, name, getattr(args, name))
 
 
 # ------------------------------------------------------------------------------
@@ -794,9 +832,68 @@ def setup_model_and_optimizer(
         bridge = AutoBridge.from_hf_pretrained(args.bridge_hf_model)
         provider = bridge.to_megatron_provider(load_weights=args.load_weights, hf_path=args.bridge_hf_model)
         if hasattr(provider, "finalize"):
-            # Overlay Megatron args-derived runtime knobs (parallelism / offload /
-            # distributed) onto the HF-derived provider. Architecture fields stay
-            # HF-owned. See `_bridge_apply_runtime_overrides` for the selection rule.
+            # Overlay Megatron args-derived runtime knobs onto the HF-derived
+            # provider before finalize() locks the config.
+            #
+            # Coverage — three layers, each with its own selection rule:
+            #
+            # 1) `_bridge_apply_runtime_overrides` → covers TransformerConfig
+            #    fields whose NAME matches `_BRIDGE_RUNTIME_FIELD_PATTERNS`:
+            #      *_parallel_size, parallel_sizes, sequence_parallel,
+            #      hybrid_context_parallel, max_seqlen_per_dp_cp_rank,
+            #      num_layers_in_{first,last}_pipeline_stage, *offload*,
+            #      cpu_offload*, use_precision_aware_optimizer,
+            #      gradient_accumulation_fusion, moe_router_force_load_balancing,
+            #      recompute_{granularity,method,num_layers,modules},
+            #      distribute_saved_activations.
+            #    These are parallelism / distributed / offload / activation-
+            #    recomputation knobs — the user picks them per-run via CLI, they
+            #    have no meaningful HF default.
+            #    Also overlays RoPE fusion / position-embedding-type (skipped for
+            #    mrope/yarn) and use_transformer_engine_op_fuser.
+            #
+            # 2) `_bridge_apply_vlm_overrides` → covers VLM-only fields that
+            #    live on VL providers but not on TransformerConfig:
+            #      freeze_language_model, freeze_vision_model,
+            #      freeze_vision_projection.
+            #    Guarded by hasattr on both sides, so pure-LLM providers skip.
+            #
+            # 3) The DDP config below (built from args after this block) — the
+            #    provider itself never owns DDP settings; they're consumed by
+            #    provide_distributed_model(ddp_config=...).
+            #
+            # NOT overlaid (intentionally) — these stay HF-owned via
+            # bridge.to_megatron_provider(). Architecture / model-shape fields
+            # whose names don't match any pattern in (1) and aren't in (2):
+            #   - Shape: num_layers, hidden_size, ffn_hidden_size,
+            #     num_attention_heads, num_query_groups, kv_channels,
+            #     vocab_size, seq_length, max_position_embeddings.
+            #     Reason: these define the checkpoint's architecture; overriding
+            #     from CLI would break weight loading.
+            #   - Normalization / activation: normalization, layernorm_epsilon,
+            #     activation_func, gated_linear_unit, add_bias_linear,
+            #     add_qkv_bias. Reason: HF config.json is authoritative.
+            #   - Fusion switches: bias_activation_fusion, bias_dropout_fusion,
+            #     masked_softmax_fusion, apply_rotary_pos_emb_in_fp32,
+            #     attention_softmax_in_fp32, persist_layer_norm,
+            #     deallocate_pipeline_outputs. Reason: providers set these to
+            #     model-tested defaults; CLI overriding risks silent perf/
+            #     accuracy regressions on models the user didn't intend.
+            #   - MoE architecture: num_moe_experts, moe_router_topk,
+            #     moe_router_load_balancing_type, moe_aux_loss_coeff,
+            #     moe_grouped_gemm, moe_token_dispatcher_type, mlp_only_layers,
+            #     decoder_sparse_step. Reason: HF-owned per-model.
+            #   - RoPE params: rotary_base, rotary_percent, mrope_section.
+            #     Reason: model-specific, part of the checkpoint's contract.
+            #   - VL architecture: vision_config, patch_size,
+            #     temporal_patch_size, spatial_merge_size, image_token_id,
+            #     video_token_id, vision_start/end_token_id, bos/eos_token_id,
+            #     deepstack_visual_indexes, language_max_sequence_length.
+            #     Reason: HF vision config + tokenizer are the source of truth.
+            #   - Qwen3.5-only: use_hf_vision_model, vision_dp_when_cp,
+            #     hetereogenous_dist_checkpoint, mtp_num_layers. Reason: not
+            #     wired to hcu CLI yet — add to _BRIDGE_VLM_OVERRIDE_FIELDS if
+            #     you start using Qwen3.5VL.
             transformer_config = core_transformer_config_from_args(args)
             _bridge_apply_runtime_overrides(provider, transformer_config, args)
             provider.finalize()
@@ -807,7 +904,13 @@ def setup_model_and_optimizer(
                 print(f"transformer_config: {transformer_config}")
                 print(f"provider: {provider}")
 
-        kwargs = {} # copy from get_model(): wrap_with_ddp
+        # DDP config — mirror the kwargs build in get_model()'s wrap_with_ddp
+        # branch so the two paths stay in sync. Bridge's provide_distributed_model
+        # accepts DistributedDataParallelConfig only (torch_fsdp2 is a separate
+        # bool arg it consumes internally), so we don't branch on use_torch_fsdp2
+        # like get_model() does. Any field appearing here should also appear in
+        # get_model() and vice versa.
+        kwargs = {}
         for f in dataclasses.fields(DistributedDataParallelConfig):
             if hasattr(args, f.name):
                 kwargs[f.name] = getattr(args, f.name)
@@ -815,20 +918,47 @@ def setup_model_and_optimizer(
         kwargs['check_for_nan_in_grad'] = args.check_for_nan_in_loss_and_grad
         kwargs['check_for_large_grads'] = args.check_for_large_grads
         if args.ddp_num_buckets is not None:
-            assert args.ddp_bucket_size is None, \
-                "Cannot specify both --ddp-num-buckets and --ddp-bucket-size"
-            assert args.ddp_num_buckets > 0, \
-                "--ddp-num-buckets must be greater than 0"
-            kwargs['bucket_size'] = num_parameters // args.ddp_num_buckets
-        else:
-            kwargs['bucket_size'] = args.ddp_bucket_size
+            # get_model() derives bucket_size from num_parameters at this point
+            # in the flow, but under use_bridge the model isn't created until
+            # provide_distributed_model() below, so num_parameters isn't known.
+            # Splitting build/wrap to expose it isn't supported by Bridge's API.
+            raise NotImplementedError(
+                "--ddp-num-buckets is not supported with --use-bridge; "
+                "use --ddp-bucket-size instead."
+            )
+        kwargs['bucket_size'] = args.ddp_bucket_size
         kwargs['pad_buckets_for_high_nccl_busbw'] = args.ddp_pad_buckets_for_high_nccl_busbw
+        kwargs['reduce_scatter_with_fp32_accumulation'] = args.ddp_reduce_scatter_with_fp32_accumulation
+        kwargs['param_name_patterns_for_fp32_local_accumulation'] = \
+            tuple(args.ddp_param_name_patterns_for_fp32_local_accumulation)
         kwargs['average_in_collective'] = args.ddp_average_in_collective
+        # Megatron-FSDP arguments.
+        kwargs['megatron_fsdp_main_params_dtype'] = args.megatron_fsdp_main_params_dtype
+        kwargs['megatron_fsdp_main_grads_dtype'] = args.megatron_fsdp_main_grads_dtype
+        kwargs['megatron_fsdp_grad_comm_dtype'] = args.megatron_fsdp_grad_comm_dtype
         if args.use_megatron_fsdp and args.use_precision_aware_optimizer:
             kwargs["preserve_fp32_weights"] = False
+
+        # Initialize DDPConfig.
         ddp_config = DistributedDataParallelConfig(**kwargs)
 
-        model = provider.provide_distributed_model(wrap_with_ddp=wrap_with_ddp, ddp_config=ddp_config)
+        # bucket_size post-processing (mirror of get_model()): give a sane
+        # default when unset, and zero it out when grad-reduce isn't overlapped.
+        if ddp_config.bucket_size is None:
+            ddp_config.bucket_size = max(
+                40000000, 1000000 * mpu.get_data_parallel_world_size(with_context_parallel=True)
+            )
+        if not ddp_config.overlap_grad_reduce:
+            ddp_config.bucket_size = None
+
+        model = provider.provide_distributed_model(
+            wrap_with_ddp=wrap_with_ddp,
+            ddp_config=ddp_config,
+            use_megatron_fsdp=args.use_megatron_fsdp,
+            use_torch_fsdp2=args.use_torch_fsdp2,
+            overlap_param_gather_with_optimizer_step=args.overlap_param_gather_with_optimizer_step,
+            data_parallel_random_init=args.data_parallel_random_init,
+        )
         if torch.distributed.get_rank() in [0]:
             print(f"model rank[{torch.distributed.get_rank()}]: {model}")
     else:
