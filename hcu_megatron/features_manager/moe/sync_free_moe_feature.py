@@ -8,6 +8,7 @@ from ..feature import AbstractFeature
 class SyncFreeMoeFeature(AbstractFeature):
     def __init__(self):
         super().__init__('sync-free-moe')
+        self.all_sync_free_moe_params = None
 
     def register_args(self, parser: ArgumentParser):
         group = parser.add_argument_group(title=self.feature_name)
@@ -16,7 +17,7 @@ class SyncFreeMoeFeature(AbstractFeature):
                            dest='sync_free_moe',
                            help='use sync free moe')
         group.add_argument('--turbo-sync-free-moe-stage',
-                           type=int, default=0,
+                           type=int, default=None, choices=[1, 2, 3],
                            help='Sync-Free MoE optimization levels provided by primus')
         group.add_argument('--use-primus-topk-router', action='store_true', default=False,
                            help='Replace TopKRouter with PrimusTopKRouter')
@@ -35,8 +36,52 @@ class SyncFreeMoeFeature(AbstractFeature):
                                 'default used current_stream. Both set`enable_primus_turbo=True` and '
                                 '`use_turbo_deepep=True` first')
 
+    def _get_sync_free_moe_options(self, args) -> dict:
+        sync_free_moe_options = {
+            1: {
+                "use_primus_topk_router": True,
+                "use_primus_moe_permute_fusion": True,
+            },
+            2: {
+                "use_primus_topk_router": True,
+                "use_primus_deepep": True,
+                "use_primus_moe_permute_fusion": True,
+                "use_primus_grouped_gemm": True,
+            },
+            3: {
+                "use_primus_topk_router": True,
+                "use_primus_deepep": True,
+                "use_primus_moe_permute_fusion": True,
+                "use_primus_grouped_gemm": True,
+                "use_primus_fused_act_with_probs": True,
+            },
+        }
+        self.all_sync_free_moe_params = list(sync_free_moe_options[3].kyes())
+
+        stage = args.turbo_sync_free_moe_stage
+
+        if stage > 3 or stage < 0:
+            raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
+
+        return sync_free_moe_options[stage]
+
     def pre_validate_args(self, args):
-        if args.sync_free_moe and args.use_primus_fused_act_with_probs:
+        if not args.sync_free_moe:
+            return args
+
+        if args.turbo_sync_free_moe_stage:
+            options = self._get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+            for param in self.all_sync_free_moe_params:
+                if param in options:
+                    setattr(args, param, options[param])
+
+                elif getattr(args, param, False):
+                    warnings.warn(f"{param} is set to False when turbo_sync_free_moe_stage is {args.turbo_sync_free_moe_stage}")
+                    setattr(args, param, False)
+
+            return args
+
+        if args.use_primus_fused_act_with_probs:
             args.turbo_sync_free_moe_stage = 3
         elif args.use_primus_deepep or args.use_primus_grouped_gemm:
             args.turbo_sync_free_moe_stage = 2
@@ -46,9 +91,6 @@ class SyncFreeMoeFeature(AbstractFeature):
         return args
 
     def validate_args(self, args):
-        if args.sync_free_moe and args.use_primus_deepep:
-            assert args.tensor_model_parallel_size == 1, "tensor_model_parallel_size should be 1 when using primus deepep"
-
         if not args.sync_free_moe:
             if args.use_primus_topk_router:
                 warnings.warn(f"use-primus-topk-router does not take effect when enable-sync-free-moe is not set")
