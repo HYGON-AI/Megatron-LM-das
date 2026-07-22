@@ -13,7 +13,6 @@ from megatron.core.parallel_state import (
 )
 
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
-from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
 from megatron.core.tensor_parallel.mappings import (
     reduce_from_tensor_model_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
@@ -22,6 +21,11 @@ from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
+    set_tensor_model_parallel_attributes,
+)
+from megatron.core.utils import (
+    get_tensor_model_parallel_group_if_none,
+    make_tp_sharded_tensor_for_checkpoint,
 )
 
 
@@ -61,12 +65,17 @@ class VocabParallelInput(torch.nn.Module):
         init_method: Callable,
         reduce_scatter_embeddings: bool = False,
         config: ModelParallelConfig,
+        tp_group=None,
     ):
         super(VocabParallelInput, self).__init__()
         # Keep the input dimensions.
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.reduce_scatter_embeddings = reduce_scatter_embeddings
+        self.tp_group = tp_group
+
+        self.tp_group = get_tensor_model_parallel_group_if_none(self.tp_group)
+
         self.vocab_parallel_world_size = _get_vocab_parallel_world_size()
         # Divide the weight matrix along the vocaburaly dimension.
         (
@@ -77,6 +86,11 @@ class VocabParallelInput(torch.nn.Module):
         )
         self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
         self.deterministic_mode = config.deterministic_mode
+        self.config = config
+
+        self.use_inference_optimized_reduce_scatter = (
+            getattr(config, 'transformer_impl', None) == 'inference_optimized'
+        )
 
         # Allocate weights and initialize.
         if config.use_cpu_initialization:
@@ -97,6 +111,10 @@ class VocabParallelInput(torch.nn.Module):
                     rank=_get_vocab_parallel_rank(),
                     world_size=_get_vocab_parallel_world_size(),
                 )
+            else:
+                set_tensor_model_parallel_attributes(
+                    tensor=self.weight, is_parallel=True, dim=0, stride=1
+                )
         else:
             self.weight = Parameter(
                 torch.empty(
@@ -108,6 +126,10 @@ class VocabParallelInput(torch.nn.Module):
             )
             if config.perform_initialization:
                 _initialize_affine_weight_gpu(self.weight, init_method, partition_dim=0, stride=1)
+            else:
+                set_tensor_model_parallel_attributes(
+                    tensor=self.weight, is_parallel=True, dim=0, stride=1
+                )
 
     def forward(self, input_):
         if self.vocab_parallel_world_size > 1:
@@ -131,10 +153,22 @@ class VocabParallelInput(torch.nn.Module):
         if self.reduce_scatter_embeddings:
             # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
             output_parallel = output_parallel.transpose(0, 1).contiguous()
-            output = reduce_scatter_to_sequence_parallel_region(output_parallel)
-        else:
+            if self.use_inference_optimized_reduce_scatter and not self.training:
+                # Deferred to avoid circular import: inference_layers → TE → layers.
+                from megatron.core.tensor_parallel.inference_layers import inference_reduce_scatter_to_sequence_parallel_region
+
+                output = inference_reduce_scatter_to_sequence_parallel_region(
+                    output_parallel, self.tp_group, self.config
+                )
+            else:
+                output = reduce_scatter_to_sequence_parallel_region(
+                    output_parallel, group=self.tp_group
+                )
+        elif self.tp_group.size() > 1:
             # Reduce across all the model parallel GPUs.
-            output = reduce_from_tensor_model_parallel_region(output_parallel)
+            output = reduce_from_tensor_model_parallel_region(output_parallel, group=self.tp_group)
+        else:
+            output = output_parallel
 
         output = output.clone() # TODO (benson): temporary workaround.
         return output

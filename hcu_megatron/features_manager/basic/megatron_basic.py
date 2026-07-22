@@ -4,6 +4,7 @@ import torch
 from argparse import ArgumentParser
 
 from ..feature import AbstractFeature
+from hcu_megatron.patch_utils import get_inner_func
 
 
 class MegatronBasicFeature(AbstractFeature):
@@ -30,7 +31,6 @@ class MegatronBasicFeature(AbstractFeature):
         self.register_training_patches(patch_manager, args)
         self.register_miscellaneous_patches(patch_manager, args)
         self.register_core_dist_checkpointing_patches(patch_manager, args)
-        self.register_legacy_models_patches(patch_manager, args)
 
     def register_core_dist_checkpointing_patches(self, patch_manager, args):
         if args.use_ckpt_memory_cache:
@@ -78,7 +78,7 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel._preprocess',
                                     GPTModel._preprocess)
 
-        # Transformer block. If mtp_num_layers > 0, move final_layernorm outside
+        # support vocab parallel
         patch_manager.register_patch('megatron.core.models.gpt.gpt_model.GPTModel._postprocess',
                                     gpt_model_postprocess)
 
@@ -106,22 +106,24 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.forward',
                                     moe_layer_forward_wrapper)
         # fused gelu and mul
-        patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.bias_act_func',
-                                    TEGroupedMLP.bias_act_func)
+        patch_manager.register_patch('megatron.core.transformer.moe.experts.TEGroupedMLP.forward',
+                                    get_inner_func(TEGroupedMLP.forward, "bias_act_func"),
+                                    patch_inner_func=True,
+                                    inner_func_name="bias_act_func",)
         # (1) cpu offload. (2) seq1f1b
         patch_manager.register_patch('megatron.core.transformer.attention.Attention.__init__',
                                     attention_init_wrapper,
                                     apply_wrapper=True)
 
+        from hcu_megatron.core.recompute import checkpointed_forward
         from hcu_megatron.core.transformer.attention import Attention
         from hcu_megatron.core.transformer.transformer_block import TransformerBlock
         from hcu_megatron.core.transformer.transformer_layer import TransformerLayer
         from hcu_megatron.core.transformer.multi_latent_attention import multi_latent_attention_forward_wrapper
         from hcu_megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 
-        patch_manager.register_patch(
-            'megatron.core.transformer.transformer_block.TransformerBlock._checkpointed_forward',
-            TransformerBlock._checkpointed_forward)
+        patch_manager.register_patch('megatron.core.recompute.checkpointed_forward',
+                                    checkpointed_forward)
         patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.forward',
                                     TransformerBlock.forward)
         patch_manager.register_patch('megatron.core.transformer.transformer_layer.TransformerLayer._forward_attention',
@@ -166,14 +168,8 @@ class MegatronBasicFeature(AbstractFeature):
 
         from megatron.core.extensions.transformer_engine import TEGroupedLinear
 
-        from hcu_megatron.core.extensions.transformer_engine import get_cpu_offload_context
-
         if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
             TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
-
-        # te_min_version 2.5.0 -> 2.10.0
-        patch_manager.register_patch('megatron.core.extensions.transformer_engine.get_cpu_offload_context',
-                                    get_cpu_offload_context)
 
     def register_tensor_parallel_patches(self, patch_manager, args):
         from hcu_megatron.core.parallel_state import log_timing_wrapper
@@ -263,7 +259,7 @@ class MegatronBasicFeature(AbstractFeature):
         from hcu_megatron.training.training import train_step
         from hcu_megatron.training.training import setup_model_and_optimizer
         from hcu_megatron.training.utils import get_batch_on_this_tp_rank
-        from hcu_megatron.training.arguments import core_transformer_config_from_args_wrapper
+        from hcu_megatron.training.argument_utils import core_transformer_config_from_args_wrapper
 
         # Add a fixed seed.
         patch_manager.register_patch('megatron.training.initialize._set_random_seed',
@@ -283,7 +279,7 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
 
         # prevent re-initialization of config
-        patch_manager.register_patch('megatron.training.arguments.core_transformer_config_from_args',
+        patch_manager.register_patch('megatron.training.argument_utils.core_transformer_config_from_args',
                                     core_transformer_config_from_args_wrapper)
 
     def register_miscellaneous_patches(self, patch_manager, args):
@@ -314,45 +310,3 @@ class MegatronBasicFeature(AbstractFeature):
                                     gpt_builder_wrapper,
                                     apply_wrapper=True)
         
-
-    def register_legacy_models_patches(self, patch_manager, args):
-        from hcu_megatron.legacy.model.transformer import (
-            parallel_mlp_init_wrapper,
-            ParallelAttention,
-            parallel_attention_init_wrapper,
-            ParallelTransformerLayer,
-            ParallelTransformer
-        )
-        from hcu_megatron.legacy.model.utils import get_norm
-        from hcu_megatron.legacy.model.language_model import TransformerLanguageModel
-        from hcu_megatron.legacy.model.gpt_model import GPTModel
-
-        # ParallecMLP
-        patch_manager.register_patch('megatron.legacy.model.transformer.ParallelMLP.__init__',
-                                    parallel_mlp_init_wrapper,
-                                    apply_wrapper=True)
-
-        # ParallelAttention
-        patch_manager.register_patch('megatron.legacy.model.transformer.ParallelAttention.__init__',
-                                    parallel_attention_init_wrapper,
-                                    apply_wrapper=True)
-        patch_manager.register_patch('megatron.legacy.model.transformer.ParallelAttention.forward',
-                                    ParallelAttention.forward)
-
-        # rms_norm.RMSNorm
-        patch_manager.register_patch('megatron.legacy.model.rms_norm.RMSNorm.forward',
-                                    torch.compile(mode="max-autotune-no-cudagraphs"),
-                                    apply_wrapper=True)
-        patch_manager.register_patch('megatron.legacy.model.utils.get_norm',
-                                    get_norm)
-
-        patch_manager.register_patch('megatron.legacy.model.language_model.TransformerLanguageModel.forward',
-                                    TransformerLanguageModel.forward)
-        patch_manager.register_patch('megatron.legacy.model.gpt_model.GPTModel.forward',
-                                    GPTModel.forward)
-        patch_manager.register_patch('megatron.legacy.model.transformer.ParallelTransformerLayer.forward',
-                                    ParallelTransformerLayer.forward)
-        patch_manager.register_patch('megatron.legacy.model.transformer.ParallelTransformer.forward',
-                                    ParallelTransformer.forward)
-        patch_manager.register_patch('megatron.legacy.model.transformer.ParallelTransformer._checkpointed_forward',
-                                    ParallelTransformer._checkpointed_forward)

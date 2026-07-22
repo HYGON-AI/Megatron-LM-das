@@ -37,27 +37,7 @@ from hcu_megatron.core.pipeline_parallel.schedules import bootstrap_and_profile_
 from hcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
 from hcu_megatron.core.tensor_parallel.vocab_output_store import VocabOutputStore
 from hcu_megatron.core.tensor_parallel.vocab_input_store import VocabInputStore
-
-from hcu_megatron.training.utils import print_rank_message
-
-
-LM_HEAD_RES_REDUCE_STREAM = None
-
-
-def get_lm_head_res_reduce_stream():
-    global LM_HEAD_RES_REDUCE_STREAM
-    return LM_HEAD_RES_REDUCE_STREAM
-
-
-def set_lm_head_res_reduce_stream(stream=None):
-    global LM_HEAD_RES_REDUCE_STREAM
-    if LM_HEAD_RES_REDUCE_STREAM is not None:
-        return
-
-    if stream is None:
-        stream = torch.cuda.Stream(device="cuda")
-
-    LM_HEAD_RES_REDUCE_STREAM = stream
+from .utils import get_lm_head_res_reduce_stream, set_lm_head_res_reduce_stream
 
 
 def forward_backward_pipelining_with_vocab_parallel(

@@ -41,6 +41,7 @@ from megatron.core.tensor_parallel.layers import (
     dist_reduce_scatter_func,
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
+    set_tensor_model_parallel_attributes,
 )
 from megatron.core.tensor_parallel import VocabParallelEmbedding as MegatronCoreVocabParallelEmbedding
 from megatron.core.tensor_parallel.utils import VocabUtility
@@ -89,6 +90,11 @@ class VocabParallelEmbedding:
         )
         self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
         self.deterministic_mode = config.deterministic_mode
+        self.config = config
+
+        self.use_inference_optimized_reduce_scatter = (
+            getattr(config, 'transformer_impl', None) == 'inference_optimized'
+        )
 
         # Allocate weights and initialize.
         args = get_args()
@@ -114,6 +120,10 @@ class VocabParallelEmbedding:
                         rank=get_pg_rank(self.tp_group),
                         world_size=get_pg_size(self.tp_group),
                     )
+                else:
+                    set_tensor_model_parallel_attributes(
+                        tensor=self.weight, is_parallel=True, dim=0, stride=1
+                    )
             else:
                 self.weight = Parameter(
                     torch.empty(
@@ -125,6 +135,10 @@ class VocabParallelEmbedding:
                 )
                 if config.perform_initialization:
                     _initialize_affine_weight_gpu(self.weight, init_method, partition_dim=0, stride=1)
+                else:
+                    set_tensor_model_parallel_attributes(
+                        tensor=self.weight, is_parallel=True, dim=0, stride=1
+                    )
 
 
 def get_tensor_model_parallel_node_size(group=None):
@@ -350,7 +364,23 @@ class AGLinear(torch.autograd.Function):
                 # In case of Megatron-FSDP, need to create main grad buffers in-place
                 if hasattr(weight, "__fsdp_param__"):
                     weight.main_grad = weight.get_main_grad()
-                    torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
+                    # Import here to avoid circular import
+                    from megatron.core.extensions.transformer_engine import te_general_gemm
+
+                    if te_general_gemm is not None:
+                        # Use TE general_gemm to support mixed-precision output
+                        # (e.g. bf16 input -> fp32 main_grad) which torch.matmul
+                        # does not support via the out= parameter.
+                        te_general_gemm(
+                            total_input,
+                            grad_output,
+                            out_dtype=weight.main_grad.dtype,
+                            layout="NT",
+                            out=weight.main_grad,
+                            grad=True,
+                        )
+                    else:
+                        torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
                     if weight.main_grad.dtype == torch.float32:
                         fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
@@ -1085,6 +1115,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: str | None = None,
     ):
         super(FluxColumnParallelLinear, self).__init__(
             input_size=input_size,
@@ -1103,6 +1134,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
             tp_comm_buffer_name=tp_comm_buffer_name,
             disable_grad_reduce=disable_grad_reduce,
             tp_group=tp_group,
+            name=name,
         )
 
         # flux params
@@ -1229,7 +1261,17 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
 
         if gather_output:
             # All-gather across the partitions.
-            output = gather_from_tensor_model_parallel_region(output_parallel, group=self.tp_group)
+            if self.use_inference_optimized_all_gather and not self.training:
+                # Deferred to avoid circular import: inference_layers → TE → layers.
+                from megatron.core.tensor_parallel.inference_layers import inference_all_gather_from_tensor_model_parallel_region
+
+                output = inference_all_gather_from_tensor_model_parallel_region(
+                    output_parallel, self.tp_group, self.config
+                )
+            else:
+                output = gather_from_tensor_model_parallel_region(
+                    output_parallel, group=self.tp_group
+                )
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -1237,7 +1279,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
 
     def __repr__(self):
         tp = self.output_size // self.output_size_per_partition
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"{type(self).__name__}(in_features={self.input_size}, "
             f"out_features={self.output_size_per_partition}, bias={use_bias}, TP={tp})"
@@ -1295,6 +1337,7 @@ class FluxRowParallelLinear(RowParallelLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: str | None = None,
     ):
 
         super(FluxRowParallelLinear, self).__init__(
@@ -1310,6 +1353,7 @@ class FluxRowParallelLinear(RowParallelLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
+            name=name,
         )
 
         # flux params
@@ -1403,7 +1447,7 @@ class FluxRowParallelLinear(RowParallelLinear):
 
     def __repr__(self):
         tp = self.input_size // self.input_size_per_partition
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"{type(self).__name__}(in_features={self.input_size_per_partition}, "
             f"out_features={self.output_size}, bias={use_bias}, TP={tp})"

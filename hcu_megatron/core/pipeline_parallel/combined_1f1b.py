@@ -35,6 +35,7 @@ def combined_forward_backward_step(
     is_first_microbatch=False,
     current_microbatch=None,
     encoder_decoder_xattn=False,
+    fsdp_wrapper=None,
     block_level_wgrad_compute=False,
 ):
     """Merged forward and backward step for combined 1f1b scheduler.
@@ -81,6 +82,9 @@ def combined_forward_backward_step(
 
     from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 
+    if fsdp_wrapper is not None and b_model is not None:
+        fsdp_wrapper.pre_backward()
+
     if f_model is not None and config.timers is not None:
         config.timers('forward-compute', log_level=2).start()
 
@@ -125,6 +129,25 @@ def combined_forward_backward_step(
             assert isinstance(
                 f_schedule_plan, AbstractSchedulePlan
             ), "first output of forward_step_func must be one instance of AbstractSchedulePlan"
+
+        # Wire per-layer FSDP parameter release callbacks.  The EP overlap
+        # schedule bypasses normal FSDP forward/backward hooks, so we release
+        # each layer's all-gathered parameters explicitly after its compute.
+        # Only needed for optim_grads_params strategy (where params are sharded).
+        forward_fsdp_wrapper = find_megatron_fsdp(f_model)
+        if (
+            forward_fsdp_wrapper is not None
+            and forward_fsdp_wrapper.ddp_config.data_parallel_sharding_strategy
+            == "optim_grads_params"
+        ):
+            for i in range(f_schedule_plan.num_layers()):
+                layer_plan = f_schedule_plan.get_layer(i)
+                # Validation workaround: disable per-layer forward reshard in EP-overlap
+                # schedule to avoid releasing weights before the matching backward consumes them.
+                layer_plan.set_fsdp_reshard_hooks(
+                    forward_fsdp_wrapper.post_forward_release_module,
+                    forward_fsdp_wrapper.post_backward_release_module,
+                )
 
     # backward preprocess, the same as the backward_step()
     unwrap_input_tensor_grad = False
@@ -221,5 +244,8 @@ def combined_forward_backward_step(
 
         if unwrap_input_tensor_grad:
             input_tensor_grad = input_tensor_grad[0]
+
+    if fsdp_wrapper is not None and b_model is not None:
+        fsdp_wrapper.post_backward()
 
     return output_tensor, num_tokens, input_tensor_grad, chunk_backward_dw_func

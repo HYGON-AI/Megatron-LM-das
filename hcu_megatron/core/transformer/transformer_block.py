@@ -4,13 +4,14 @@ from typing import List, Optional, Set, Union, cast, Tuple
 import torch
 from torch import Tensor
 
-from megatron.core import tensor_parallel, mpu
+from megatron.core import tensor_parallel
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp4_utils import get_fp4_context
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.recompute import checkpointed_forward
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_block import TransformerBlock as MegatronCoreTransformerBlock
@@ -19,7 +20,6 @@ from megatron.core.transformer.transformer_block import (
     LayerNormImpl,
     get_num_layers_to_build,
     get_cpu_offload_context,
-    te_checkpoint,
 )
 from megatron.core.utils import (
     WrappedTensor,
@@ -34,6 +34,7 @@ from megatron.core.transformer.transformer_layer import (
 from megatron.core.typed_torch import apply_module
 from hcu_megatron.core.transformer.hyper_connection import HyperConnectionModule
 from hcu_megatron.core.tensor_parallel.random import CheckpointManager
+
 
 def _get_block_submodules(
     config: TransformerConfig,
@@ -352,7 +353,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
         with rng_context, outer_quantization_context:
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
-                checkpointed_result = self._checkpointed_forward(
+                checkpointed_result = checkpointed_forward(
+                    self,
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     context=context,
@@ -480,239 +482,3 @@ class TransformerBlock(MegatronCoreTransformerBlock):
     def backward_dw(self):
         for layer in self.layers:
             layer.backward_dw()
-
-    def _checkpointed_forward(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor,
-        context_mask: Tensor,
-        rotary_pos_emb: Tensor,
-        attention_bias: Tensor,
-        packed_seq_params: PackedSeqParams,
-        use_inner_quantization_context: bool,
-        padding_mask: Optional[Tensor] = None,
-        extract_layer_indices: Optional[Set[int]] = None,
-        layer_offset: int = 0,
-        micro_sp_idx=None,
-    ):
-        """Forward method with activation checkpointing.
-
-        Args:
-            extract_layer_indices (Set[int], optional): Global layer
-                indices (across all pipeline stages) from which to
-                extract features.
-            layer_offset (int): The global layer offset for the current
-                pipeline stage. Used to convert local layer indices to
-                global indices when checking extract_layer_indices.
-
-        Returns:
-            If extract_layer_indices is empty: hidden_states tensor
-            If extract_layer_indices is non-empty: (hidden_states, intermediate_hidden_states) tuple
-        """
-        if extract_layer_indices is None:
-            extract_layer_indices = set()
-        intermediate_hidden_states: List[Tensor] = []
-
-        def custom(start: int, end: int):
-            def custom_forward(
-                hidden_states,
-                attention_mask,
-                context,
-                context_mask,
-                rotary_pos_emb,
-                padding_mask=None,
-                micro_sp_idx_=None,
-            ):
-                for index in range(start, end):
-                    layer = self._get_layer(index)
-
-                    # Get appropriate inner quantization context
-                    if use_inner_quantization_context:
-                        if self.config.fp8:
-                            inner_quantization_context = get_fp8_context(
-                                self.config, layer.layer_number - 1
-                            )
-                        # TODO: check if fp4 is supported in this case
-                        elif self.config.fp4:
-                            inner_quantization_context = get_fp4_context(
-                                self.config, layer.layer_number - 1
-                            )
-                        else:
-                            inner_quantization_context = nullcontext()
-                    else:
-                        inner_quantization_context = nullcontext()
-
-                    with inner_quantization_context:
-                        hidden_states, context = layer(
-                            hidden_states=hidden_states,
-                            attention_mask=attention_mask,
-                            context=context,
-                            context_mask=context_mask,
-                            rotary_pos_emb=rotary_pos_emb,
-                            attention_bias=attention_bias,
-                            inference_context=None,
-                            packed_seq_params=packed_seq_params,
-                            padding_mask=padding_mask,
-                            micro_sp_idx=micro_sp_idx_,
-                        )
-                return hidden_states, context
-
-            return custom_forward
-
-        def checkpoint_handler(forward_func):
-            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
-            # TODO: check if fp4 is supported in this case
-            if self.config.fp8 or self.config.fp4:
-                return te_checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    tensor_parallel.random.get_cuda_rng_tracker,
-                    self.pg_collection.tp,
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                    padding_mask,
-                )
-            else:
-                micro_sp_idx_ = None if micro_sp_idx is None else torch.tensor([micro_sp_idx], device='cuda', dtype=torch.int32)
-                return tensor_parallel.checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                    padding_mask,
-                    micro_sp_idx_,
-                )
-
-        recompute_layer_ids = getattr(self.config, "recompute_layer_ids", None)
-        recompute_mtp_layer_ids = getattr(self.config, "recompute_mtp_layer_ids", None)
-
-        if self.config.recompute_method == 'uniform':
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
-            if not getattr(self.config, 'swap_attention', False):
-                layer_idx = 0
-                while layer_idx < self.num_layers_per_pipeline_rank:
-                    chunk_end = min(
-                        layer_idx + self.config.recompute_num_layers, self.num_layers_per_pipeline_rank
-                    )
-                    hidden_states, context = checkpoint_handler(custom(layer_idx, chunk_end))
-
-                    # Feature extraction for uniform recompute: collect at end of each chunk
-                    # Note: Only the last layer of each chunk can have features collected
-                    for idx in range(layer_idx, chunk_end):
-                        if (idx + layer_offset) in extract_layer_indices:
-                            # For uniform recompute, we can only get features at chunk boundaries
-                            # Limitation: for fine-grained extraction, use 'block'
-                            if idx == chunk_end - 1:
-                                intermediate_hidden_states.append(hidden_states)
-
-                    layer_idx += self.config.recompute_num_layers
-            else:
-                for layer_idx in range(self.num_layers_per_pipeline_rank):
-                    hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                        hidden_states,
-                        attention_mask,
-                        context,
-                        context_mask,
-                        rotary_pos_emb,
-                        padding_mask,
-                    )
-
-        elif self.config.recompute_method == 'block':
-            # Checkpoint the input activation of only a set number of individual
-            # Transformer layers and skip the rest.
-            # A method fully use the device memory removing redundant re-computation.
-            if not getattr(self.config, 'swap_attention', False):
-                recompute_skip_num_layers = 0
-                for layer_idx in range(self.num_layers_per_pipeline_rank):
-                    # Skip recomputation when input grad computation is not needed.
-                    # Need to have at least one input tensor with gradient computation
-                    # for re-enterant autograd engine.
-                    # TODO: check if fp4 is supported in this case
-                    if (self.config.fp8 or self.config.fp4) and not hidden_states.requires_grad:
-                        recompute_skip_num_layers += 1
-                    if (
-                        layer_idx >= recompute_skip_num_layers
-                        and layer_idx < self.config.recompute_num_layers + recompute_skip_num_layers
-                    ):
-                        hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
-                    else:
-                        hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                            hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-                        )
-
-                    # Feature extraction: collect hidden states at specified global layer indices
-                    if (layer_idx + layer_offset) in extract_layer_indices:
-                        intermediate_hidden_states.append(hidden_states)
-            else:
-                vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()
-                vpp_size = self.config.virtual_pipeline_model_parallel_size
-                if vpp_rank is None or not getattr(self.config, 'enable_recompute_layers_per_pp_rank', False):
-                    vpp_rank = 0
-                if vpp_size is None or not getattr(self.config, 'enable_recompute_layers_per_pp_rank', False):
-                    vpp_size = 1
-                for layer_idx in range(self.num_layers_per_pipeline_rank):
-                    # The number of layers each pipeline rank recomputes is self.recompute_num_layers.
-                    # If self.recompute_num_layers cannot divide exactly  the number of layers in each pp rank,
-                    # we try to balance the number of recomputed layers in each model chunk.
-                    # e.g. with 8 layers, 2 stages, and 2 virtual stages, the assignment of
-                    # layers to stages like (each list is a model chunk):
-                    # Stage 0: [0, 1]   [4, 5]
-                    # Stage 1: [2, 3]   [6, 7]
-                    # With self.recompute_num_layers = 2, we will recompute layers 0,4 for stage 0, and 2,6 for stage 1.
-                    # With self.recompute_num_layers = 3, we will recompute layers 0,1,4 for stage 0, and 2,3,6 for stage 1.
-                    def should_recompute():
-                        if self.config.reduce_recompute_for_last_chunk:
-                            def is_last_layer():
-                                return (layer_idx == self.num_layers_per_pipeline_rank - 1) and mpu.is_pipeline_last_stage()
-
-                            return ((layer_idx * vpp_size + vpp_rank) < self.config.recompute_num_layers) and not is_last_layer()
-                        else:
-                            return (layer_idx * vpp_size + vpp_rank) < self.config.recompute_num_layers
-
-                    if should_recompute() and not getattr(self.config, 'swap_attention', False):
-                        hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
-                    else:
-                        hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                            hidden_states,
-                            attention_mask,
-                            context,
-                            context_mask,
-                            rotary_pos_emb,
-                            padding_mask,
-                        )
-
-        elif recompute_layer_ids is not None:
-            for layer_idx in range(self.num_layers_per_pipeline_rank):
-                global_layer_idx = layer_idx + get_transformer_layer_offset(self.config, self.vp_stage)
-                if global_layer_idx not in recompute_layer_ids or (
-                    (self.config.fp8 or self.config.fp4) and not hidden_states.requires_grad
-                ):
-                    hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                        hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-                    )
-                else:
-                    hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
-
-        elif recompute_mtp_layer_ids is not None:
-            for layer_idx in range(self.num_layers_per_pipeline_rank):
-                hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                    hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-                )
-
-        else:
-            raise ValueError("Invalid activation recompute method.")
-
-        # Return intermediate hidden states if feature extraction was requested
-        if len(extract_layer_indices) > 0:
-            return hidden_states, intermediate_hidden_states
-
-        return hidden_states

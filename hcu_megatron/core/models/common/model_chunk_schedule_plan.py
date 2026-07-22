@@ -6,12 +6,13 @@ from megatron.training import get_args
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 
+from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan as MegatronTransformerLayerSchedulePlan
+from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan as MegatronTransformerModelChunkSchedulePlan
 from megatron.core.pipeline_parallel.utils import (
     NoopScheduleNode,
     get_comm_stream,
 )
-from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan as MegatronTransformerLayerSchedulePlan
-from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan as MegatronTransformerModelChunkSchedulePlan
+from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 
 class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSchedulePlan):
@@ -72,10 +73,13 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(f_input)
-                f_input = f_layer.mtp_post_process.forward(f_input)
 
         if b_layer is not None and not b_layer.config.ep_overlap_early_attn_memory_release:
             b_grad = b_layer.attn.backward(b_grad)
+
+        if f_layer is not None:
+            with f_layer.get_fp8_context():
+                f_input = f_layer.mtp_post_process.forward(f_input)
 
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
@@ -230,6 +234,46 @@ class TransformerLayerSchedulePlanWithSplitAttn:
             )
         else:
             self.mtp_post_process = NoopScheduleNode()
+
+    def set_fsdp_reshard_hooks(self, post_forward_hook, post_backward_hook):
+        """Wire FSDP parameter release callbacks for the fine-grained overlap schedule.
+
+        The EP overlap schedule bypasses the normal FSDP forward/backward hooks
+        (registered on the FSDP unit module) because it calls sub-modules directly
+        instead of going through TransformerLayer.forward(). This method attaches
+        explicit release hooks to individual schedule nodes so that all-gathered
+        parameters are freed at the right time.
+
+        Args:
+            post_forward_hook: Callable(module) that releases forward-pass params
+                (bwd=False). Typically ``fsdp_wrapper.post_forward_release_module``.
+            post_backward_hook: Callable(module) that releases backward-pass params
+                (bwd=True). Typically ``fsdp_wrapper.post_backward_release_module``.
+        """
+        from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+        from megatron.core.transformer.transformer_layer import TransformerLayer
+
+        assert isinstance(self.layer, (TransformerLayer, MultiTokenPredictionLayer)), (
+            f"Megatron FSDP with EP Overlap only supports TransformerLayer, "
+            f"but got {type(self.layer).__name__}."
+        )
+
+        if isinstance(self.layer, TransformerLayer):
+            hook_module = self.layer
+        else:
+            hook_module = self.layer.mtp_model_layer
+
+        # After the last backward op (attn), release backward-pass params.
+        self.attn.set_post_backward_hook(lambda: post_backward_hook(hook_module))
+
+        # Determine the last node in forward order.
+        if isinstance(self.moe_combine, NoopScheduleNode):
+            last_fwd_node = self.mlp
+        else:
+            last_fwd_node = self.moe_combine
+
+        # After the last forward op, release forward-pass params.
+        last_fwd_node.set_post_forward_hook(lambda: post_forward_hook(hook_module))
 
     def get_fp8_context(self):
         """
@@ -441,7 +485,8 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         for i in range(overlapped_layers):
             f_layer = f_schedule_plan.get_layer(i)
             b_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1 - i)
-            torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
+            nvtx_msg = f"layer_{i}f-layer_{b_num_layers - 1 - i}b"
+            nvtx_range_push(nvtx_msg)
             f_input, b_grad = layer_schedule_plan_cls.run(
                 f_layer,
                 b_layer,
@@ -452,12 +497,13 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             )
             if not block_level_wgrad_compute and i < b_num_layers - 1:
                 b_layer.release_state()
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
 
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
             b_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1 - i)
-            torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
+            nvtx_msg = f"layer_{b_num_layers - 1 - i}b"
+            nvtx_range_push(nvtx_msg)
             _, b_grad = layer_schedule_plan_cls.run(
                 None,
                 b_layer,
@@ -467,14 +513,15 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             )
             if not block_level_wgrad_compute and i < b_num_layers - 1:
                 b_layer.release_state()
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
 
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            torch.cuda.nvtx.range_push(f"layer_{i}f")
+            nvtx_msg = f"layer_{i}f"
+            nvtx_range_push(nvtx_msg)
             f_input, _ = layer_schedule_plan_cls.run(f_layer, None, f_input=f_input)
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
 
         if f_schedule_plan is not None and post_forward is not None:
             # post_forward()/send_forward_recv_forward() is running in the communication stream,
@@ -601,20 +648,22 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         # S1: recompute last layer
         if b_schedule_plan is not None:
             r_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1)
-            torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1}r")
+            nvtx_msg = f"layer_{b_num_layers - 1}r"
+            nvtx_range_push(nvtx_msg)
             _, _ = layer_schedule_plan_cls.run_early_recompute(
                 None,
                 None,
                 r_layer,
             )
             b_layer = r_layer
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
 
         # S2: combined forward, backward and recomputation pass for overlapped layers
         for i in range(overlapped_layers):
             f_layer = f_schedule_plan.get_layer(i)
             r_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1 - i - 1)
-            torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b-layer_{b_num_layers - 2 - i}r")
+            nvtx_msg = f"layer_{i}f-layer_{b_num_layers - 1 - i}b-layer_{b_num_layers - 2 - i}r"
+            nvtx_range_push(nvtx_msg)
             f_input, b_grad = layer_schedule_plan_cls.run_early_recompute(
                 f_layer,
                 b_layer,
@@ -627,13 +676,14 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             if not block_level_wgrad_compute:
                 b_layer.release_state()
             b_layer = r_layer
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
 
         if overlapped_layers == f_num_layers:
             # S3: combined backward and recomputation pass for overlapped layers
             for i in range(overlapped_layers, b_num_layers - 1):
                 r_layer = b_schedule_plan.pop_layer() if not block_level_wgrad_compute else b_schedule_plan.get_layer(b_num_layers - 1 - i - 1)
-                torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b-layer_{b_num_layers - 2 - i}r")
+                nvtx_msg = f"layer_{b_num_layers - 1 - i}b-layer_{b_num_layers - 2 - i}r"
+                nvtx_range_push(nvtx_msg)
                 _, b_grad = layer_schedule_plan_cls.run_early_recompute(
                     None,
                     b_layer,
@@ -645,10 +695,11 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                 if not block_level_wgrad_compute:
                     b_layer.release_state()
                 b_layer = r_layer
-                torch.cuda.nvtx.range_pop()
+                nvtx_range_pop(nvtx_msg)
 
             # S4: backward pass for the first layer
-            torch.cuda.nvtx.range_push(f"layer_0b")
+            nvtx_msg = f"layer_0b"
+            nvtx_range_push(nvtx_msg)
             _, b_grad = layer_schedule_plan_cls.run_early_recompute(
                 None,
                 b_layer,
@@ -657,11 +708,12 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                 is_last_layer_in_bwd=True,
                 block_level_wgrad_compute=block_level_wgrad_compute,
             )
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
         else:
             # S3: combined forward and backward pass for overlapped layers
             f_layer = f_schedule_plan.get_layer(overlapped_layers)
-            torch.cuda.nvtx.range_push(f"layer_{overlapped_layers}f-layer_0b")
+            nvtx_msg = f"layer_{overlapped_layers}f-layer_0b"
+            nvtx_range_push(nvtx_msg)
             f_input, b_grad = layer_schedule_plan_cls.run_early_recompute(
                 f_layer,
                 b_layer,
@@ -671,14 +723,15 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                 is_last_layer_in_bwd=True,
                 block_level_wgrad_compute=block_level_wgrad_compute,
             )
-            torch.cuda.nvtx.range_pop()
+            nvtx_range_pop(nvtx_msg)
 
             # S4: forward pass for the remaining layers
             for i in range(overlapped_layers + 1, f_num_layers):
                 f_layer = f_schedule_plan.get_layer(i)
-                torch.cuda.nvtx.range_push(f"layer_{i}f")
+                nvtx_msg = f"layer_{i}f"
+                nvtx_range_push(nvtx_msg)
                 f_input, _ = layer_schedule_plan_cls.run_early_recompute(f_layer, None, None, f_input=f_input)
-                torch.cuda.nvtx.range_pop()
+                nvtx_range_pop(nvtx_msg)
 
         if f_schedule_plan is not None and post_forward is not None:
             # post_forward()/send_forward_recv_forward() is running in the communication stream,

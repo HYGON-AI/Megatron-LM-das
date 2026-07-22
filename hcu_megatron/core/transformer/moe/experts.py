@@ -19,51 +19,67 @@ from megatron.training.global_vars import get_args
 
 
 class TEGroupedMLP():
-    def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
-        """
-        Applies bias and activation function to the output of linear_fc1.
-        """
-        if self.config.use_te_activation_func:
-            if bias_parallel is not None:
-                intermediate_parallel = intermediate_parallel + bias_parallel
-            intermediate_parallel = self.activation_func(intermediate_parallel)
-            if permuted_probs is not None:
-                original_dtype = intermediate_parallel.dtype
-                intermediate_parallel = intermediate_parallel * permuted_probs
-                intermediate_parallel = intermediate_parallel.to(original_dtype)
-        elif self.config.bias_activation_fusion:
-            if self.activation_func == F.silu and self.config.gated_linear_unit:
-                # dtype is handled inside the fused kernel
-                intermediate_parallel = weighted_bias_swiglu_impl(
-                    intermediate_parallel,
-                    bias_parallel,
-                    permuted_probs,
-                    self.config.activation_func_fp8_input_store,
-                )
-            elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
-                intermediate_parallel = weighted_bias_quick_geglu_impl(
-                    intermediate_parallel,
-                    bias_parallel,
-                    permuted_probs,
-                    self.config.activation_func_fp8_input_store,
-                    self.config.glu_linear_offset,
-                    self.config.activation_func_clamp_value,
+    def forward(
+        self,
+        permuted_local_hidden_states,
+        tokens_per_expert,
+        permuted_probs,
+    ):
+        def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
+            # Whether activation function is interleaved GLU
+            with_glu_interleaving = (
+                self.config.gated_linear_unit
+                and self.config.moe_mlp_glu_interleave_size is not None
+            )
+            if self.config.use_te_activation_func:
+                if bias_parallel is not None:
+                    intermediate_parallel = intermediate_parallel + bias_parallel
+                if with_glu_interleaving:
+                    intermediate_parallel = self._remove_glu_interleaving(
+                        intermediate_parallel, self.config.moe_mlp_glu_interleave_size
+                    )
+                intermediate_parallel = self.activation_func(intermediate_parallel)
+                if permuted_probs is not None:
+                    original_dtype = intermediate_parallel.dtype
+                    intermediate_parallel = intermediate_parallel * permuted_probs
+                    intermediate_parallel = intermediate_parallel.to(original_dtype)
+            elif self.config.bias_activation_fusion and not with_glu_interleaving:
+                if self.activation_func == F.silu and self.config.gated_linear_unit:
+                    # dtype is handled inside the fused kernel
+                    intermediate_parallel = weighted_bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        permuted_probs,
+                        self.config.activation_func_fp8_input_store,
+                    )
+                elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
+                    intermediate_parallel = weighted_bias_quick_geglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        permuted_probs,
+                        self.config.activation_func_fp8_input_store,
+                        self.config.glu_linear_offset,
+                        self.config.activation_func_clamp_value,
+                    )
+                else:
+                    raise ValueError(
+                        "Only support fusion of swiglu and quick_gelu in TEGroupedMLP."
+                    )
+            elif (
+                self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
+            ):
+                assert (
+                    bias_parallel is None
+                ), "Bias is not supported with fused weighted squared relu."
+                intermediate_parallel = weighted_squared_relu_impl(
+                    intermediate_parallel, permuted_probs
                 )
             else:
-                raise ValueError("Only support fusion of swiglu and quick_gelu in TEGroupedMLP.")
-        elif (
-            self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
-        ):
-            assert bias_parallel is None, "Bias is not supported with fused weighted squared relu."
-            intermediate_parallel = weighted_squared_relu_impl(
-                intermediate_parallel, permuted_probs
-            )
-        else:
-            from hcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
+                from hcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
 
-            intermediate_parallel = fused_bias_gelu(self, intermediate_parallel, permuted_probs)
+                intermediate_parallel = fused_bias_gelu(self, intermediate_parallel, permuted_probs)
 
-        return intermediate_parallel
+            return intermediate_parallel
 
 
 class PrimusTurboGroupedMLP(MegatronCoreTEGroupedMLP):

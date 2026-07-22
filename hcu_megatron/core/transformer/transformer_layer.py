@@ -7,24 +7,22 @@ import functools
 from torch import Tensor
 
 from megatron.training import get_args
-from megatron.core.transformer.enums import LayerType
+from megatron.core.transformer.enums import CudaGraphScope, LayerType
 from megatron.core import parallel_state, tensor_parallel
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.cuda_graphs import is_graph_capturing
+from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.module import GraphableMegatronModule
-from megatron.core.transformer.transformer_layer import BaseTransformerLayer
+from megatron.core.transformer.transformer_layer import TransformerLayer as MegatronCoreTransformerLayer
 from megatron.core.typed_torch import apply_module
-from megatron.core.transformer.mlp import MLP
 
 from megatron.core.utils import (
     deprecate_inference_params,
-    get_pg_rank,
-    is_te_min_version,
-    log_single_rank,
     make_viewless_tensor,
     nvtx_range_pop,
     nvtx_range_push,
@@ -40,7 +38,6 @@ def _get_offloading_interface():
     )
 
     return FineGrainedActivationOffloadingInterface
-
 
 
 def get_transformer_layer_offset(
@@ -179,6 +176,7 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
         is_mtp_layer: bool = False,
         add_layer_offset: bool = True,
         pp_layer_offset: Optional[int] = None,
+        name: str | None = None,
     ):
         transformer_layer_init_func(
             self,
@@ -191,6 +189,7 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
             is_mtp_layer=is_mtp_layer,
             add_layer_offset=add_layer_offset,
             pp_layer_offset=pp_layer_offset,
+            name=name,
         )
 
         from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -258,231 +257,7 @@ class TransformerLayerSubmodules:
     sharded_state_dict_keys_map: Dict[str, str] = field(default_factory=dict)
 
 
-class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
-    def __init__(
-        self,
-        config: TransformerConfig,
-        submodules: TransformerLayerSubmodules,
-        layer_number: int = 1,
-        hidden_dropout: Optional[float] = None,
-        pg_collection: Optional[ProcessGroupCollection] = None,
-        vp_stage: Optional[int] = None,
-        is_mtp_layer: bool = False,
-        add_layer_offset: bool = True,
-        pp_layer_offset: Optional[int] = None,
-    ):
-        self.submodules_config = submodules
-        super().__init__(config=config, vp_stage=vp_stage)
-
-        if pg_collection is None:
-            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
-        self.pg_collection = pg_collection
-        self.tp_group = pg_collection.tp
-
-        # MTP inner layers use their own layer numbering (starting from 1 within each MTP depth),
-        # so they should NOT add the decoder layer offset. The router.py handles MTP layer
-        # numbering separately by adding config.num_layers to distinguish MTP layers from decoder
-        # layers in the aux loss tracker.
-        #
-        # When add_layer_offset is False, the caller has already included the correct offset
-        # in layer_number (e.g. when using --hybrid-layer-pattern with fVPP).
-        if is_mtp_layer or not add_layer_offset:
-            self.layer_number = layer_number
-        else:
-            self.layer_number = layer_number + get_transformer_layer_offset(
-                self.config, vp_stage, get_pg_rank(pg_collection.pp)
-            )
-        self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
-        self.is_mtp_layer = is_mtp_layer
-
-        # [Module 1: Input Layernorm] Optional Layernorm on the input data
-        # TODO: add pytorch only layernorm
-        self.input_layernorm = submodules.input_layernorm(
-            config=self.config,
-            hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
-        )
-
-        attention_optional_kwargs = {}
-        if config.context_parallel_size > 1 and config.cp_comm_type is not None:
-            if isinstance(config.cp_comm_type, list):
-                # layer_number is 1-indexed, so we need to subtract 1 to get the correct index
-                attention_optional_kwargs["cp_comm_type"] = config.cp_comm_type[
-                    self.layer_number - 1
-                ]
-            else:
-                attention_optional_kwargs["cp_comm_type"] = config.cp_comm_type
-
-        attention_optional_kwargs["pg_collection"] = pg_collection
-        if pp_layer_offset is not None:
-            attention_optional_kwargs["pp_layer_offset"] = pp_layer_offset
-
-        # [Module 2: SelfAttention]
-        self.self_attention = build_module(
-            submodules.self_attention,
-            config=self.config,
-            layer_number=self.layer_number,
-            **attention_optional_kwargs,
-        )
-
-        # [Module 3: BiasDropoutFusion]
-        self.self_attn_bda = build_module(submodules.self_attn_bda)
-
-        # [Module 4: Post SelfAttention] Optional Layernorm after self-attn
-        self.pre_cross_attn_layernorm = submodules.pre_cross_attn_layernorm(
-            config=self.config,
-            hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
-        )
-
-        # [Module 5: CrossAttention]
-        self.cross_attention = build_module(
-            submodules.cross_attention,
-            config=self.config,
-            layer_number=self.layer_number,
-            **attention_optional_kwargs,
-        )
-
-        # [Module 6: BiasDropoutFusion]
-        self.cross_attn_bda = build_module(submodules.cross_attn_bda, config=self.config)
-
-        # [Module 7: Pre MLP] Optional Layernorm before MLP
-        self.pre_mlp_layernorm = submodules.pre_mlp_layernorm(
-            config=self.config,
-            hidden_size=self.config.hidden_size,
-            eps=self.config.layernorm_epsilon,
-        )
-        # [Module 8: MLP block]
-        additional_mlp_kwargs = {}
-        # import here to avoid circular import
-        from megatron.core.extensions.transformer_engine import TEFusedMLP
-        from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
-        from megatron.core.transformer.moe.moe_layer import MoELayer
-
-        # MLP expects tp_group but MoELayer expects pg_collection to be passed in.
-        # We can change MLP to accept pg_collection but it makes the logic implicit
-        # The conditional below is to make the logic explicit
-        # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
-        if isinstance(submodules.mlp, ModuleSpec):
-            if submodules.mlp.module in (MoELayer, TEGroupedMLP, SequentialMLP):
-                additional_mlp_kwargs["pg_collection"] = pg_collection
-                # Pass is_mtp_layer flag to MoELayer to distinguish MTP MoE layers.
-                if submodules.mlp.module == MoELayer:
-                    additional_mlp_kwargs["is_mtp_layer"] = self.is_mtp_layer
-            elif submodules.mlp.module == MLP:
-                assert hasattr(
-                    pg_collection, 'tp'
-                ), 'TP process group is required for MLP in TransformerLayer'
-                additional_mlp_kwargs["tp_group"] = pg_collection.tp
-            elif TEFusedMLP is not None and submodules.mlp.module == TEFusedMLP:
-                assert hasattr(
-                    pg_collection, 'tp'
-                ), 'TP process group is required for TEFusedMLP in TransformerLayer'
-                additional_mlp_kwargs["tp_group"] = pg_collection.tp
-            else:
-                log_single_rank(
-                    logger,
-                    logging.WARNING,
-                    f"Unknown MLP type: {type(submodules.mlp)}. Using default kwargs.",
-                )
-        self.mlp = build_module(submodules.mlp, config=self.config, **additional_mlp_kwargs)
-        if hasattr(self.mlp, 'set_layer_number'):
-            self.mlp.set_layer_number(self.layer_number)
-
-        # [Module 9: BiasDropoutFusion]
-        self.mlp_bda = build_module(submodules.mlp_bda)
-
-        self.is_moe_layer = isinstance(self.mlp, MoELayer)
-
-        self.recompute_input_layernorm = False
-        self.recompute_pre_mlp_layernorm = False
-        self.recompute_mlp = False
-        if self.config.recompute_granularity == 'selective':
-            assert self.config.recompute_modules is not None
-            if "layernorm" in self.config.recompute_modules:
-                if not isinstance(self.input_layernorm, IdentityOp):
-                    self.recompute_input_layernorm = True
-                    if self.config.fp8 or self.config.fp4:
-                        self.self_attention.set_for_recompute_input_layernorm()
-
-                def can_recompute_pre_mlp_layernorm_for_cudagraph():
-                    if (
-                        not self.is_moe_layer
-                        or CudaGraphScope.moe_router not in self.config.cuda_graph_scope
-                        or self.config.cuda_graph_impl == "local"
-                    ):
-                        # Not a MoE layer, or not capturing the router part.
-                        return True
-                    if (
-                        self.config.moe_shared_expert_intermediate_size is not None
-                        and self.config.moe_shared_expert_overlap
-                    ):
-                        # If shared expert overlap is used, we cannot make the pre-mlp layernorm
-                        # recomputation, because the shared expert takes the layernorm output as
-                        # input, and it is outside of the CUDA graph scope.
-                        log_single_rank(
-                            logger,
-                            logging.WARNING,
-                            "pre_mlp_layernorm recompute is not supported with moe router "
-                            "cudagraph + shared expert overlap. Disabling pre_mlp_layernorm "
-                            "recompute.",
-                        )
-                        return False
-                    if CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope and (
-                        self.config.moe_token_dispatcher_type == "alltoall"
-                        or self.config.moe_latent_size
-                    ):
-                        # Only when capturing the preprocess part and using alltoall token
-                        # dispatcher or latent MoE can we make the pre-mlp layernorm recomputation.
-                        # Because in other cases the layernorm output returns directly as one of the
-                        # outputs of the cudagraph, which will be allocated a static buffer, thus
-                        # not able to be released.
-                        return True
-                    log_single_rank(
-                        logger,
-                        logging.WARNING,
-                        "pre_mlp_layernorm recompute is only supported with moe router + "
-                        "preprocess cudagraph will alltoall token dispatcher or latent MoE. "
-                        "Disabling pre_mlp_layernorm recompute.",
-                    )
-                    return False
-
-                if (
-                    not isinstance(self.pre_mlp_layernorm, IdentityOp)
-                    and can_recompute_pre_mlp_layernorm_for_cudagraph()
-                ):
-                    self.recompute_pre_mlp_layernorm = True
-                    if self.config.fp8 or self.config.fp4:
-                        if isinstance(self.mlp, MoELayer):
-                            self.mlp.set_for_recompute_pre_mlp_layernorm()
-                        else:
-                            from megatron.core.extensions.transformer_engine import (
-                                set_save_original_input,
-                            )
-
-                            set_save_original_input(self.mlp.linear_fc1)
-            if "mlp" in self.config.recompute_modules:
-                if not self.is_moe_layer:
-                    self.recompute_mlp = True
-        self.offload_attn_norm = (
-            self.config.fine_grained_activation_offloading
-            and "attn_norm" in self.config.offload_modules
-            and not isinstance(self.input_layernorm, IdentityOp)
-        )
-        self.offload_mlp_norm = (
-            self.config.fine_grained_activation_offloading
-            and "mlp_norm" in self.config.offload_modules
-            and not isinstance(self.pre_mlp_layernorm, IdentityOp)
-        )
-
-        # @jcasper how should we handle nvfuser?
-        # Set bias+dropout+add fusion grad_enable execution handler.
-        # TORCH_MAJOR = int(torch.__version__.split('.')[0])
-        # TORCH_MINOR = int(torch.__version__.split('.')[1])
-        # use_nvfuser = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
-        # self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
-        self.bias_dropout_add_exec_handler = torch.enable_grad
-
+class TransformerLayer():
     def _forward_attention(
         self,
         hidden_states: Tensor,
@@ -560,8 +335,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         if self.config.fp32_residual_connection:
             residual = residual.float()
 
-        using_fused_tp_inference_kernel = (not self.training) and (
-            self.config.inference_fuse_tp_communication
+        using_fused_tp_inference_kernel = (
+            InferenceMode.is_active() and self.config.inference_fuse_tp_communication
         )
 
         if using_fused_tp_inference_kernel:
@@ -681,7 +456,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         return super().__call__(*args, **kwargs)
 
 
-class HyperConnectionTransformerLayer(TransformerLayer):
+class HyperConnectionTransformerLayer(MegatronCoreTransformerLayer):
     """A transformer layer with Manifold-Constrained Hyper-Connections (mHC).
 
     Extends TransformerLayer by adding hyper connection modules around self-attention

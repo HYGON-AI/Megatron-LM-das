@@ -56,11 +56,12 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     else:
         args = parser.parse_args()
 
+    args._is_global_batch_size_explicitly_specified = args.global_batch_size is not None
+
     # Experimental yaml
     if args.yaml_cfg is not None:
         from megatron.training.yaml_arguments import load_yaml
-        assert args.yaml_cfg and not args.use_legacy_models, \
-            "Yaml config is not supported with legacy models."
+
         args = load_yaml(args.yaml_cfg)
 
     # Args from environment
@@ -71,11 +72,27 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     os.environ['RANK'] = str(args.rank)
     os.environ['WORLD_SIZE'] = str(args.world_size)
 
-    # Args to disable MSC
-    if not args.enable_msc:
+    # Args to enable MSC (opt-in: disabled by default)
+    if args.disable_msc_deprecated:
+        warn_rank_0(
+            '--disable-msc is deprecated and will be removed in a future release. '
+            'MSC is now disabled by default; pass --enable-msc to opt in.'
+        )
+        # Preserve legacy semantics: --disable-msc forces MSC off, even if
+        # --enable-msc was also passed.
+        args.enable_msc = False
+
+    if args.enable_msc:
+        MultiStorageClientFeature.enable()
+        if not MultiStorageClientFeature.is_enabled():
+            raise RuntimeError(
+                "--enable-msc was passed but the multistorageclient package is not "
+                "installed. Install it with `pip install multi-storage-client`."
+            )
+        warn_rank_0('The MSC feature is enabled.')
+    else:
         MultiStorageClientFeature.disable()
         assert MultiStorageClientFeature.is_enabled() is False
-        warn_rank_0('WARNING: The MSC feature is disabled.')
 
     return args
 
@@ -270,18 +287,3 @@ def _print_env_vars(title, exclude_vars=None):
         for arg in sorted(str_list, key=lambda x: x.lower()):
             print(arg, flush=True)
         print(f'-------------------- end of {title} ---------------------', flush=True)
-
-
-_CONFIG = None
-
-def core_transformer_config_from_args_wrapper(func):
-    @wraps(func)
-    def wrapper(args, config_class=None):
-        global _CONFIG
-        if _CONFIG is not None:
-            return _CONFIG
-
-        _CONFIG = func(args, config_class=config_class)
-        return _CONFIG
-
-    return wrapper

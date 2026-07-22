@@ -254,7 +254,6 @@ def initialize_model_parallel_wrapper(fn):
         create_gloo_process_groups: bool = True,
         high_priority_stream_groups: Optional[List[str]] = None,
         sharp_enabled_group: Optional[str] = None,
-        create_all_gather_group: Optional[bool] = False,
         rank_offset: int = 0,
         local_world_size: Optional[int] = None,
     ) -> None:
@@ -278,7 +277,6 @@ def initialize_model_parallel_wrapper(fn):
             create_gloo_process_groups=create_gloo_process_groups,
             high_priority_stream_groups=high_priority_stream_groups,
             sharp_enabled_group=sharp_enabled_group,
-            create_all_gather_group=create_all_gather_group,
             rank_offset=rank_offset,
             local_world_size=local_world_size,
         )

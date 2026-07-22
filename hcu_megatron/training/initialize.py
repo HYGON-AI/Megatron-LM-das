@@ -17,26 +17,18 @@ from megatron.training.utils import print_rank_0, warn_rank_0
 def initialize_megatron_wrapper(initialize_megatron_func):
     @wraps(initialize_megatron_func)
     def wrapper(
-        extra_args_provider=None,
-        args_defaults={},
-        ignore_unknown_args=False,
         allow_no_cuda=False,
         skip_mpu_initialization=False,
         get_embedding_ranks=None,
         get_position_embedding_ranks=None,
-        parsed_args=None,
         store=None,
     ):
 
         initialize_megatron_func(
-            extra_args_provider=extra_args_provider,
-            args_defaults=args_defaults,
-            ignore_unknown_args=ignore_unknown_args,
             allow_no_cuda=allow_no_cuda,
             skip_mpu_initialization=skip_mpu_initialization,
             get_embedding_ranks=get_embedding_ranks,
             get_position_embedding_ranks=get_position_embedding_ranks,
-            parsed_args=parsed_args,
             store=store,
         )
 
@@ -134,8 +126,11 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
             'timeout': timedelta(minutes=args.distributed_timeout_minutes),
         }
         if args.fake_process_group:
-            assert is_torch_min_version("2.3.0"), "Fake process group is only supported with PyTorch 2.3.0 and above."
+            assert is_torch_min_version(
+                "2.3.0"
+            ), "Fake process group is only supported with PyTorch 2.3.0 and above."
             from torch.testing._internal.distributed.fake_pg import FakeStore
+
             store = FakeStore()
             init_process_group_kwargs['backend'] = 'fake'
             init_process_group_kwargs['store'] = store
@@ -179,7 +174,6 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 create_gloo_process_groups=args.use_gloo_process_groups,
                 high_priority_stream_groups=args.high_priority_stream_groups,
                 sharp_enabled_group=args.sharp_enabled_group,
-                create_all_gather_group=args.create_all_gather_group,
             )
             print_rank_0(
                 f"> initialized tensor model parallel with size "

@@ -7,6 +7,7 @@ from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_a
 
 from megatron.training import get_args
 from megatron.core.inference.contexts import BaseInferenceContext
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
@@ -14,7 +15,6 @@ from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.typed_torch import apply_module
 from megatron.core.utils import (
     deprecate_inference_params,
@@ -29,7 +29,7 @@ try:
 except ImportError:
     rearrange = None
 
-from megatron.core.transformer.attention import HAVE_FA3
+from megatron.core.transformer.attention import HAVE_FA3, HAVE_FA4
 
 try:
     from transformer_engine.pytorch.attention.rope import apply_fused_qkv_rotary_pos_emb
@@ -42,6 +42,8 @@ try:
     import megatron.core.models.common.embeddings.yarn_rotary_pos_embedding as _yarn_mod
 except ImportError:
     pass
+
+
 def _yarn_get_concentration_factor_from_config(config):
     yarn_scaling = getattr(config, "yarn_rotary_scaling_factor", None)
     if yarn_scaling is not None:
@@ -51,6 +53,7 @@ def _yarn_get_concentration_factor_from_config(config):
             getattr(config, "yarn_mscale_all_dim", None),
         )
     return 1.0
+
 
 def attention_init_wrapper(attention_init_func):
     @wraps(attention_init_func)
@@ -64,6 +67,7 @@ def attention_init_wrapper(attention_init_func):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
         pp_layer_offset: Optional[int] = None,
+        name: str | None = None,
     ):
         attention_init_func(
             self,
@@ -75,6 +79,7 @@ def attention_init_wrapper(attention_init_func):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+            name=name,
         )
 
         if get_args().pipe_sp_splits != 1:
@@ -307,18 +312,20 @@ class Attention():
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if inference_context and inference_context.is_dynamic_batching():
-            assert HAVE_FA3 or is_fa_min_version(
-                "2.7.3"
+            assert (
+                HAVE_FA4 or HAVE_FA3 or is_fa_min_version("2.7.3")
             ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
-        is_inference_mode = inference_context is not None and not self.training
+        is_inference_mode = InferenceMode.is_active()
         # is_using_flash_decode - True is we are using the static inference engine with flash decode
         is_using_flash_decode = is_inference_mode and self.config.flash_decode
         # is_using_flashinfer_rope - True if we are using the dynamic inference engine
         # with flashinfer fused rope
-        is_using_flashinfer_rope = is_inference_mode and (
-            not inference_context.is_static_batching()
+        is_using_flashinfer_rope = (
+            is_inference_mode
+            and inference_context is not None
+            and not inference_context.is_static_batching()
             and inference_context.use_flashinfer_fused_rope
         )
         if is_using_flash_decode or is_using_flashinfer_rope:
@@ -396,7 +403,7 @@ class Attention():
         in_decode_mode = (
             inference_context is not None
             and inference_context.is_decode_only()
-            and not self.training
+            and InferenceMode.is_active()
         )
 
         # This branch only runs in the decode phase of flash decoding and returns after the linear
@@ -421,13 +428,12 @@ class Attention():
             )
             out = output.transpose(0, 1).contiguous()
             context_layer = out.view(out.size(0), out.size(1), -1)
-            output, bias = self.linear_proj(context_layer)
+            output, bias = apply_module(self.linear_proj)(context_layer)
             return output, bias
 
         if (
             in_decode_mode
             and self.config.cuda_graph_impl == "local"
-            and CudaGraphScope.full_iteration not in self.config.cuda_graph_scope
             and inference_context.is_static_batching()
         ):
             raise ValueError(f"CUDA graphs must use flash decode with static batching!")
@@ -608,7 +614,7 @@ class Attention():
         # =================
         nvtx_range_push(suffix="linear_proj")
         with off_interface(self.offload_attn_proj, core_attn_out, "attn_proj") as core_attn_out:
-            output, bias = self.linear_proj(core_attn_out)
+            output, bias = apply_module(self.linear_proj)(core_attn_out)
         if self.offload_attn_proj:
             output = off_interface.group_commit(
                 output, name="attn_proj", forced_released_tensors=[core_attn_out]
@@ -651,18 +657,20 @@ class Attention():
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if inference_context and inference_context.is_dynamic_batching():
-            assert HAVE_FA3 or is_fa_min_version(
-                "2.7.3"
+            assert (
+                HAVE_FA4 or HAVE_FA3 or is_fa_min_version("2.7.3")
             ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
-        is_inference_mode = inference_context is not None and not self.training
+        is_inference_mode = InferenceMode.is_active()
         # is_using_flash_decode - True is we are using the static inference engine with flash decode
         is_using_flash_decode = is_inference_mode and self.config.flash_decode
         # is_using_flashinfer_rope - True if we are using the dynamic inference engine
         # with flashinfer fused rope
-        is_using_flashinfer_rope = is_inference_mode and (
-            not inference_context.is_static_batching()
+        is_using_flashinfer_rope = (
+            is_inference_mode
+            and inference_context is not None
+            and not inference_context.is_static_batching()
             and inference_context.use_flashinfer_fused_rope
         )
         if is_using_flash_decode or is_using_flashinfer_rope:
@@ -780,8 +788,8 @@ class Attention():
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if inference_context and inference_context.is_dynamic_batching():
-            assert HAVE_FA3 or is_fa_min_version(
-                "2.7.3"
+            assert (
+                HAVE_FA4 or HAVE_FA3 or is_fa_min_version("2.7.3")
             ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
@@ -801,7 +809,7 @@ class Attention():
         in_decode_mode = (
             inference_context is not None
             and inference_context.is_decode_only()
-            and not self.training
+            and InferenceMode.is_active()
         )
 
         # This branch only runs in the decode phase of flash decoding and returns after the linear
@@ -826,13 +834,12 @@ class Attention():
             )
             out = output.transpose(0, 1).contiguous()
             context_layer = out.view(out.size(0), out.size(1), -1)
-            output, bias = self.linear_proj(context_layer)
+            output, bias = apply_module(self.linear_proj)(context_layer)
             return output, bias
 
         if (
             in_decode_mode
             and self.config.cuda_graph_impl == "local"
-            and CudaGraphScope.full_iteration not in self.config.cuda_graph_scope
             and inference_context.is_static_batching()
         ):
             raise ValueError(f"CUDA graphs must use flash decode with static batching!")
@@ -1000,7 +1007,7 @@ class Attention():
 
         nvtx_range_push(suffix="linear_proj")
         with off_interface(self.offload_attn_proj, core_attn_out, "attn_proj") as core_attn_out:
-            output, bias = self.linear_proj(core_attn_out)
+            output, bias = apply_module(self.linear_proj)(core_attn_out)
         if self.offload_attn_proj:
             output = off_interface.group_commit(
                 output, name="attn_proj", forced_released_tensors=[core_attn_out]

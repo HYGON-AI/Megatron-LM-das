@@ -2,12 +2,15 @@ import warnings
 from typing import Optional
 
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
+from megatron.core.models.backends import BackendSpecProvider
+from megatron.core.models.gpt.gpt_layer_specs import TESpecProvider
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.multi_latent_attention import (
+    FusedMLASelfAttention,
     MLASelfAttention,
     MLASelfAttentionSubmodules,
 )
@@ -26,10 +29,8 @@ from megatron.core.transformer.transformer_block import TransformerBlockSubmodul
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from megatron.core.typed_torch import copy_signature
-from hcu_megatron.core.transformer.hyper_connection import HyperConnectionModule
-from hcu_megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
-
 from megatron.core.utils import is_te_min_version
+from megatron.training import get_args
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -57,9 +58,11 @@ from hcu_megatron.core.tensor_parallel.layers import (
     FluxColumnParallelLinear,
     FluxRowParallelLinear
 )
+from hcu_megatron.core.transformer.hyper_connection import HyperConnectionModule
+from hcu_megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
 
 
-def get_gpt_layer_with_flux_spec(
+def get_gpt_layer_with_flux_submodules(
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     qk_layernorm: Optional[bool] = False,
@@ -72,6 +75,7 @@ def get_gpt_layer_with_flux_spec(
     use_kitchen_attention: bool = False,  # pylint: disable=unused-argument
     kitchen_attention_backend: str = "sdpa",  # pylint: disable=unused-argument
     mla_down_proj_fusion: bool = False,
+    use_grouped_gemm_for_dense_mlp: bool = False, # pylint: disable=unused-argument
     enable_hyper_connection: bool = False,
 ) -> ModuleSpec:
     """Use this spec to use flux modules (required for fp8 training).
@@ -105,37 +109,32 @@ def get_gpt_layer_with_flux_spec(
     )
 
     hc_module = HyperConnectionModule if enable_hyper_connection else IdentityOp
-    enable_hc = enable_hyper_connection
-    layer_module = HyperConnectionTransformerLayer if enable_hc else TransformerLayer
 
     if multi_latent_attention:
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-        return ModuleSpec(
-            module=layer_module,
-            submodules=TransformerLayerSubmodules(
-                input_layernorm=TENorm,
-                self_attention=ModuleSpec(
-                    module=MLASelfAttention,
-                    params={"attn_mask_type": AttnMaskType.causal},
-                    submodules=MLASelfAttentionSubmodules(
-                        linear_q_proj=FluxColumnParallelLinear,
-                        linear_q_down_proj=TELinear,
-                        linear_q_up_proj=FluxColumnParallelLinear,
-                        linear_kv_down_proj=TELinear,
-                        linear_kv_up_proj=FluxColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
-                        linear_proj=FluxRowParallelLinear,
-                        q_layernorm=TENorm if qk_layernorm else IdentityOp,
-                        kv_layernorm=TENorm if qk_layernorm else IdentityOp,
-                    ),
+        return TransformerLayerSubmodules(
+            input_layernorm=TENorm,
+            self_attention=ModuleSpec(
+                module=MLASelfAttention,
+                params={"attn_mask_type": AttnMaskType.causal},
+                submodules=MLASelfAttentionSubmodules(
+                    linear_q_proj=FluxColumnParallelLinear,
+                    linear_q_down_proj=TELinear,
+                    linear_q_up_proj=FluxColumnParallelLinear,
+                    linear_kv_down_proj=TELinear,
+                    linear_kv_up_proj=FluxColumnParallelLinear,
+                    core_attention=TEDotProductAttention,
+                    linear_proj=FluxRowParallelLinear,
+                    q_layernorm=TENorm if qk_layernorm else IdentityOp,
+                    kv_layernorm=TENorm if qk_layernorm else IdentityOp,
                 ),
-                self_attn_bda=get_bias_dropout_add,
-                self_attention_hyper_connection=hc_module,
-                pre_mlp_layernorm=TENorm,
-                mlp=mlp,
-                mlp_hyper_connection=hc_module,
-                mlp_bda=get_bias_dropout_add,
             ),
+            self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=hc_module,
+            pre_mlp_layernorm=TENorm,
+            mlp=mlp,
+            mlp_hyper_connection=hc_module,
+            mlp_bda=get_bias_dropout_add,
         )
     else:
 
@@ -144,33 +143,232 @@ def get_gpt_layer_with_flux_spec(
         # we instead use the Apex implementation.
         qk_norm = TENorm if is_te_min_version("1.9.0") else FusedLayerNorm
 
-        return ModuleSpec(
-            module=layer_module,
-            submodules=TransformerLayerSubmodules(
-                input_layernorm=TENorm,
+        return TransformerLayerSubmodules(
+            input_layernorm=TENorm,
+            self_attention=ModuleSpec(
+                module=SelfAttention,
+                params={"attn_mask_type": AttnMaskType.causal},
+                submodules=SelfAttentionSubmodules(
+                    linear_qkv=FluxColumnParallelLinear,
+                    core_attention=TEDotProductAttention,
+                    linear_proj=FluxRowParallelLinear,
+                    q_layernorm=(
+                        L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                    ),
+                    k_layernorm=(
+                        L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                    ),
+                ),
+            ),
+            self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=hc_module,
+            pre_mlp_layernorm=TENorm,
+            mlp=mlp,
+            mlp_bda=get_bias_dropout_add,
+            mlp_hyper_connection=hc_module,
+        )
+
+
+@copy_signature(get_gpt_layer_with_flux_submodules)
+def get_gpt_layer_with_flux_spec(*args, **kwargs) -> ModuleSpec:
+    """Use this spec to use lower-level Transformer Engine modules (required for fp8 training)."""
+    enable_hyper_connection = kwargs.get('enable_hyper_connection', False)
+    layer_module = HyperConnectionTransformerLayer if enable_hyper_connection else TransformerLayer
+    return ModuleSpec(
+        module=layer_module,
+        submodules=get_gpt_layer_with_flux_submodules(*args, **kwargs),
+    )
+
+
+def get_gpt_layer_with_transformer_engine_submodules(
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: Optional[bool] = False,
+    qk_layernorm: Optional[bool] = False,
+    multi_latent_attention: Optional[bool] = False,
+    fp8: Optional[str] = None,  # pylint: disable=unused-argument
+    qk_l2_norm: Optional[bool] = False,
+    use_te_op_fuser: Optional[bool] = False,
+    use_kitchen: bool = False,
+    use_te_activation_func: bool = False,
+    use_kitchen_attention: bool = False,
+    kitchen_attention_backend: str = "sdpa",
+    mla_down_proj_fusion: bool = False,
+    use_grouped_gemm_for_dense_mlp: bool = False,
+    enable_hyper_connection: bool = False,
+) -> TransformerLayerSubmodules:
+    """Use these submodules to use lower-level Transformer Engine modules (required for fp8
+    training).
+
+
+    Args:
+        num_experts (int, optional): Number of experts. Defaults to None.
+        moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
+        qk_layernorm (bool, optional): To use layernorm for queries/keys. Defaults to False.
+        multi_latent_attention (bool, optional): To use MLA. Defaults to False.
+        fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
+        qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
+        use_te_op_fuser (bool, optional): Use Transformer Engine's operation-based API, which may
+                                          enable certain operation fusions. Defaults to False.
+        mla_down_proj_fusion (bool, optional): Enable fused q/kv down-projection and fused input
+                                               layernorm when backend supports. Otherwise fall back
+                                               to the unfused MLA.
+
+    Returns:
+        TransformerLayerSubmodules: TE modules to construct a TransformerLayer
+
+    """
+    if fp8 is not None:
+        warnings.warn(
+            'The fp8 argument in "get_gpt_layer_with_transformer_engine_spec" has been deprecated'
+            " and will be removed soon. Please update your code accordingly."
+        )
+
+    if use_kitchen:
+        assert HAVE_KITCHEN
+        backend: BackendSpecProvider = KitchenSpecProvider(
+            fallback=TESpecProvider(),
+            use_kitchen_attention=use_kitchen_attention,
+            kitchen_attention_backend=kitchen_attention_backend,
+        )
+        if use_te_op_fuser:
+            raise AssertionError("use_te_op_fuser not compatible with using kitchen in mlp.")
+        if use_te_activation_func:
+            raise AssertionError("use_te_activation_func not compatible with using kitchen.")
+    else:
+        backend = TESpecProvider()
+
+    mlp = get_mlp_module_spec_for_backend(
+        backend=backend,
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        use_te_op_fuser=use_te_op_fuser,
+        use_te_activation_func=use_te_activation_func,
+        use_grouped_gemm_for_dense_mlp=use_grouped_gemm_for_dense_mlp,
+    )
+
+    hc_module = HyperConnectionModule if enable_hyper_connection else IdentityOp
+
+    if multi_latent_attention:
+        assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+        linear_q_up_proj = (
+            backend.column_parallel_layer_norm_linear()
+            if qk_layernorm
+            else backend.column_parallel_linear()
+        )
+        linear_kv_up_proj = (
+            backend.column_parallel_layer_norm_linear()
+            if qk_layernorm
+            else backend.column_parallel_linear()
+        )
+
+        if mla_down_proj_fusion:
+            fuse_input_layernorm = backend.column_parallel_layer_norm_linear() is not None
+            input_layernorm = IdentityOp if fuse_input_layernorm else backend.layer_norm()
+            down_proj_linear = (
+                backend.column_parallel_layer_norm_linear()
+                if fuse_input_layernorm
+                else backend.linear()
+            )
+            return TransformerLayerSubmodules(
+                input_layernorm=input_layernorm,
                 self_attention=ModuleSpec(
-                    module=SelfAttention,
+                    module=FusedMLASelfAttention,
                     params={"attn_mask_type": AttnMaskType.causal},
-                    submodules=SelfAttentionSubmodules(
-                        linear_qkv=FluxColumnParallelLinear,
-                        core_attention=TEDotProductAttention,
-                        linear_proj=FluxRowParallelLinear,
-                        q_layernorm=(
-                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
-                        ),
-                        k_layernorm=(
-                            L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
-                        ),
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=backend.column_parallel_linear(),
+                        linear_qkv_down_proj=down_proj_linear,
+                        linear_q_up_proj=linear_q_up_proj,
+                        linear_kv_up_proj=linear_kv_up_proj,
+                        core_attention=backend.core_attention(),
+                        linear_proj=backend.row_parallel_linear(),
+                        q_layernorm=IdentityOp,
+                        kv_layernorm=IdentityOp,
                     ),
                 ),
                 self_attn_bda=get_bias_dropout_add,
                 self_attention_hyper_connection=hc_module,
-                pre_mlp_layernorm=TENorm,
+                pre_mlp_layernorm=backend.layer_norm() if num_experts else IdentityOp,
                 mlp=mlp,
-                mlp_bda=get_bias_dropout_add,
                 mlp_hyper_connection=hc_module,
+                mlp_bda=get_bias_dropout_add,
+                sharded_state_dict_keys_map=(
+                    {
+                        "self_attention.linear_q_down_proj.layer_norm_": "input_layernorm.",
+                        "self_attention.linear_kv_down_proj.layer_norm_": "input_layernorm.",
+                        "self_attention.linear_qkv_down_proj.layer_norm_": "input_layernorm.",
+                    }
+                    if fuse_input_layernorm
+                    else {}
+                ),
+            )
+        return TransformerLayerSubmodules(
+            input_layernorm=backend.layer_norm(has_residual=True),
+            self_attention=ModuleSpec(
+                module=MLASelfAttention,
+                params={"attn_mask_type": AttnMaskType.causal},
+                submodules=MLASelfAttentionSubmodules(
+                    linear_q_proj=backend.column_parallel_linear(),
+                    linear_q_down_proj=backend.linear(),
+                    linear_q_up_proj=linear_q_up_proj,
+                    linear_kv_down_proj=backend.linear(),
+                    linear_kv_up_proj=linear_kv_up_proj,
+                    core_attention=backend.core_attention(),
+                    linear_proj=backend.row_parallel_linear(),
+                    q_layernorm=IdentityOp,
+                    kv_layernorm=IdentityOp,
+                ),
             ),
+            self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=hc_module,
+            pre_mlp_layernorm=backend.layer_norm(has_residual=True) if num_experts else IdentityOp,
+            mlp=mlp,
+            mlp_hyper_connection=hc_module,
+            mlp_bda=get_bias_dropout_add,
         )
+    else:
+        qk_norm = backend.layer_norm(for_qk=True)
+        return TransformerLayerSubmodules(
+            self_attention=ModuleSpec(
+                module=SelfAttention,
+                params={"attn_mask_type": AttnMaskType.causal},
+                submodules=SelfAttentionSubmodules(
+                    linear_qkv=backend.column_parallel_layer_norm_linear(),
+                    core_attention=backend.core_attention(),
+                    linear_proj=backend.row_parallel_linear(),
+                    q_layernorm=(
+                        L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                    ),
+                    k_layernorm=(
+                        L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
+                    ),
+                ),
+            ),
+            self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=hc_module,
+            pre_mlp_layernorm=backend.layer_norm(has_residual=True) if num_experts else IdentityOp,
+            mlp=mlp,
+            mlp_hyper_connection=hc_module,
+            mlp_bda=get_bias_dropout_add,
+            sharded_state_dict_keys_map={
+                "mlp.0.weight": "mlp.linear_fc1.layer_norm_weight",
+                "mlp.0.bias": "mlp.linear_fc1.layer_norm_bias",
+                "mlp.1.basic_ops.0.weight": "mlp.linear_fc1.weight",
+                "mlp.1.basic_ops.1.bias": "mlp.linear_fc1.bias",
+                "mlp.3.basic_ops.0.weight": "mlp.linear_fc2.weight",
+                "mlp.3.basic_ops.1.bias": "mlp.linear_fc2.bias",
+            },
+        )
+
+
+@copy_signature(get_gpt_layer_with_transformer_engine_submodules)
+def get_gpt_layer_with_transformer_engine_spec(*args, **kwargs) -> ModuleSpec:
+    """Use this spec to use lower-level Transformer Engine modules (required for fp8 training)."""
+    enable_hyper_connection = kwargs.get('enable_hyper_connection', False)
+    layer_module = HyperConnectionTransformerLayer if enable_hyper_connection else TransformerLayer
+    return ModuleSpec(
+        module=layer_module,
+        submodules=get_gpt_layer_with_transformer_engine_submodules(*args, **kwargs),
+    )
 
 
 def get_mlp_module_flux_spec(
@@ -196,6 +394,7 @@ def get_mlp_module_flux_spec(
             num_experts=num_experts,
             moe_grouped_gemm=moe_grouped_gemm,
         )
+
 
 def get_gpt_layer_local_submodules(
     num_experts: Optional[int] = None,
@@ -312,6 +511,7 @@ def get_gpt_layer_local_submodules(
             },
         )
 
+
 @copy_signature(get_gpt_layer_local_submodules)
 def get_gpt_layer_local_spec(*args, **kwargs) -> ModuleSpec:
     """Use this spec for an implementation using only modules in Megatron-Core."""
@@ -320,6 +520,7 @@ def get_gpt_layer_local_spec(*args, **kwargs) -> ModuleSpec:
     return ModuleSpec(
         module=layer_module, submodules=get_gpt_layer_local_submodules(*args, **kwargs)
     )
+
 
 def get_gpt_decoder_layer_specs(
     config: TransformerConfig,
@@ -332,7 +533,12 @@ def get_gpt_decoder_layer_specs(
     """GPT block spec."""
 
     if use_transformer_engine:
-        dense_layer_spec = get_gpt_layer_with_flux_spec(
+        if get_args().parallel_linear_impl == 'flux':
+            gpt_layer_spec_clz = get_gpt_layer_with_flux_spec
+        else:
+            gpt_layer_spec_clz = get_gpt_layer_with_transformer_engine_spec
+
+        dense_layer_spec = gpt_layer_spec_clz(
             num_experts=None,
             moe_grouped_gemm=False,
             qk_layernorm=config.qk_layernorm,
@@ -340,12 +546,12 @@ def get_gpt_decoder_layer_specs(
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
             use_te_activation_func=config.use_te_activation_func,
-            enable_hyper_connection=config.enable_hyper_connections,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
             mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
+            enable_hyper_connection=config.enable_hyper_connections,
         )
-        moe_layer_spec = get_gpt_layer_with_flux_spec(
+        moe_layer_spec = gpt_layer_spec_clz(
             num_experts=config.num_moe_experts,
             moe_grouped_gemm=config.moe_grouped_gemm,
             qk_layernorm=config.qk_layernorm,
@@ -353,10 +559,10 @@ def get_gpt_decoder_layer_specs(
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
             use_te_activation_func=config.use_te_activation_func,
-            enable_hyper_connection=config.enable_hyper_connections,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
             mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
+            enable_hyper_connection=config.enable_hyper_connections,
         )
     elif config.transformer_impl == "inference_optimized":
         layer_norm_impl = TENorm
@@ -382,6 +588,8 @@ def get_gpt_decoder_layer_specs(
             normalization=normalization,
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
+            use_kitchen_attention=config.use_kitchen_attention,
+            kitchen_attention_backend=config.kitchen_attention_backend,
             enable_hyper_connection=config.enable_hyper_connections,
         )
         moe_layer_spec = get_gpt_layer_local_spec(
@@ -392,6 +600,8 @@ def get_gpt_decoder_layer_specs(
             normalization=normalization,
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
+            use_kitchen_attention=config.use_kitchen_attention,
+            kitchen_attention_backend=config.kitchen_attention_backend,
             enable_hyper_connection=config.enable_hyper_connections,
         )
 

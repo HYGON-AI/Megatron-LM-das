@@ -49,12 +49,15 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
         self.is_recompute = is_recompute
         if not isinstance(inputs, tuple):
             inputs = (inputs,)
-        return self._forward(
+        output = self._forward(
                 *inputs,
                 stream_wait_event=stream_wait_event,
                 stream_record_event=stream_record_event,
                 is_recompute=is_recompute,
             )
+        if self.is_layer_last_node:
+            self._post_forward_hook()
+        return output
 
     def _forward(self, *inputs, stream_wait_event=None, stream_record_event=None, is_recompute=False):
         # Lazy initialization of stream
@@ -197,6 +200,18 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                         pre_mlp_layernorm_output = apply_module(layer.pre_mlp_layernorm)(
                             hidden_states
                         )
+
+                # When using fused residual norm (e.g. TEFusedResidualRMSNorm),
+                # the layernorm returns (normalized_output, residual). Unpack
+                # and use the fused residual for the downstream BDA connection.
+                if isinstance(pre_mlp_layernorm_output, tuple):
+                    if len(pre_mlp_layernorm_output) != 2:
+                        raise ValueError(
+                            f"When the output of pre_mlp_layernorm is a tuple, it is "
+                            f"expected to have 2 elements (output, residual), but "
+                            f"got {len(pre_mlp_layernorm_output)}"
+                        )
+                    pre_mlp_layernorm_output, hidden_states = pre_mlp_layernorm_output
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
                 probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
@@ -366,14 +381,17 @@ def build_mtp_layer_callables_without_split_attn(layer):
                 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
                 node.chunk_state.model.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
-        input_ids, position_ids, decoder_input, hidden_states = layer._get_embeddings(
+        input_ids, position_ids, padding_mask, decoder_input, hidden_states = layer._get_embeddings(
             input_ids=node.chunk_state.input_ids,
             position_ids=node.chunk_state.position_ids,
             embedding=node.chunk_state.model.embedding,
             hidden_states=hidden_states,
+            packed_seq_params=node.chunk_state.packed_seq_params,
+            padding_mask=node.chunk_state.padding_mask,
         )
         node.chunk_state.input_ids = input_ids
         node.chunk_state.position_ids = position_ids
+        node.chunk_state.padding_mask = padding_mask
 
         # MTP Layer Preprocess
         # norm, linear projection and transformer
@@ -596,6 +614,18 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         else:
             with off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm") as hidden_states:
                 pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states)
+
+        # When using fused residual norm (e.g. TEFusedResidualRMSNorm),
+        # the layernorm returns (normalized_output, residual). Unpack
+        # and use the fused residual for the downstream BDA connection.
+        if isinstance(pre_mlp_layernorm_output, tuple):
+            if len(pre_mlp_layernorm_output) != 2:
+                raise ValueError(
+                    f"When the output of pre_mlp_layernorm is a tuple, it is "
+                    f"expected to have 2 elements (output, residual), but "
+                    f"got {len(pre_mlp_layernorm_output)}"
+                )
+            pre_mlp_layernorm_output, hidden_states = pre_mlp_layernorm_output
 
         probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
         local_tokens, probs = layer.mlp.preprocess(
@@ -855,14 +885,17 @@ def build_mtp_layer_callables_with_split_attn(layer):
                 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
                 node.chunk_state.model.embedding.word_embeddings.weight = get_shared_embedding_from_dual_chunk()
 
-        input_ids, position_ids, decoder_input, hidden_states = layer._get_embeddings(
+        input_ids, position_ids, padding_mask, decoder_input, hidden_states = layer._get_embeddings(
             input_ids=node.chunk_state.input_ids,
             position_ids=node.chunk_state.position_ids,
             embedding=node.chunk_state.model.embedding,
             hidden_states=hidden_states,
+            packed_seq_params=node.chunk_state.packed_seq_params,
+            padding_mask=node.chunk_state.padding_mask,
         )
         node.chunk_state.input_ids = input_ids
         node.chunk_state.position_ids = position_ids
+        node.chunk_state.padding_mask = padding_mask
 
         # MTP Layer Preprocess
         # norm, linear projection and transformer

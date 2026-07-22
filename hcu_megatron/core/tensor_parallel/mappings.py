@@ -28,7 +28,7 @@ DTYPE_MAP = {
 }
 
 
-def q_alltoall_int8(input, quant_group_size, quant_scale_dtype, output_split_sizes, input_split_sizes, group):
+def q_alltoall_int8(input, quant_group_size, quant_scale_dtype, output_split_sizes, input_split_sizes, group, use_nccl_stream=False):
     t, s = input.shape[0], input.shape[1]
 
     assert s % quant_group_size == 0, f"size {s} should be divided by quant_group_size {quant_group_size}."
@@ -57,13 +57,24 @@ def q_alltoall_int8(input, quant_group_size, quant_scale_dtype, output_split_siz
             dtype=torch.int8,
         )
 
-    torch.distributed.all_to_all_single(
-        output,
-        input_all.view(t, -1),
-        output_split_sizes=output_split_sizes,
-        input_split_sizes=input_split_sizes,
-        group=group,
-    )
+    if use_nccl_stream:
+        handle = torch.distributed.all_to_all_single(
+            output,
+            input_all.view(t, -1),
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+            async_op=True,
+        )
+        handle.wait()
+    else:
+        torch.distributed.all_to_all_single(
+            output,
+            input_all.view(t, -1),
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+        )
 
     output = output.view(-1, num_quant_groups, quant_group_size + num_scale_bytes)
     scales = int8s_to_float(output[:, :, -num_scale_bytes:], output_dtype=DTYPE_MAP[quant_scale_dtype])
@@ -73,7 +84,7 @@ def q_alltoall_int8(input, quant_group_size, quant_scale_dtype, output_split_siz
     return dequant_out.view(-1, s)
 
 
-def q_alltoall_int4(input, quant_group_size, quant_scale_dtype, output_split_sizes, input_split_sizes, group):
+def q_alltoall_int4(input, quant_group_size, quant_scale_dtype, output_split_sizes, input_split_sizes, group, use_nccl_stream=False):
     t, s = input.shape[0], input.shape[1]
     assert s % 2 == 0, f"size {s} should be an even number."
     assert s % quant_group_size == 0, f"size {s} should be divided by quant_group_size {quant_group_size}."
@@ -105,13 +116,24 @@ def q_alltoall_int4(input, quant_group_size, quant_scale_dtype, output_split_siz
             dtype=torch.int8,
         )
 
-    torch.distributed.all_to_all_single(
-        output,
-        input_all,
-        output_split_sizes=output_split_sizes,
-        input_split_sizes=input_split_sizes,
-        group=group,
-    )
+    if use_nccl_stream:
+        handle = torch.distributed.all_to_all_single(
+            output,
+            input_all,
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+            async_op=True,
+        )
+        handle.wait()
+    else:
+        torch.distributed.all_to_all_single(
+            output,
+            input_all,
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+        )
 
     scales = int8s_to_float(output[:, (s // 2):], output_dtype=DTYPE_MAP[quant_scale_dtype]).unsqueeze(1)
     dequant_out = torch.empty((output.shape[0], 1, s), dtype=torch.bfloat16, device="cuda")
@@ -128,6 +150,7 @@ class _AllToAll(torch.autograd.Function):
             input,
             output_split_sizes,
             input_split_sizes,
+            use_nccl_stream=False,
             use_quantize_comm=False,
             quant_comm_bits: int = None,
             quant_group_size: int = None,
@@ -137,6 +160,7 @@ class _AllToAll(torch.autograd.Function):
         ctx.group = group
         ctx.output_split_sizes = output_split_sizes
         ctx.input_split_sizes = input_split_sizes
+        ctx.use_nccl_stream = use_nccl_stream
         ctx.use_quantize_comm = use_quantize_comm
         ctx.quant_comm_bits = quant_comm_bits
         ctx.quant_group_size = quant_group_size
@@ -156,9 +180,25 @@ class _AllToAll(torch.autograd.Function):
 
         if use_quantize_comm and input_dim > 1:
             if quant_comm_bits == 8:
-                output = q_alltoall_int8(input, quant_group_size, quant_scale_dtype, output_split_sizes, input_split_sizes, group)
+                output = q_alltoall_int8(
+                    input,
+                    quant_group_size,
+                    quant_scale_dtype,
+                    output_split_sizes,
+                    input_split_sizes,
+                    group,
+                    use_nccl_stream=use_nccl_stream,
+                )
             else:
-                output = q_alltoall_int4(input, quant_group_size, quant_scale_dtype, output_split_sizes, input_split_sizes, group)
+                output = q_alltoall_int4(
+                    input,
+                    quant_group_size,
+                    quant_scale_dtype,
+                    output_split_sizes,
+                    input_split_sizes,
+                    group,
+                    use_nccl_stream=use_nccl_stream,
+                )
         else:
             if output_split_sizes is None:
                 output = torch.empty_like(input)
@@ -169,13 +209,25 @@ class _AllToAll(torch.autograd.Function):
                     dtype=input.dtype,
                     device=torch.cuda.current_device(),
                 )
-            torch.distributed.all_to_all_single(
-                output,
-                input,
-                output_split_sizes=output_split_sizes,
-                input_split_sizes=input_split_sizes,
-                group=group,
-            )
+
+            if use_nccl_stream:
+                handle = torch.distributed.all_to_all_single(
+                    output,
+                    input,
+                    output_split_sizes=output_split_sizes,
+                    input_split_sizes=input_split_sizes,
+                    group=group,
+                    async_op=True,
+                )
+                handle.wait()
+            else:
+                torch.distributed.all_to_all_single(
+                    output,
+                    input,
+                    output_split_sizes=output_split_sizes,
+                    input_split_sizes=input_split_sizes,
+                    group=group,
+                )
 
         return output
 
@@ -187,6 +239,7 @@ class _AllToAll(torch.autograd.Function):
             *grad_output,
             ctx.input_split_sizes,
             ctx.output_split_sizes,
+            ctx.use_nccl_stream,
             ctx.use_quantize_comm,
             ctx.quant_comm_bits,
             ctx.quant_group_size,
@@ -198,6 +251,7 @@ class _AllToAll(torch.autograd.Function):
             input_grad,    # input
             None,          # output_split_sizes
             None,          # input_split_sizes
+            None,          # use_nccl_stream
             None,          # use_quantize_comm
             None,          # quant_comm_bits
             None,          # quant_group_size
@@ -210,6 +264,7 @@ def all_to_all(
         input_,
         output_split_sizes_=None,
         input_split_sizes=None,
+        use_nccl_stream=False,
         use_quantize_comm=None,
         quant_comm_bits=None,
         quant_group_size=None,
@@ -240,6 +295,7 @@ def all_to_all(
         input_,
         output_split_sizes_,
         input_split_sizes,
+        use_nccl_stream,
         use_quantize_comm,
         quant_comm_bits,
         quant_group_size,

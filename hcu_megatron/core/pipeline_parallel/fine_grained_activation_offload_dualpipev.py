@@ -82,7 +82,10 @@ class PipelineOffloadManagerDualpipeV():
                     break
 
     def init_model_chunk_offload_handler(
-        self, is_first_chunk, min_offloaded_tensor_size=1024 * 1024
+        self,
+        is_first_chunk,
+        min_offloaded_tensor_size=1024 * 1024,
+        max_inflight_offloads=None,
     ):
         """
         Initialize a chunk offload handler for a model chunk (microbatch).
@@ -90,12 +93,19 @@ class PipelineOffloadManagerDualpipeV():
         Args:
             is_first_chunk: self-explained
             min_offloaded_tensor_size: Minimum tensor size (in elements) to offload
+            max_inflight_offloads: If set, cap pending offloads per group name before main
+                wait_event; see ``fine_grained_offloading_max_inflight_offloads`` on
+                ``TransformerConfig``.
         """
         if not self._is_warmup:
             return
 
         # Use shared CPU tensor pool for better reuse across chunks
-        cur_chunk = ChunkOffloadHandler(min_offloaded_tensor_size, self._cpu_tensor_pool)
+        cur_chunk = ChunkOffloadHandler(
+            min_offloaded_tensor_size,
+            self._cpu_tensor_pool,
+            max_inflight_offloads=max_inflight_offloads,
+        )
         debug_rank(f"init_model_chunk_offload_handler {cur_chunk}")
         self.push(cur_chunk, is_first_chunk=is_first_chunk)
         self._cur_forward_chunk = cur_chunk
@@ -106,9 +116,13 @@ class FineGrainedActivationOffloadingInterface:
     """Interface for fine-grained activation offloading."""
 
     @staticmethod
-    def init_chunk_handler(is_first_chunk, min_offloaded_tensor_size):
+    def init_chunk_handler(
+        is_first_chunk, min_offloaded_tensor_size, max_inflight_offloads=None
+    ):
         """Initialize the chunk handler, called at the start of a microbatch forward pass."""
         from megatron.core.pipeline_parallel.fine_grained_activation_offload import PipelineOffloadManager
         PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
-            is_first_chunk, min_offloaded_tensor_size
+            is_first_chunk,
+            min_offloaded_tensor_size,
+            max_inflight_offloads=max_inflight_offloads,
         )

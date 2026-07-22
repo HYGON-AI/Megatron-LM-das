@@ -26,6 +26,7 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.moe.paged_stash import paged_stash_reset
 from megatron.training import get_args
 
 from ..combined_1f1b import combined_forward_backward_step
@@ -509,6 +510,9 @@ def forward_backward_pipelining_with_cutinhalf(
         pg_collection.dp_cp = parallel_state.get_data_parallel_group(
             with_context_parallel=True, partial_data_parallel=False
         )
+        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
+            with_context_parallel=True
+        )
 
     elif p2p_communicator is not None and pg_collection is not None:
         model_type = get_model_type(model[0])
@@ -536,6 +540,9 @@ def forward_backward_pipelining_with_cutinhalf(
 
     config = get_model_config(model[0])
     config.batch_p2p_comm = False
+
+    if getattr(config, "moe_paged_stash", False):
+        paged_stash_reset(enabled=not forward_only, config=config)
 
     # Needed only when gradients are finalized in M-Core
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -685,7 +692,7 @@ def forward_backward_pipelining_with_cutinhalf(
     ):
         """Helper method to run combined forward and backward step"""
 
-        set_streams()
+        set_streams(high_priority=config.high_priority_a2a_comm_stream)
         # forward prepare
         fwd_input_tensor = None
         fwd_microbatch_id = None

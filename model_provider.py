@@ -4,19 +4,13 @@ from typing import Callable, Optional, Union
 
 import torch
 
-from megatron.core.models.gpt import GPTModel
-from megatron.core.models.mamba import MambaModel
 from megatron.training import get_args
 
 try:
-    from megatron.post_training.model_builder import modelopt_gpt_mamba_builder
+    from megatron.post_training.model_builder import modelopt_gpt_hybrid_builder
     has_nvidia_modelopt = True
 except ImportError:
     has_nvidia_modelopt = False
-
-import megatron.legacy.model  # isort: skip
-
-# NOTE: Loading `megatron.legacy.model` earlier fails due to circular import
 
 
 def model_provider(
@@ -24,7 +18,7 @@ def model_provider(
     split_vocab_embedding=False,
     noop_block=False,
     include_layer_norm=False,
-) -> Union[GPTModel, megatron.legacy.model.GPTModel, MambaModel]:
+):
     """Builds the model.
 
     If you set the use_legacy_models to True, it will return the legacy GPT model and if not the mcore GPT model.
@@ -35,7 +29,7 @@ def model_provider(
         post_process (bool, optional): Set to true if you need to compute output logits/loss. Defaults to True.
 
     Returns:
-        Union[GPTModel, megatron.legacy.model.GPTModel, MambaModel]: The returned model
+        Union[GPTModel, HybridModel]: The returned model
     """
     args = get_args()
 
@@ -59,7 +53,7 @@ def model_provider(
 
     if has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False):
         # [ModelOpt]: Use custom builder + spec when modelopt is enabled
-        model_builder = modelopt_gpt_mamba_builder
+        model_builder = modelopt_gpt_hybrid_builder
 
     return model_builder(
             args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection,

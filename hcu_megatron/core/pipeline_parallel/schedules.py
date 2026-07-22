@@ -28,18 +28,18 @@ from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
-from megatron.core.transformer.enums import CudaGraphScope
 
 from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.transformer.moe.paged_stash import paged_stash_reset
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
 from megatron.core.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_pp_last_stage,
 )
-from megatron.core.pipeline_parallel.schedules import set_current_microbatch
+from megatron.core.pipeline_parallel.schedules import get_tensor_device, set_current_microbatch
 from megatron.core.timers import Timer
 
 from .ripipe_schedules import forward_backward_ripipe_pipelining
@@ -171,10 +171,11 @@ def forward_step_calc_loss(
     # explicitly.
     if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
         # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        device = get_tensor_device(output_tensor)
         loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            config.grad_scale_func(torch.ones(1, device=device))
             if config.grad_scale_func is not None
-            else torch.ones(1, device=output_tensor.device)
+            else torch.ones(1, device=device)
         )
         # Set the loss scale
         if config.calculate_per_token_loss:
@@ -185,10 +186,11 @@ def forward_step_calc_loss(
     # Set the loss scale for Multi-Token Prediction (MTP) loss.
     if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
         # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        device = get_tensor_device(output_tensor)
         loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            config.grad_scale_func(torch.ones(1, device=device))
             if config.grad_scale_func is not None
-            else torch.ones(1, device=output_tensor.device)
+            else torch.ones(1, device=device)
         )
         # Set the loss scale
         if config.calculate_per_token_loss:
@@ -530,6 +532,9 @@ def forward_backward_pipelining_without_interleaving(
         pg_collection.dp_cp = parallel_state.get_data_parallel_group(
             with_context_parallel=True, partial_data_parallel=False
         )
+        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
+            with_context_parallel=True
+        )
 
     elif p2p_communicator is not None and pg_collection is not None:
         assert hasattr(p2p_communicator, 'config'), "p2p_communicator must have a config"
@@ -570,6 +575,9 @@ def forward_backward_pipelining_without_interleaving(
 
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+
+    if getattr(config, "moe_paged_stash", False):
+        paged_stash_reset(enabled=not forward_only, config=config)
 
     # Disable async grad reductions
     no_sync_func = config.no_sync_func
@@ -839,11 +847,7 @@ def forward_backward_pipelining_without_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
+    if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
         create_cudagraphs()
 
     return forward_data_store
@@ -917,6 +921,9 @@ def forward_backward_pipelining_zbh1(
         pg_collection.dp_cp = parallel_state.get_data_parallel_group(
             with_context_parallel=True, partial_data_parallel=False
         )
+        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
+            with_context_parallel=True
+        )
 
     elif p2p_communicator is not None and pg_collection is not None:
         assert hasattr(p2p_communicator, 'config'), "p2p_communicator must have a config"
@@ -957,6 +964,9 @@ def forward_backward_pipelining_zbh1(
 
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+
+    if getattr(config, "moe_paged_stash", False):
+        paged_stash_reset(enabled=not forward_only, config=config)
 
     # Disable async grad reductions
     no_sync_func = config.no_sync_func
@@ -1225,11 +1235,7 @@ def forward_backward_pipelining_zbh1(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
+    if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
         create_cudagraphs()
 
     return forward_data_store

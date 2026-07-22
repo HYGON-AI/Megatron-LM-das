@@ -9,8 +9,16 @@ def fused_bias_gelu(
 ):
 
     if self.config.gated_linear_unit:
+        with_glu_interleaving = (
+            self.config.gated_linear_unit
+            and self.config.moe_mlp_glu_interleave_size is not None
+        )
 
         def glu(x):
+            if with_glu_interleaving:
+                x = self._remove_glu_interleaving(
+                    x, self.config.moe_mlp_glu_interleave_size
+                )
             x_glu, x_linear = torch.chunk(x, 2, dim=-1)
             if (val := self.config.activation_func_clamp_value) is not None:
                 x_glu = x_glu.clamp(min=None, max=val)

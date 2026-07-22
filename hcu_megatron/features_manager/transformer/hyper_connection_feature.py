@@ -53,10 +53,6 @@ class HyperConnectionFeature(AbstractFeature):
         group.add_argument('--mhc-init-hpre-use-module-layer', action='store_true', default=False,
                            help='If true, use module-level layer index (2*layer + is_mlp) for h_pre initialization.')
 
-    # def validate_args(self, args):
-    #     if args.parallel_linear_impl == "flux" and args.transformer_impl != 'transformer_engine':
-    #         raise AssertionError('flux is only supported with transformer_engine implementation')
-
     def register_patches(self, patch_manager, args):
         # flux
         from hcu_megatron.core.tensor_parallel.layers import (
@@ -64,16 +60,27 @@ class HyperConnectionFeature(AbstractFeature):
             FluxRowParallelLinear,
         )
         from hcu_megatron.core.transformer.transformer_block import TransformerBlock
-        from hcu_megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
+        from hcu_megatron.core.transformer.transformer_layer import TransformerLayer, TransformerLayerSubmodules
         from hcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
-        from hcu_megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_layer_specs, get_gpt_layer_with_flux_spec
+        from hcu_megatron.core.models.gpt.gpt_layer_specs import (
+            get_gpt_decoder_layer_specs,
+            get_gpt_layer_with_flux_spec,
+            get_gpt_layer_with_transformer_engine_spec,
+        )
         from hcu_megatron.core.pipeline_parallel.schedules import forward_backward_pipelining_without_interleaving
 
         if args.enable_hyper_connections:
             patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_decoder_layer_specs",
                                          get_gpt_decoder_layer_specs)
-            patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
-                                         get_gpt_layer_with_flux_spec)
+            if args.parallel_linear_impl == 'flux':
+                patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
+                                             get_gpt_layer_with_flux_spec)
+            else:
+                patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
+                                             get_gpt_layer_with_transformer_engine_spec)
+            patch_manager.register_patch("megatron.core.transformer.transformer_layer.TransformerLayer.__call__",
+                                         TransformerLayer.__call__,
+                                         create_dummy=True)
             patch_manager.register_patch("megatron.core.transformer.transformer_layer.TransformerLayerSubmodules",
                                          TransformerLayerSubmodules)
             patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.forward',

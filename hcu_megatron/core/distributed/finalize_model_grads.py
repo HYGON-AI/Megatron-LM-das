@@ -3,13 +3,6 @@
 from typing import List, Optional
 import torch
 
-try:
-    from torch.distributed._tensor import DTensor, distribute_tensor
-
-    HAVE_DTENSOR = True
-except ImportError:
-    HAVE_DTENSOR = False
-
 from megatron.core import mpu
 from megatron.core import parallel_state
 from megatron.core.utils import get_model_config
@@ -19,6 +12,7 @@ from megatron.core.distributed.finalize_model_grads import (
     _allreduce_non_tensor_model_parallel_grads,
     _allreduce_word_embedding_grads,
     _allreduce_position_embedding_grads,
+    _allreduce_router_grads,
     reset_model_temporary_tensors,
     _update_router_expert_bias
 )
@@ -42,6 +36,7 @@ def finalize_model_grads(
 
     args = get_args()
     config = get_model_config(model[0])
+    tp_dp_cp_group = None
     if pg_collection is not None:
         assert hasattr(pg_collection, 'tp')
         assert hasattr(pg_collection, 'pp')
@@ -60,6 +55,11 @@ def finalize_model_grads(
             "If you don't need pos_embd_group, you need to explicitly set it to None."
         )
         assert hasattr(pg_collection, 'dp_cp')
+        if config.moe_router_enable_expert_bias:
+            assert hasattr(pg_collection, 'tp_dp_cp') and pg_collection.tp_dp_cp is not None, (
+                "pg_collection must have tp_dp_cp when " "moe_router_enable_expert_bias is enabled."
+            )
+            tp_dp_cp_group = pg_collection.tp_dp_cp
         tp_group = pg_collection.tp
         pp_group = pg_collection.pp
         embd_group = pg_collection.embd
@@ -173,7 +173,9 @@ def finalize_model_grads(
                 args.begin_max_rank = False
             if not args.overlap_grad_reduce:
                 _handle_all_reduce_time_end(args, config)
-
+    else:
+        for model_chunk in model:
+            model_chunk.finish_grad_sync(force_all_reduce=force_all_reduce)
 
     if args.enable_dynamic_grad_comp:
         if args.all_reduce_time:
@@ -190,6 +192,9 @@ def finalize_model_grads(
     _allreduce_conditional_embedding_grads(model, config, pp_group)
     if config.timers is not None:
         config.timers('conditional-embedder-grads-all-reduce').stop()
+
+    if getattr(config, 'flextron', False):
+        _allreduce_router_grads(model, config)
 
     # All-reduce layer-norm grads (for sequence parallelism) and non-tensor parallel modules.
     if config.timers is not None:
@@ -212,7 +217,11 @@ def finalize_model_grads(
         config.timers('embedding-grads-all-reduce').stop()
 
     if config.moe_router_enable_expert_bias:
-        _update_router_expert_bias(model, config)
+        if pg_collection is None:
+            tp_dp_cp_group = parallel_state.get_tensor_and_data_parallel_group(
+                with_context_parallel=True
+            )
+        _update_router_expert_bias(model, config, tp_dp_cp_group=tp_dp_cp_group)
 
     reset_model_temporary_tensors(config, model)
 
@@ -229,7 +238,10 @@ def finalize_model_grads(
 
         # all-reduce across DP ranks.
         torch.distributed.all_reduce(num_tokens, group=dp_cp_group)
+
+        # Clamp to avoid div-by-zero without a host-side branch on a device tensor,
+        # which would otherwise cause a sync that is illegal during CUDA graph capture.
+        safe_num_tokens = torch.clamp(num_tokens, min=1)
+        scaling = 1.0 / safe_num_tokens
         for model_chunk in model:
-            if num_tokens > 0:
-                scaling = 1.0 / num_tokens
-                model_chunk.scale_gradients(scaling)
+            model_chunk.scale_gradients(scaling)

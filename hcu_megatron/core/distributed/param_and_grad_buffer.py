@@ -95,6 +95,23 @@ class _ParamAndGradBucketGroup:
             # already been dispatched.
             return
 
+        # Drain the predecessor bucket group's reduce-scatter before allocating ours. Only
+        # linked under reduce_scatter_with_fp32_accumulation, which holds an intermediate
+        # all-to-all output tensor pinned until .wait() runs. We only drain when the
+        # predecessor has actually been dispatched this iteration (grad_reduce_handle set):
+        # backward param ordering does not always match bucket linkage order (e.g. NVFP4
+        # bucket layouts), so the predecessor may not have fired yet when we arrive here.
+        # In that case the predecessor will dispatch and drain on its own once its params
+        # become ready. The end-of-step finalize loop still catches any bucket that
+        # neither a successor nor itself drained.
+        if (
+            self.previous_grad_reduce_bucket_group is not None
+            and self.previous_grad_reduce_bucket_group.grad_reduce_handle is not None
+        ):
+            self.previous_grad_reduce_bucket_group.finish_grad_sync(
+                force_all_reduce=force_all_reduce
+            )
+
         assert (
             self.grad_reduce_handle is None
         ), "Should not have multiple communication calls outstanding at once"
@@ -281,6 +298,8 @@ class _ParamAndGradBucketGroup:
             self.start_grad_sync(force_all_reduce=force_all_reduce)
             self._copy_back_extra_main_grads()
             return
+        if self.grad_reduce_finished:
+            return
         # If first batch, start asynchronous communication here. register_grad_ready() launches
         # asynchronous communication only once self.golden_per_param_grad_ready_counts is
         # populated at the end of this first batch.
@@ -291,6 +310,7 @@ class _ParamAndGradBucketGroup:
         if self.ddp_config.num_distributed_optimizer_instances > 1:
             torch.cuda.current_stream().wait_stream(self.communication_stream)
             self._copy_back_extra_main_grads()
+            self.grad_reduce_finished = True
             return
 
         if self.grad_reduce_handle is None:
@@ -317,6 +337,7 @@ class _ParamAndGradBucketGroup:
             self.grad_reduce_handle = None
 
         self._copy_back_extra_main_grads()
+        self.grad_reduce_finished = True
 
 
 class _ParamAndGradBuffer:
@@ -329,9 +350,15 @@ class _ParamAndGradBuffer:
         numel_unpadded: int,
         bucket_id: int,
         bucket_params_with_extra_main_grads: List[torch.Tensor],
+        nvfp4_packed_start_index: int = None,
+        nvfp4_packed_end_index: int = None,
     ) -> _ParamAndGradBucket:
         """
         Helper function that creates a new bucket. Also updates param->bucket mapping.
+
+        For NVFP4 buffers, nvfp4_packed_start_index and nvfp4_packed_end_index
+        are provided separately because the param buffer uses packed numel while
+        the grad buffer uses full numel.
         """
 
         # Assert that indices are correctly padded (if needed), and that bucket
@@ -340,13 +367,28 @@ class _ParamAndGradBuffer:
             assert start_index % self.data_parallel_world_size == 0
             assert end_index % self.data_parallel_world_size == 0
         assert (start_index, end_index) == self.bucket_indices[bucket_id]
+        if nvfp4_packed_start_index is not None:
+            assert (
+                nvfp4_packed_start_index,
+                nvfp4_packed_end_index,
+            ) == self.nvfp4_packed_bucket_indices[bucket_id]
 
         # Get appropriate view into global _ParamAndGradBuffer.
+        # For NVFP4, param buffer uses packed offsets; otherwise same as start/end.
         bucketed_param_data = None
         if self.param_data is not None:
-            bucketed_param_data = self._get(
-                torch.Size([end_index - start_index]), start_index, buffer_type=BufferType.PARAM
-            )
+            if nvfp4_packed_start_index is not None:
+                assert nvfp4_packed_end_index is not None
+                bucketed_param_data = self._get(
+                    torch.Size([nvfp4_packed_end_index - nvfp4_packed_start_index]),
+                    nvfp4_packed_start_index,
+                    buffer_type=BufferType.PARAM,
+                )
+            else:
+                bucketed_param_data = self._get(
+                    torch.Size([end_index - start_index]), start_index, buffer_type=BufferType.PARAM
+                )
+        # Grad buffer always uses full-numel offsets.
         bucketed_grad_data = self._get(
             torch.Size([end_index - start_index]), start_index, buffer_type=BufferType.GRAD
         )

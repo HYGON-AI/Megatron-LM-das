@@ -2,7 +2,8 @@ import importlib
 import inspect
 import sys
 import types
-from typing import List, Union
+import warnings
+from typing import Dict, List, Union
 
 
 def get_func_name(func):
@@ -18,8 +19,25 @@ def dummy_function_wrapper(func_name):
     return dummy_function
 
 
+def get_inner_func(func, inner_func_name):
+    for c in func.__code__.co_consts:
+        if isinstance(c, types.CodeType) and c.co_name == 'inner_func_name':
+            return c
+
+    raise RuntimeError(f"Failed to retrieve inner function {inner_func_name}")
+
+
 class Patch:
-    def __init__(self, orig_func_or_cls_name, new_func_or_cls, create_dummy, apply_wrapper=False, remove_origin_wrappers=False):
+    def __init__(
+        self,
+        orig_func_or_cls_name,
+        new_func_or_cls,
+        create_dummy,
+        apply_wrapper=False,
+        remove_origin_wrappers=False,
+        patch_inner_func=False,
+        inner_func_name=None,
+    ):
         split_name = orig_func_or_cls_name.rsplit('.', 1)
         if len(split_name) == 1:
             self.orig_module_name, self.orig_func_or_cls_name = orig_func_or_cls_name, None
@@ -29,7 +47,8 @@ class Patch:
         self.orig_func_or_cls = None
 
         self.patch_func_or_cls = None
-        self.wrappers = []
+        self.patch_inner_funcs: Dict[str, types.CodeType] = dict()    # inner funcs that will be replaced
+        self.wrappers = []                                            # new wrappers
         self.remove_origin_wrappers = False
         if (
             new_func_or_cls is None
@@ -37,7 +56,13 @@ class Patch:
         ):
             new_func_or_cls = dummy_function_wrapper(orig_func_or_cls_name)
 
-        self.set_patch_func(new_func_or_cls, apply_wrapper=apply_wrapper, remove_origin_wrappers=remove_origin_wrappers)
+        self.set_patch_func(
+            new_func_or_cls,
+            apply_wrapper=apply_wrapper,
+            remove_origin_wrappers=remove_origin_wrappers,
+            patch_inner_func=patch_inner_func,
+            inner_func_name=inner_func_name,
+        )
         self.is_applied = False
         self.create_dummy = create_dummy
 
@@ -51,28 +76,94 @@ class Patch:
 
     @staticmethod
     def remove_wrappers(module, func_name, func):
+        wrappers = []
+
         if (
             module.__dict__
             and func_name in module.__dict__
             and isinstance(module.__dict__[func_name], (staticmethod, classmethod))
         ):
-            func = module.__dict__[func_name].__func__
+            descriptor = module.__dict__[func_name]
+            wrappers.append({
+                "type": type(descriptor),
+                "wrapper": descriptor,
+            })
+            func = descriptor.__func__
 
         while True:
-            if hasattr(func, '__wrapped__') and func.__wrapped__ is not None:
+            if hasattr(func, "__wrapped__") and func.__wrapped__ is not None:
+                wrappers.append({
+                    "type": "__wrapped__",
+                    "wrapper": func,
+                })
                 func = func.__wrapped__
-            elif hasattr(func, '__closure__') and func.__closure__ is not None:
-                func = func.__closure__[0].cell_contents
+
+            elif hasattr(func, "__closure__") and func.__closure__ is not None:
+                closure_func = None
+
+                for cell in func.__closure__:
+                    cell_value = cell.cell_contents
+                    if callable(cell_value):
+                        closure_func = cell_value
+                        break
+
+                if closure_func is None:
+                    break
+
+                wrappers.append({
+                    "type": "__closure__",
+                    "wrapper": func,
+                })
+                func = closure_func
+
             else:
                 break
 
+        return func, wrappers
+
+    @staticmethod
+    def add_origin_wrappers(func, wrappers: list):
+        for item in reversed(wrappers):
+            if item["type"] in (staticmethod, classmethod):
+                func = item["type"](func)
+            elif item["type"] == "__wrapped__":
+                wrapper = item["wrapper"]
+                wrapper.__wrapped__ = func
+                func = wrapper
+            elif item["type"] == "__closure__":
+                # Closure wrappers generally cannot be safely restored in-place;
+                # they can only be reused from the original wrapper
+                func = item["wrapper"]
+
         return func
 
-    def set_patch_func(self, new_func_or_cls=None, force_patch=False, apply_wrapper=False, remove_origin_wrappers=False):
+    def set_patch_func(
+        self,
+        new_func_or_cls=None,
+        force_patch=False,
+        apply_wrapper=False,
+        remove_origin_wrappers=False,
+        patch_inner_func=False,
+        inner_func_name=None
+    ):
+        """
+            patch_inner_func: If true, func that needs patching is an inner one
+        """
         if remove_origin_wrappers:
             self.remove_origin_wrappers = True
         else:
             assert new_func_or_cls is not None
+
+        if patch_inner_func:
+            assert not apply_wrapper, "apply_wrapper should be False"
+            assert new_func_or_cls is not None and inner_func_name is not None
+            if (
+                get(self.patch_inner_funcs, inner_func_name)
+                and id(new_func_or_cls) != id(self.patch_inner_funcs[inner_func_name])
+            ):
+                raise RuntimeError('the patch of {} exist !'.format(inner_func_name))
+            self.patch_inner_funcs[inner_func_name] = new_func_or_cls
+            return
 
         if new_func_or_cls is None:
             return
@@ -106,18 +197,43 @@ class Patch:
             final_patch_func_or_cls = self.patch_func_or_cls
 
         # remove original wrappers
-        if self.remove_origin_wrappers:
-            final_patch_func_or_cls = self.remove_wrappers(self.orig_module, self.orig_func_or_cls_name, final_patch_func_or_cls)
+        if self.remove_origin_wrappers or self.patch_inner_funcs:
+            final_patch_func_or_cls, origin_wrappers = self.remove_wrappers(
+                self.orig_module,
+                self.orig_func_or_cls_name,
+                final_patch_func_or_cls
+            )
+
+        # replace inner funcs
+        if self.patch_inner_funcs:
+            new_consts = list()
+            for c in final_patch_func_or_cls.__code__.co_consts:
+                if isinstance(c, types.CodeType) and c.co_name in self.patch_inner_funcs:
+                    inner_func = self.patch_inner_funcs.pop(c.co_name)
+                    new_consts.append(inner_func if isinstance(inner_func, types.CodeType) else inner_func.__code__)
+                else:
+                    new_consts.append(c)
+
+            for inner_func_name in self.patch_inner_funcs:
+                warnings.warn(f"inner func {inner_func_name} of {self.orig_func_or_cls_name} has NOT been replaced")
+            setattr(final_patch_func_or_cls, "__code__", final_patch_func_or_cls.__code__.replace(co_consts=new_consts))
+
+            if not self.remove_origin_wrappers:
+                final_patch_func_or_cls = self.add_origin_wrappers(final_patch_func_or_cls, origin_wrappers)
 
         # add new wrappers
         for wrapper in self.wrappers:
             final_patch_func_or_cls = wrapper(final_patch_func_or_cls)
 
+        # patch funcs
         if self.orig_func_or_cls_name is not None:
             setattr(self.orig_module, self.orig_func_or_cls_name, final_patch_func_or_cls)
         for key, value in sys.modules.copy().items():
-            if self.orig_func_or_cls_name is not None and hasattr(value, self.orig_func_or_cls_name) \
-                    and id(getattr(value, self.orig_func_or_cls_name)) == self.orig_func_or_cls_id:
+            if (
+                self.orig_func_or_cls_name is not None
+                and hasattr(value, self.orig_func_or_cls_name)
+                and id(getattr(value, self.orig_func_or_cls_name)) == self.orig_func_or_cls_id
+            ):
                 setattr(value, self.orig_func_or_cls_name, final_patch_func_or_cls)
 
         self.is_applied = True
@@ -183,6 +299,7 @@ class Patch:
                 setattr(value, self.orig_func_or_cls_name, self.orig_func_or_cls)
         self.patch_func_or_cls = None
         self.final_patch_func_or_cls = None
+        self.patch_inner_funcs.clear()
         self.is_applied = False
 
 
@@ -196,7 +313,9 @@ class MegatronPatchesManager:
         force_patch=False,
         create_dummy=False,
         apply_wrapper=False,
-        remove_origin_wrappers=False
+        remove_origin_wrappers=False,
+        patch_inner_func=False,
+        inner_func_name=None,
     ):
         if orig_func_or_cls_name not in MegatronPatchesManager.patches_info:
             MegatronPatchesManager.patches_info[orig_func_or_cls_name] = Patch(
@@ -204,14 +323,18 @@ class MegatronPatchesManager:
                 new_func_or_cls,
                 create_dummy,
                 apply_wrapper=apply_wrapper,
-                remove_origin_wrappers=remove_origin_wrappers
+                remove_origin_wrappers=remove_origin_wrappers,
+                patch_inner_func=patch_inner_func,
+                inner_func_name=inner_func_name,
             )
         else:
             MegatronPatchesManager.patches_info.get(orig_func_or_cls_name).set_patch_func(
                 new_func_or_cls,
                 force_patch,
                 apply_wrapper=apply_wrapper,
-                remove_origin_wrappers=remove_origin_wrappers
+                remove_origin_wrappers=remove_origin_wrappers,
+                patch_inner_func=patch_inner_func,
+                inner_func_name=inner_func_name,
             )
 
     @staticmethod

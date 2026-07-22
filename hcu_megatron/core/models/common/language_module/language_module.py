@@ -26,7 +26,12 @@ class LanguageModule():
 
         # Mark embedding and output layer for decoupled_lr and other features.
         # This is the original Megatron attribute used by decoupled_lr, Muon, FSDP, etc.
-        if self.has_vocab_embedding and hasattr(self, 'embedding'):
+        # Include MTP-stage embedding too: it is a duplicated copy of the pre_process
+        # embedding (kept in sync via cross-stage all-reduce). Without this tag, the
+        # LayerWise distributed optimizer routes it to its Muon-managed buffer and
+        # `_emit_bucket(shared_embedding=True)` replicates the (vocab x hidden) tensor
+        # across all dp_size shards, blowing up the chunk's buffer by ~8x.
+        if (self.has_vocab_embedding or getattr(self, 'mtp_process', False)) and hasattr(self, 'embedding'):
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
         if (
             self.post_process

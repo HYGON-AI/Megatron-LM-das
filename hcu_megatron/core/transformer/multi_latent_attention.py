@@ -6,6 +6,11 @@ from einops import rearrange
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
+from megatron.core.transformer.multi_latent_attention import (
+    _prepare_mla_core_attention_value,
+    _trim_mla_core_attention_output,
+)
+from megatron.core.typed_torch import apply_module
 from megatron.core.utils import deprecate_inference_params
 
 
@@ -149,10 +154,13 @@ class MLASelfAttention():
         if value is not None:
             value = value.contiguous()
 
+        thd_packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == "thd"
+
         # ==================================
         # core attention computation
         # ==================================
         # Need corresponding TE change
+        needs_output_trim = False
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
                 query, key, value, attention_mask, packed_seq_params=packed_seq_params
@@ -168,7 +176,7 @@ class MLASelfAttention():
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:
-                    core_attn_out = self.core_attention(
+                    core_attn_out = self._run_core_attention(
                         query,
                         key,
                         value,
@@ -178,6 +186,9 @@ class MLASelfAttention():
                         **extra_kwargs,
                     )
             elif self.cache_mla_latents:
+                value, need_v_pad, orig_v_dim, padded_v_dim = _prepare_mla_core_attention_value(
+                    self, query, value, packed_seq_params
+                )
                 # Dynamic batching attention kernel.
                 q, k, v = (query, key, value)
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
@@ -197,6 +208,7 @@ class MLASelfAttention():
                 # Only rearrange if not in absorption mode (Flash MLA handles format correctly)
                 if not inference_context.is_decode_only():
                     core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
+                needs_output_trim = need_v_pad
             if self.offload_core_attention and self.training:
                 core_attn_out = off_interface.group_commit(
                     core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
@@ -211,7 +223,12 @@ class MLASelfAttention():
             # Flatten back: [seq, batch, num_heads * v_head_dim]
             core_attn_out = core_attn_out.view(core_attn_out.size(0), core_attn_out.size(1), -1)
 
-        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
+        if needs_output_trim:
+            core_attn_out = _trim_mla_core_attention_output(
+                core_attn_out, need_v_pad, orig_v_dim, padded_v_dim
+            )
+
+        if thd_packed_seq:
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
             # t is the pack size = sum (sq_i)
@@ -230,7 +247,7 @@ class MLASelfAttention():
         # Output. [sq, b, h]
         # =================
         with off_interface(self.offload_attn_proj, core_attn_out, "attn_proj") as core_attn_out:
-            output, bias = self.linear_proj(core_attn_out)
+            output, bias = apply_module(self.linear_proj)(core_attn_out)
         if self.offload_attn_proj:
             output = off_interface.group_commit(
                 output, name="attn_proj", forced_released_tensors=[core_attn_out]

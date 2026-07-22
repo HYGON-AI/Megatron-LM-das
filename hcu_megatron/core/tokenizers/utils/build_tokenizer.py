@@ -19,6 +19,7 @@ def _vocab_size_with_padding(orig_vocab_size, args, logging_enabled=True):
         )
     return after
 
+
 def build_tokenizer_wrapper(build_tokenizer_func):
     @wraps(build_tokenizer_func)
     def wrapper(args, **kwargs):
