@@ -33,8 +33,8 @@ class SyncFreeMoeFeature(AbstractFeature):
                            help='the number of CUs to use for Primus-Turbo DeepEP')
         group.add_argument('--turbo-deepep-use-comm-stream', action='store_true', default=False,
                            help='Primus-Turbo DeepEP will use an internal stream to dispatch/combine when enabled, '
-                                'default used current_stream. Both set`enable_primus_turbo=True` and '
-                                '`use_turbo_deepep=True` first')
+                                'default used current_stream. Both set`sync_free_moe=True` and '
+                                '`use_primus_deepep=True` first')
 
     def _get_sync_free_moe_options(self, args) -> dict:
         sync_free_moe_options = {
@@ -56,7 +56,7 @@ class SyncFreeMoeFeature(AbstractFeature):
                 "use_primus_fused_act_with_probs": True,
             },
         }
-        self.all_sync_free_moe_params = list(sync_free_moe_options[3].kyes())
+        self.all_sync_free_moe_params = list(sync_free_moe_options[3].keys())
 
         stage = args.turbo_sync_free_moe_stage
 
@@ -65,12 +65,27 @@ class SyncFreeMoeFeature(AbstractFeature):
 
         return sync_free_moe_options[stage]
 
-    def pre_validate_args(self, args):
+    def validate_args(self, args):
         if not args.sync_free_moe:
+            if (
+                args.use_primus_topk_router
+                or args.use_primus_moe_permute_fusion
+                or args.use_primus_deepep
+                or args.use_primus_grouped_gemm
+                or args.use_primus_fused_act_with_probs
+                or args.turbo_sync_free_moe_stage
+            ):
+                warnings.warn(f"parameters specific to sync free moe does not take effect when enable-sync-free-moe is not set.")
+
             return args
 
+        if args.use_primus_fused_act_with_probs:
+            if not args.use_primus_grouped_gemm:
+                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when use_primus_grouped_gemm is not set")
+
+        # prioritize the use of turbo_sync_free_moe_stage
         if args.turbo_sync_free_moe_stage:
-            options = self._get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+            options = self._get_sync_free_moe_options(args)
             for param in self.all_sync_free_moe_params:
                 if param in options:
                     setattr(args, param, options[param])
@@ -90,30 +105,8 @@ class SyncFreeMoeFeature(AbstractFeature):
 
         return args
 
-    def validate_args(self, args):
-        if not args.sync_free_moe:
-            if args.use_primus_topk_router:
-                warnings.warn(f"use-primus-topk-router does not take effect when enable-sync-free-moe is not set")
-
-            if args.use_primus_moe_permute_fusion:
-                warnings.warn(f"use-primus-moe-permute-fusion does not take effect when enable-sync-free-moe is not set")
-
-            if args.use_primus_deepep:
-                warnings.warn(f"use-primus-deepep does not take effect when enable-sync-free-moe is not set")
-
-            if args.use_primus_grouped_gemm:
-                warnings.warn(f"use-primus-grouped-gemm does not take effect when enable-sync-free-moe is not set")
-
-            if args.use_primus_fused_act_with_probs:
-                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when enable-sync-free-moe is not set")
-
-        if args.use_primus_fused_act_with_probs:
-            if not args.use_primus_grouped_gemm:
-                warnings.warn(f"use-primus-fused-act-with-probs does not take effect when use_primus_grouped_gemm is not set")
-
-        return args
-
     def register_patches(self, patch_manager, args):
+        args = self.validate_args(args)
         if args.sync_free_moe:
             if args.use_primus_topk_router:
                 from hcu_megatron.core.transformer.moe.router import PrimusTopKRouter

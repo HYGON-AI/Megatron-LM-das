@@ -342,7 +342,7 @@ class AGLinear(torch.autograd.Function):
                     grad_input, group=tp_group, async_op=True
                 )
             else:
-                grad_input = _reduce(grad_input)
+                grad_input = _reduce(grad_input, tp_group)
                 return grad_input, None, None, None, None, None, None, None, None, None, None, None, None, None
 
         if ctx.gradient_accumulation_fusion:

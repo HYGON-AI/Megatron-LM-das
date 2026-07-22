@@ -12,9 +12,10 @@ from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.moe.experts import GroupedMLPSubmodules
+from megatron.core.transformer.moe.experts import TEGroupedMLP as MegatronCoreTEGroupedMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.training.global_vars import get_args
 from megatron.core.typed_torch import apply_module
+from megatron.training.global_vars import get_args
 
 
 class TEGroupedMLP():
@@ -65,7 +66,7 @@ class TEGroupedMLP():
         return intermediate_parallel
 
 
-class PrimusTurboGroupedMLP(TEGroupedMLP):
+class PrimusTurboGroupedMLP(MegatronCoreTEGroupedMLP):
     def __init__(
         self,
         num_local_experts: int,
@@ -92,7 +93,7 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         tokens_per_experts: Union[torch.Tensor, None] = None,
     ):
         if self.use_primus_fused_act_with_probs:
-            from hcu_megatron.primus.backends.megatron.core.extensions.primus_turbo import (
+            from hcu_megatron.core.extensions.primus_turbo import (
                 fused_bias_act_with_probs,
             )
 
@@ -209,7 +210,7 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if not self.moe_router_padding_for_quantization and (self.config.fp8 or self.config.fp4):
+        if self.config.fp8 or self.config.fp4:
             output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None

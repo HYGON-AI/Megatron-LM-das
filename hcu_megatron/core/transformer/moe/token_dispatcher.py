@@ -2,6 +2,8 @@ from typing import List, Optional
 
 import torch
 
+import primus_turbo.pytorch as primus_turbo_torch
+
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -21,7 +23,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         """
-        Initialize the Flex token dispatcher.
+        Initialize the DeepEP token dispatcher.
 
         Args:
             num_local_experts (int): Number of local experts on the current device.
@@ -29,14 +31,16 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             config (TransformerConfig): Configuration for the transformer model.
             pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
-        import primus_turbo.pytorch as pt
-
         super().__init__(config=config, pg_collection=pg_collection)
 
-        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        if self.tp_size * self.ep_size <= 1:
+            raise ValueError("DeepEP token dispatcher requires TPxEP > 1")
         assert (
-            self.config.moe_flex_dispatcher_backend == "deepep"
-        ), "Please set --moe-flex-dispatcher-backend=deepep when using PrimusTurbo DeepEP"
+            self.config.moe_enable_deepep
+        ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        assert (
+            self.config.moe_pad_expert_input_to_capacity is False
+        ), "DeepEP token dispatcher does not support --moe-pad-expert-input-to-capacity"
 
         args = get_args()
 
@@ -53,7 +57,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
-        self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
+        use_turbo_grouped_gemm = args.use_primus_grouped_gemm
+        self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
             ep_group=self.ep_group,
@@ -62,14 +67,12 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             expert_capacity_factor=config.moe_expert_capacity_factor,
             permute_fusion=config.moe_permute_fusion,
             permute_max_token_num=permute_max_token_num,
+            deepep_async_finish=True,
+            deepep_allocate_on_comm_stream=True,
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=(
-                args.use_turbo_grouped_mlp and args.moe_use_legacy_grouped_gemm
-            ),
-            deepep_async_finish=True,
-            deepep_allocate_on_comm_stream=True,
+            deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_gemm,
         )
         # This is just a place holder.
         # The communication manager class is not used in Primus Turbo's DeepEP dispatcher.
