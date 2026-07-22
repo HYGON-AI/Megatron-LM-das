@@ -22,6 +22,7 @@ class MegatronBasicFeature(AbstractFeature):
         self.register_core_distributed_patches(patch_manager, args)
         self.register_core_models_patches(patch_manager, args)
         self.register_core_transformers_patches(patch_manager, args)
+        self.register_core_ssm_patches(patch_manager, args)
         self.register_core_tokenizers_patches(patch_manager, args)
         self.register_core_extentions_patches(patch_manager, args)
         self.register_tensor_parallel_patches(patch_manager, args)
@@ -134,6 +135,24 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.transformer.multi_latent_attention.MultiLatentAttention.forward',
                                     multi_latent_attention_forward_wrapper,
                                     apply_wrapper=True)
+
+    def register_core_ssm_patches(self, patch_manager, args):
+        from hcu_megatron.core.ssm.gated_delta_net import GatedDeltaNet
+
+        patch_manager.register_patch(
+            'megatron.core.ssm.gated_delta_net.GatedDeltaNet.forward',
+            GatedDeltaNet.forward)
+        patch_manager.register_patch(
+            'megatron.core.ssm.gated_delta_net.GatedDeltaNet._apply_gated_norm',
+            GatedDeltaNet._apply_gated_norm)
+        patch_manager.register_patch(
+            'megatron.core.ssm.gated_delta_net.GatedDeltaNet._apply_gated_norm_fallback',
+            GatedDeltaNet._apply_gated_norm_fallback,
+            create_dummy=True)
+        patch_manager.register_patch(
+            'megatron.core.ssm.gated_delta_net.GatedDeltaNet._can_use_fused_gated_rmsnorm',
+            GatedDeltaNet._can_use_fused_gated_rmsnorm,
+            create_dummy=True)
 
     def register_core_tokenizers_patches(self, patch_manager, args):
         from hcu_megatron.core.tokenizers.utils.build_tokenizer import build_tokenizer_wrapper
