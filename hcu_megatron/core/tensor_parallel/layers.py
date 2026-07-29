@@ -229,7 +229,7 @@ class AGLinear(torch.autograd.Function):
             output = fw_ag_gemm_op.forward(
                 input.view(sequence_len * batch_size, -1),
                 weight.t().contiguous() if transpose_weight else weight,
-                bias=bias,
+                bias=None,       # flux does not support the case where bias is not None
                 input_scale=None,
                 weight_scale=None,
                 output_scale=None,
@@ -243,8 +243,9 @@ class AGLinear(torch.autograd.Function):
             output = output.view(sequence_len * tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
-            if bias is not None:
-                output = output + bias
+
+        if bias is not None:
+            output = output + bias
 
         if sequence_parallel and ctx.save_flux_gather_input:
             ctx.save_for_backward(total_input, weight)
@@ -633,7 +634,7 @@ class LinearRS(torch.autograd.Function):
             output = fw_gemm_rs_op.forward(
                 input.view(sequence_len * batch_size, -1),
                 weight.t().contiguous() if transpose_weight else weight,
-                bias=bias,
+                bias=None,  # flux does not support the case where bias is not None
                 input_scale=None,
                 weight_scale=None,
                 output_scale=None,
@@ -642,6 +643,9 @@ class LinearRS(torch.autograd.Function):
             output = output.view(sequence_len // tp_group.size(), batch_size, -1)
         else:
             output = torch.matmul(input, weight.t())
+
+        if bias is not None:
+            output = output + bias
 
         return output
 
