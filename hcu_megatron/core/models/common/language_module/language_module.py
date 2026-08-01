@@ -6,7 +6,7 @@ from megatron.core.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_vp_first_stage,
 )
-from megatron.training.utils import unwrap_model
+from megatron.core.utils import unwrap_model
 
 
 class LanguageModule():

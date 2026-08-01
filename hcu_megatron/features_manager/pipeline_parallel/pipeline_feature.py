@@ -200,9 +200,10 @@ class PipelineFeature(AbstractFeature):
         return args
 
     def register_patches(self, patch_manager, args):
+        from hcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
         from hcu_megatron.core.pipeline_parallel.schedules import get_forward_backward_func_wrapper
         from hcu_megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
-        from hcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_without_split_attn
+        from hcu_megatron.core.utils import get_batch_on_this_tp_rank
 
         patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.get_forward_backward_func',
                                     get_forward_backward_func_wrapper,
@@ -211,6 +212,8 @@ class PipelineFeature(AbstractFeature):
                                     get_mtp_num_layers_to_build)
         patch_manager.register_patch('megatron.core.models.gpt.fine_grained_callables.build_layer_callables',
                                     build_layer_callables_without_split_attn)
+        # (1) dualpipev, (2) vocabulary parallelism
+        patch_manager.register_patch('megatron.core.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
 
         if args.schedule_method == "dualpipev":
             from megatron.training.utils import print_rank_0

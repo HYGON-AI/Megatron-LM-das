@@ -21,7 +21,7 @@ def dummy_function_wrapper(func_name):
 
 def get_inner_func(func, inner_func_name):
     for c in func.__code__.co_consts:
-        if isinstance(c, types.CodeType) and c.co_name == 'inner_func_name':
+        if isinstance(c, types.CodeType) and c.co_name == inner_func_name:
             return c
 
     raise RuntimeError(f"Failed to retrieve inner function {inner_func_name}")
@@ -158,7 +158,7 @@ class Patch:
             assert not apply_wrapper, "apply_wrapper should be False"
             assert new_func_or_cls is not None and inner_func_name is not None
             if (
-                get(self.patch_inner_funcs, inner_func_name)
+                self.patch_inner_funcs.get(inner_func_name, None) is not None
                 and id(new_func_or_cls) != id(self.patch_inner_funcs[inner_func_name])
             ):
                 raise RuntimeError('the patch of {} exist !'.format(inner_func_name))
@@ -216,7 +216,7 @@ class Patch:
 
             for inner_func_name in self.patch_inner_funcs:
                 warnings.warn(f"inner func {inner_func_name} of {self.orig_func_or_cls_name} has NOT been replaced")
-            setattr(final_patch_func_or_cls, "__code__", final_patch_func_or_cls.__code__.replace(co_consts=new_consts))
+            setattr(final_patch_func_or_cls, "__code__", final_patch_func_or_cls.__code__.replace(co_consts=tuple(new_consts)))
 
             if not self.remove_origin_wrappers:
                 final_patch_func_or_cls = self.add_origin_wrappers(final_patch_func_or_cls, origin_wrappers)

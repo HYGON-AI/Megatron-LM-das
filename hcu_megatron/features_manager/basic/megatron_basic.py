@@ -142,9 +142,6 @@ class MegatronBasicFeature(AbstractFeature):
         from hcu_megatron.core.ssm.gated_delta_net import GatedDeltaNet
 
         patch_manager.register_patch(
-            'megatron.core.ssm.gated_delta_net.GatedDeltaNet.forward',
-            GatedDeltaNet.forward)
-        patch_manager.register_patch(
             'megatron.core.ssm.gated_delta_net.GatedDeltaNet._apply_gated_norm',
             GatedDeltaNet._apply_gated_norm)
         patch_manager.register_patch(
@@ -258,7 +255,6 @@ class MegatronBasicFeature(AbstractFeature):
         from hcu_megatron.training.initialize import _set_random_seed
         from hcu_megatron.training.training import train_step
         from hcu_megatron.training.training import setup_model_and_optimizer
-        from hcu_megatron.training.utils import get_batch_on_this_tp_rank
         from hcu_megatron.training.argument_utils import core_transformer_config_from_args_wrapper
 
         # Add a fixed seed.
@@ -274,10 +270,6 @@ class MegatronBasicFeature(AbstractFeature):
         # (1) edgc, (2) ckpt add save/load iter info to ckpt
         patch_manager.register_patch('megatron.training.training.setup_model_and_optimizer',
                                     setup_model_and_optimizer)
-
-        # (1) dualpipev, (2) vocabulary parallelism
-        patch_manager.register_patch('megatron.training.utils.get_batch_on_this_tp_rank', get_batch_on_this_tp_rank)
-
         # prevent re-initialization of config
         patch_manager.register_patch('megatron.training.argument_utils.core_transformer_config_from_args',
                                     core_transformer_config_from_args_wrapper)
