@@ -226,6 +226,11 @@ def validate_args_func_decorator(validate_args_func):
         ORIGIN_ARG_VALUES["delay_wgrad_compute"] = args.delay_wgrad_compute
         args.delay_wgrad_compute = False
 
+        # set cross_entropy_fusion_impl to native. Otherwise validate_args will raise an error with msg
+        # 'Transformer Engine cross entropy loss fusion is disabled due to stability issues.'
+        ORIGIN_ARG_VALUES["cross_entropy_fusion_impl"] = args.cross_entropy_fusion_impl
+        args.cross_entropy_fusion_impl = "native"
+
         args = validate_args_func(args, defaults)
 
         # print env vars
