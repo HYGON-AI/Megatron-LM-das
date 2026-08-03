@@ -6,6 +6,8 @@ for para in $*
 do
     if [[ $para == --data_path* ]];then
         data_path=${para#*=}
+    elif [[ $para == --launch_backend* ]];then
+        launch_backend=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
     elif [[ $para == --launch_with_binding* ]];then
@@ -38,6 +40,14 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
+
+MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_PORT=${MASTER_PORT:-6000}
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-}}}
+NODE_RANK=${NODE_RANK:?"NODE_RANK must be set (or run under mpirun which provides OMPI_COMM_WORLD_RANK/PMI_RANK)"}
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
@@ -49,17 +59,25 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
+export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
 
 
-DISTRIBUTED_ARGS=(
+MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
 )
+TORCH_DISTRIBUTED_ARGS=(
+    --nnodes $NNODES
+    --node_rank $NODE_RANK
+    --master_addr $MASTER_ADDR
+    --master_port $MASTER_PORT
+    --nproc_per_node $GPUS_PER_NODE
+)
 
 GPT_MODEL_ARGS=(
-    --seq-length 32768 
+    --seq-length 4096
     --num-layers 36
     --hidden-size 4096
     --ffn-hidden-size 12288 
@@ -73,6 +91,10 @@ GPT_MODEL_ARGS=(
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
+
+    # --use-bridge
+    # --bridge-hf-model ${TOKENIZER_MODEL_PATH}
+    # # --load-weights
 )
 
 TRAINING_ARGS=(
@@ -80,11 +102,11 @@ TRAINING_ARGS=(
     --use-mcore-models 
     --micro-batch-size 1
     --global-batch-size 32
-    --train-iters 50
+    --train-iters 500
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
-    --init-method-std 0.006 
+    --init-method-std 0.02
     --clip-grad 1.0 
     --bf16
     --disable-bias-linear
@@ -100,13 +122,16 @@ TRAINING_ARGS=(
     --overlap-grad-reduce
     --use-flash-attn
 
+    # --fp8-format hybrid
+    # --fp8-recipe tensorwise
+    # --fp8-param-gather
 )
 
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 4
-    --pipeline-model-parallel-size 1
-    --context-parallel-size 2
+    --tensor-model-parallel-size 2
+    --pipeline-model-parallel-size 2
+    --context-parallel-size 1
     --use-distributed-optimizer 
     --sequence-parallel
 )
@@ -124,8 +149,8 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
@@ -136,6 +161,8 @@ TORCH_PROFIE_ARGS=(
     --profile-step-end 4
     --profile-dir torch_prof_qwen_cp2_qknorm
     --use-pytorch-profiler
+    --pytorch-profiler-collect-callstack
+    --record-memory-history
 )
 
 HIP_PROFIE_ARGS=(
@@ -146,15 +173,25 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
+MPIAPP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${DATA_ARGS[@]} \
     ${EVAL_AND_LOGGING_ARGS[@]} \
-    ${DISTRIBUTED_ARGS[@]} \
+    ${MPI_DISTRIBUTED_ARGS[@]} \
     ${INITIALIZATION_ARGS[@]} \
     ${FP8_PARALLEL_ARGS[@]} \
+    "
+
+TORCHRUN_APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
+    ${MEGATRON_PATH}/pretrain_gpt.py \
+    ${GPT_MODEL_ARGS[@]} \
+    ${TRAINING_ARGS[@]} \
+    ${MODEL_PARALLEL_ARGS[@]} \
+    ${DATA_ARGS[@]} \
+    ${EVAL_AND_LOGGING_ARGS[@]} \
+    ${INITIALIZATION_ARGS[@]} \
     "
 
 if [[ $profiling == "torch" ]]; then
@@ -166,4 +203,10 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${launch_with_binding} ${LOCAL_RANK} ${APP}
+if [[ "$launch_backend" == "mpirun" ]]; then
+    ${launch_with_binding} ${LOCAL_RANK} ${MPIAPP}
+elif [[ "$launch_backend" == "torchrun" ]]; then
+    echo $TORCHRUN_APP
+    ${TORCHRUN_APP}
+fi
+# ${launch_with_binding} ${LOCAL_RANK} ${APP}

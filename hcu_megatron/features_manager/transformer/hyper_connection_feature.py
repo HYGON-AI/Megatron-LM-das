@@ -71,23 +71,27 @@ class HyperConnectionFeature(AbstractFeature):
 
         if args.enable_hyper_connections:
             patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_decoder_layer_specs",
-                                         get_gpt_decoder_layer_specs)
+                                        get_gpt_decoder_layer_specs)
             if args.parallel_linear_impl == 'flux':
                 patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
-                                             get_gpt_layer_with_flux_spec)
+                                            get_gpt_layer_with_flux_spec)
             else:
                 patch_manager.register_patch("megatron.core.models.gpt.gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec",
-                                             get_gpt_layer_with_transformer_engine_spec)
+                                            get_gpt_layer_with_transformer_engine_spec)
             patch_manager.register_patch("megatron.core.transformer.transformer_layer.TransformerLayer.__call__",
-                                         TransformerLayer.__call__,
-                                         create_dummy=True)
+                                        TransformerLayer.__call__,
+                                        create_dummy=True)
             patch_manager.register_patch("megatron.core.transformer.transformer_layer.TransformerLayerSubmodules",
-                                         TransformerLayerSubmodules)
+                                        TransformerLayerSubmodules)
             patch_manager.register_patch('megatron.core.transformer.transformer_block.TransformerBlock.forward',
-                                          TransformerBlock.forward)
+                                        TransformerBlock.forward)
+            patch_manager.register_cls_funcs('megatron.core.transformer.transformer_block.TransformerBlock',
+                                        [TransformerBlock._build_mhc_recompute_layer_plan,
+                                         TransformerBlock._finalize_mhc_recompute_layer,],
+                                        create_dummy=True)
             patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.__init__',
-                                          CheckpointWithoutOutput.__init__)
+                                        CheckpointWithoutOutput.__init__)
             patch_manager.register_patch('megatron.core.tensor_parallel.random.CheckpointWithoutOutput.checkpoint',
-                                          CheckpointWithoutOutput.checkpoint)
+                                        CheckpointWithoutOutput.checkpoint)
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_backward_pipelining_without_interleaving',
-                                          forward_backward_pipelining_without_interleaving)
+                                        forward_backward_pipelining_without_interleaving)

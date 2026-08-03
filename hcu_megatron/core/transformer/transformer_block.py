@@ -154,15 +154,13 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                 eps=self.config.layernorm_epsilon,
             )
 
-    def _build_mhc_recompute_layer_plan(
-        self, use_mhc_recompute: bool
-    ) -> Tuple[List[Optional[CheckpointManager]], List[bool]]:
+    def _build_mhc_recompute_layer_plan(self) -> Tuple[List[Optional[CheckpointManager]], List[bool]]:
         """Pre-build per-layer MHC recompute managers and block-end markers."""
         num_layers = len(self.layers)
         layer_managers: List[Optional[CheckpointManager]] = [None] * num_layers
         is_recompute_block_end: List[bool] = [False] * num_layers
 
-        if not use_mhc_recompute or num_layers == 0:
+        if num_layers == 0:
             return layer_managers, is_recompute_block_end
 
         mhc_recompute_layer_num = self.config.mhc_recompute_layer_num
@@ -345,10 +343,8 @@ class TransformerBlock(MegatronCoreTransformerBlock):
             and self.config.recompute_granularity == 'selective'
             and "mhc" in self.config.recompute_modules
         )
-        mhc_layer_managers, mhc_is_last_in_recompute_block = self._build_mhc_recompute_layer_plan(
-            use_mhc_recompute
-        )
-
+        if use_mhc_recompute:
+            mhc_layer_managers, mhc_is_last_in_recompute_block = self._build_mhc_recompute_layer_plan()
 
         with rng_context, outer_quantization_context:
             # Forward pass.
@@ -392,7 +388,7 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                     else:
                         inner_quantization_context = nullcontext()
 
-                    mhc_manager = mhc_layer_managers[l_no]
+                    mhc_manager = mhc_layer_managers[l_no] if use_mhc_recompute else None
                     if mhc_manager is not None:
                         mhc_manager.is_last_layer_in_recompute_block = (
                             mhc_is_last_in_recompute_block[l_no]
@@ -435,12 +431,12 @@ class TransformerBlock(MegatronCoreTransformerBlock):
                                 micro_sp_idx=micro_sp_idx,
                             )
 
-                    self._finalize_mhc_recompute_layer(
-                        mhc_manager=mhc_manager,
-                        hidden_states=hidden_states,
-                        is_last_in_recompute_block=mhc_is_last_in_recompute_block[l_no],
-                    )
-
+                    if use_mhc_recompute:
+                        self._finalize_mhc_recompute_layer(
+                            mhc_manager=mhc_manager,
+                            hidden_states=hidden_states,
+                            is_last_in_recompute_block=mhc_is_last_in_recompute_block[l_no],
+                        )
 
                     if (
                         torch.is_grad_enabled()

@@ -65,12 +65,13 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         args = load_yaml(args.yaml_cfg)
 
     # Args from environment
-    # args.rank = int(os.getenv('RANK', '0'))
-    # args.world_size = int(os.getenv("WORLD_SIZE", '1'))
-
-    # set rank that safe_get_rank can use
-    os.environ['RANK'] = str(args.rank)
-    os.environ['WORLD_SIZE'] = str(args.world_size)
+    if os.getenv("LAUNCH_BACKEND", "mpirun") == "torchrun":
+        args.rank = int(os.getenv('RANK', '0'))
+        args.world_size = int(os.getenv("WORLD_SIZE", '1'))
+    else:
+        # set rank that safe_get_rank can use
+        os.environ['RANK'] = str(args.rank)
+        os.environ['WORLD_SIZE'] = str(args.world_size)
 
     # Args to enable MSC (opt-in: disabled by default)
     if args.disable_msc_deprecated:
@@ -191,6 +192,10 @@ def _add_extra_mbridge_args(parser):
                        help='The HuggingFace model path for initializing the bridge module')
     group.add_argument('--load-weights', action='store_true',
                        help='Whether to load weights for the bridge module when initializing the model')
+    group.add_argument('--bridge-language-model-only', action='store_true',
+                       help='For VLM bridge providers, build only the language model (MCoreGPTModel) '
+                            'via provider.provide_language_model, skipping ViT / vision projector. '
+                            'No-op for pure LLM providers.')
     group.add_argument('--image-tokens-per-sample', type=int, default=None,
                        help='Number of image (post-merger) tokens per sample used to include '
                             'ViT + patch-embed + projector FLOPs in throughput accounting. '

@@ -1,5 +1,5 @@
 trl
-transformers == 5.8.0
+transformers == 5.11.0
 packaging
 six
 regex
@@ -9,10 +9,14 @@ pybind11
 blobfile
 flux
 tiktoken
-torch == 2.9.0
+# torch == 2.9.0
 numpy == 1.26.0
-nvidia-modelopt == 0.43.0
+nvidia-modelopt
+flash-linear-attention == 0.5.1
 
+hydra-core
+omegaconf
+tilelang
 # ==== test ====
 nltk
 pytest

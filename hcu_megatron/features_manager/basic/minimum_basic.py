@@ -14,7 +14,7 @@ class MinimumBasicFeature(AbstractFeature):
                         help='node rank for distributed training')
         group.add_argument('--world-size', type=int, default=8,
                         help='number of nodes for distributed training')
-        group.add_argument('--dist-url',
+        group.add_argument('--dist-url', type=str, default="env://",
                         help='Which master node url for distributed training.')
 
     def register_patches(self, patch_manager, args):

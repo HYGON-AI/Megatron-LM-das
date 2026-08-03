@@ -29,4 +29,4 @@ LOCAL_RANK=$1
 shift
 
 NUMA_ID=${numa_map[$LOCAL_RANK]}
-numactl --cpunodebind=${NUMA_ID} --membind=${NUMA_ID} "$@"
+numactl --cpunodebind=${NUMA_ID} --preferred=${NUMA_ID} "$@"

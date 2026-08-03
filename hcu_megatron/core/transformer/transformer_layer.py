@@ -193,11 +193,9 @@ def transformer_layer_init_wrapper(transformer_layer_init_func):
         )
 
         from megatron.core.transformer.moe.moe_layer import MoELayer
-        from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+        from megatron.core.transformer.moe.experts import SequentialMLP
 
         if self.mlp.__class__ is MoELayer:
-            if self.mlp.experts.__class__ is GroupedMLP:
-                self.mlp.experts.layer_number = self.layer_number
             if self.mlp.experts.__class__ is SequentialMLP:
                 for expert in self.mlp.experts.local_experts:
                     expert.layer_number = self.layer_number

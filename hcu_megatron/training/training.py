@@ -874,6 +874,35 @@ def setup_model_and_optimizer(
             raise ValueError("When --use-bridge is set, --bridge-hf-model must be provided.")
         bridge = AutoBridge.from_hf_pretrained(args.bridge_hf_model)
         provider = bridge.to_megatron_provider(load_weights=args.load_weights, hf_path=args.bridge_hf_model)
+
+        # For VLM providers, optionally skip the vision tower and only build the
+        # language model. get_model → _create_model calls provider.provide(), so
+        # rebinding it to provide_language_model routes distributed setup through
+        # the LLM-only path (returns MCoreGPTModel instead of the full VL model).
+        bridge_language_only = (
+            getattr(args, "bridge_language_model_only", False)
+            and hasattr(provider, "provide_language_model")
+        )
+        if bridge_language_only:
+            provider.provide = provider.provide_language_model
+            # VL providers keep position_embedding_type="mrope" for 3D
+            # temporal/height/width position ids. In language-only mode
+            # pretrain_gpt.py feeds 2D [B,S] position_ids and the plain
+            # MCoreGPTModel wires up upstream MultimodalRotaryEmbedding, whose
+            # output layout does not match the downstream attention consumer.
+            # For pure text the T/H/W channels collapse to a single sequence
+            # axis, so standard partial-RoPE (rotary_percent kept) is
+            # mathematically equivalent and works with 2D position_ids.
+            if getattr(provider, "position_embedding_type", None) == "mrope":
+                provider.position_embedding_type = "rope"
+            # VL providers default scatter_embedding_sequence_parallel=False so
+            # the vision tower can splice image features into the full-seq
+            # embedding before SP scatter. Under language-only, the plain
+            # MCoreGPTModel decoder (and MTP) expects SP-scattered
+            # [s/tp, b, h] input, so re-enable the scatter.
+            if hasattr(provider, "scatter_embedding_sequence_parallel"):
+                provider.scatter_embedding_sequence_parallel = True
+
         if hasattr(provider, "finalize"):
             # Overlay Megatron args-derived runtime knobs onto the HF-derived
             # provider before finalize() locks the config.
@@ -941,8 +970,9 @@ def setup_model_and_optimizer(
             _bridge_apply_runtime_overrides(provider, transformer_config, args)
             provider.finalize()
             # Stash vision meta so the FLOPs wrapper can include ViT/patch-embed/
-            # projector cost in throughput reporting. None for pure LLM providers.
-            args._bridge_vision = _bridge_extract_vision_meta(provider)
+            # projector cost in throughput reporting. None for pure LLM providers,
+            # and also None when --bridge-language-model-only skips the vision tower.
+            args._bridge_vision = None if bridge_language_only else _bridge_extract_vision_meta(provider)
             if torch.distributed.get_rank() in [0]:
                 print(f"transformer_config: {transformer_config}")
                 print(f"provider: {provider}")

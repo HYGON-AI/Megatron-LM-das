@@ -36,7 +36,7 @@ mpirun -np ${GPUS}  --hostfile ${HOSTFILE} \
                     bash -c "
                     source ${DTK_ENV} && \
                     source ${NCCL_ENV} && \
-                    bash train_qwen35_72B.sh \
+                    bash train_qwen25_72B.sh \
                     ${HOST} \
                     ${PORT} \
                     --data_path=$DATA_PATH \
