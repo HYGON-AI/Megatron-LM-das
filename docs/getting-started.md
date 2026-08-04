@@ -15,6 +15,7 @@
 1. 拉取镜像
 
     `docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10`
+    
     python3.10需要用 `from typing_extensions import override` 替换掉 `from typing import override`
 
 2. 启动容器
