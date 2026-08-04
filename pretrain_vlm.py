@@ -23,13 +23,11 @@ import torch
 
 from gpt_builders import gpt_builder
 from megatron.core import parallel_state, mpu, tensor_parallel
-from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.enums import ModelType
-from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 from megatron.core.tokenizers.utils.build_tokenizer import build_tokenizer
-from megatron.core.utils import get_attr_wrapped_model, get_thd_batch_on_this_cp_rank, get_batch_on_this_hybrid_cp_rank, StragglerDetector
+from megatron.core.transformer.multi_token_prediction import get_mtp_ranks
+from megatron.core.utils import get_attr_wrapped_model, StragglerDetector
 from megatron.training import (
     get_args,
     get_timers,
@@ -38,29 +36,15 @@ from megatron.training import (
     print_rank_0,
     set_startup_timestamps,
 )
-from megatron.training.datasets.sft_dataset import SFTDataset
-from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank, get_mtp_ranks
-from megatron.training.arguments import core_transformer_config_from_args
-from megatron.training.datasets.fim_dataset import GPTFIMDataset, GPTFIMDatasetConfig
 from megatron.training.utils import (
-    get_batch_on_this_cp_rank,
-    get_batch_on_this_tp_rank,
-    get_blend_and_blend_per_split,
-    is_first_or_last_pipeline_stage,
     average_losses_across_data_parallel_group
 )
+from megatron.training.arguments import parse_and_validate_args, core_transformer_config_from_args
+from megatron.training.argument_utils import pretrain_cfg_container_from_args
+
 from model_provider import model_provider
 
-try:
-    from megatron.post_training.arguments import add_modelopt_args
-    from megatron.post_training.loss_func import loss_func as loss_func_modelopt
 
-    has_nvidia_modelopt = True
-except ImportError:
-    has_nvidia_modelopt = False
-
-from hcu_megatron.core.parallel_state import get_virtual_vocab_parallel_chunk
-from input_store import InputStore
 from hcu_megatron import megatron_adaptor
 
 from hcu_megatron.core.datasets.vlm_dataset import build_train_valid_test_data_iter
@@ -89,7 +73,7 @@ def split_data_cp_rank(val: torch.Tensor, cp_size: int, seq_dim: int, cp_rank: i
 
     return val
 
-def get_batch(data_iterator, vp_stage: Optional[int] = None, microbatch_id=None):
+def get_batch(data_iterator, vp_stage: Optional[int] = None):
     """Generate a batch.
 
     返回 9 元组，最后 4 个为视觉相关字段：
@@ -227,7 +211,7 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model=None):
     return bwd_loss, num_tokens, report
 
 
-def forward_step(data_iterator, model, return_schedule_plan: bool = False, microbatch_id = None):
+def forward_step(data_iterator, model, return_schedule_plan: bool = False):
     """Forward training step.
 
     Args:
@@ -254,45 +238,42 @@ def forward_step(data_iterator, model, return_schedule_plan: bool = False, micro
 
     timers("model-forward-only", log_level=2).start()
     with stimer:
-        if args.use_legacy_models:
-            output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+        if return_schedule_plan:
+            assert args.overlap_moe_expert_parallel_comm, \
+                "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
+            schedule_plan = model.build_schedule_plan(
+                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+            )
+            return schedule_plan, partial(loss_func, loss_mask, model=model)
+
+        model_kwargs = dict(
+            input_ids=tokens,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            pixel_values=pixel_values,
+            loss_mask=loss_mask,
+        )
+        if is_gemma3vl:
+            # Gemma3VL: 标准 RoPE (LM 内部计算 position_ids)，
+            # 不需要 image_grid_thw / image_input_mask
+            pass
+        elif is_qwen3vl:
+            # Qwen3VL: mRoPE + vision CP split, 需要全部视觉参数
+            model_kwargs.update(
+                image_grid_thw=image_grid_thw,
+                image_input_mask=image_input_mask,
+                images_padded=images_padded,
+                cp_img_num=cp_img_num,
+            )
         else:
-            if return_schedule_plan:
-                assert args.overlap_moe_expert_parallel_comm, \
-                    "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
-                schedule_plan = model.build_schedule_plan(
-                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
-                )
-                return schedule_plan, partial(loss_func, loss_mask, model=model)
-            else:
-                model_kwargs = dict(
-                    input_ids=tokens,
-                    position_ids=position_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    pixel_values=pixel_values,
-                    loss_mask=loss_mask,
-                )
-                if is_gemma3vl:
-                    # Gemma3VL: 标准 RoPE (LM 内部计算 position_ids)，
-                    # 不需要 image_grid_thw / image_input_mask
-                    pass
-                elif is_qwen3vl:
-                    # Qwen3VL: mRoPE + vision CP split, 需要全部视觉参数
-                    model_kwargs.update(
-                        image_grid_thw=image_grid_thw,
-                        image_input_mask=image_input_mask,
-                        images_padded=images_padded,
-                        cp_img_num=cp_img_num,
-                    )
-                else:
-                    # Qwen2VL / Qwen2.5VL: mRoPE, 但不需要 image_input_mask
-                    model_kwargs["image_grid_thw"] = image_grid_thw
-                output_tensor = model(**model_kwargs)
-                # Gemma3VLModel.forward() 返回 (outputs, loss_mask) 元组，
-                # loss_mask 已在模型内部经过 CP slice，需要替换 get_batch 的版本
-                if is_gemma3vl:
-                    output_tensor, loss_mask = output_tensor
+            # Qwen2VL / Qwen2.5VL: mRoPE, 但不需要 image_input_mask
+            model_kwargs["image_grid_thw"] = image_grid_thw
+        output_tensor = model(**model_kwargs)
+        # Gemma3VLModel.forward() 返回 (outputs, loss_mask) 元组，
+        # loss_mask 已在模型内部经过 CP slice，需要替换 get_batch 的版本
+        if is_gemma3vl:
+            output_tensor, loss_mask = output_tensor
     timers("model-forward-only").stop()
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
@@ -323,6 +304,19 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
     )
     return train_iter, valid_iter, test_iter
 
+def get_embedding_ranks(pp_ranks: List[int]):
+    """Get the embedding ranks."""
+    embedding_ranks = [pp_ranks[0]]
+    if len(pp_ranks) > 1:
+        args = get_args()
+        if not args.untie_embeddings_and_output_weights:
+            embedding_ranks.append(pp_ranks[-1])
+        config = core_transformer_config_from_args(args)
+        mtp_ranks = get_mtp_ranks(pp_ranks, config)
+        embedding_ranks.extend(mtp_ranks)
+    embedding_ranks = list(set(embedding_ranks))
+    embedding_ranks = sorted(embedding_ranks)
+    return embedding_ranks
 
 if __name__ == "__main__":
     # Timestamp right after entering __main__ block (after all imports/library setup)
@@ -332,17 +326,22 @@ if __name__ == "__main__":
     set_startup_timestamps(program_start=_PROGRAM_START_TIME, main_entry=_MAIN_ENTRY_TIME)
 
     # Temporary for transition to core datasets
-    train_valid_test_datasets_provider.is_distributed = True
+    setattr(train_valid_test_datasets_provider, "is_distributed", True)
 
     # Optionally enable inprocess restart on pretrain
     pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
-    pretrain(
+    args = parse_and_validate_args(
+        extra_args_provider=add_vlm_extra_args,
+        args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
+    )
+    full_config = pretrain_cfg_container_from_args(args)
+
+    pretrain(full_config,
         train_valid_test_datasets_provider,
         partial(model_provider, gpt_builder),
         ModelType.encoder_or_decoder,
         forward_step,
-        args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
-        extra_args_provider=add_vlm_extra_args,
         store=store,
+        get_embedding_ranks=get_embedding_ranks,
     )
