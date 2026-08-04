@@ -6,6 +6,8 @@ for para in $*
 do
     if [[ $para == --data_path* ]];then
         data_path=${para#*=}
+    elif [[ $para == --launch_backend* ]];then
+        launch_backend=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
@@ -38,6 +40,15 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
+export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
+
+MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_PORT=${MASTER_PORT:-6000}
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-}}}
+NODE_RANK=${NODE_RANK:?"NODE_RANK must be set (or run under mpirun which provides OMPI_COMM_WORLD_RANK/PMI_RANK)"}
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
@@ -51,11 +62,19 @@ export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 
 
-DISTRIBUTED_ARGS=(
+MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
+)
+
+TORCH_DISTRIBUTED_ARGS=(
+    --nnodes $NNODES
+    --node_rank $NODE_RANK
+    --master_addr $MASTER_ADDR
+    --master_port $MASTER_PORT
+    --nproc_per_node $GPUS_PER_NODE
 )
 
 GPT_MODEL_ARGS=(
@@ -147,15 +166,27 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
+if [[ "$launch_backend" == "mpirun" ]]; then
+    APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
     ${DATA_ARGS[@]} \
     ${EVAL_AND_LOGGING_ARGS[@]} \
-    ${DISTRIBUTED_ARGS[@]} \
+    ${MPI_DISTRIBUTED_ARGS[@]} \
     ${INITIALIZATION_ARGS[@]} \
     "
+else
+    APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
+    ${MEGATRON_PATH}/pretrain_vlm.py \
+    ${GPT_MODEL_ARGS[@]} \
+    ${TRAINING_ARGS[@]} \
+    ${MODEL_PARALLEL_ARGS[@]} \
+    ${DATA_ARGS[@]} \
+    ${EVAL_AND_LOGGING_ARGS[@]} \
+    ${INITIALIZATION_ARGS[@]} \
+    "
+fi
 
 if [[ $profiling == "torch" ]]; then
     APP+=" ${TORCH_PROFIE_ARGS[@]}"
@@ -166,4 +197,9 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${launch_with_binding} ${LOCAL_RANK} ${APP}
+if [[ "$launch_backend" == "mpirun" ]]; then
+    ${launch_with_binding} ${LOCAL_RANK} ${APP}
+elif [[ "$launch_backend" == "torchrun" ]]; then
+    echo $APP
+    ${APP}
+fi

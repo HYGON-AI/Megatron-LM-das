@@ -40,6 +40,7 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
+export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
 
 MASTER_ADDR=${MASTER_ADDR:-loadlhost}
 MASTER_PORT=${MASTER_PORT:-6000}
@@ -59,7 +60,6 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
-export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
 
 
 MPI_DISTRIBUTED_ARGS=(
@@ -141,6 +141,14 @@ DATA_ARGS=(
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH} 
     --split 949,50,1
+    # --sft
+    # --sft-tokenizer-prompt-format default
+    # --tokenizer-type SFTTokenizer
+    # --tokenizer-model ${TOKENIZER_MODEL_PATH}
+    # --no-create-attention-mask-in-dataloader
+    # --train-data-path ${DATA_PATH}/train.jsonl
+    # --valid-data-path ${DATA_PATH}/valid.jsonl
+
 )
 
 EVAL_AND_LOGGING_ARGS=(
@@ -173,7 +181,8 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-MPIAPP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
+if [[ "$launch_backend" == "mpirun" ]]; then
+    APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
     ${MODEL_PARALLEL_ARGS[@]} \
@@ -183,8 +192,8 @@ MPIAPP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
     ${INITIALIZATION_ARGS[@]} \
     ${FP8_PARALLEL_ARGS[@]} \
     "
-
-TORCHRUN_APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
+else
+    APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
     ${MEGATRON_PATH}/pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
@@ -193,6 +202,7 @@ TORCHRUN_APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
     ${EVAL_AND_LOGGING_ARGS[@]} \
     ${INITIALIZATION_ARGS[@]} \
     "
+fi
 
 if [[ $profiling == "torch" ]]; then
     APP+=" ${TORCH_PROFIE_ARGS[@]}"

@@ -10,7 +10,7 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
 # Those variables need to modify
 DTK_ENV=""                                                               # where env.sh of dtk
-DATA_PATH=""                                                             # path to oscar-1GB_head-llama2_text_document
+DATA_PATH=""                                                             # Data file path (e.g., oscar-1GB_head-llama2_text_document or sft.json)
 TOKENIZER_MODEL_PATH=""                                                  # HuggingFace path to model. example Qwen/Qwen3-32B
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
@@ -39,7 +39,7 @@ HOST="$(cat ${HOSTFILE} |sed -n "1p"|awk -F ' ' '{print $1}')"
 NNODES=$(cat ${HOSTFILE} | sort | uniq | wc -l)
 if [[ "$LAUNCHER" == "mpirun" ]]; then
     MPIRUN_NP=$((${NNODES}*8))
-    PORT=${PORT:-25906}
+    PORT=${PORT:-11452}
 else
     MPIRUN_NP=${NNODES}
     GPUS_PER_NODE=${GPUS_PER_NODE:-8}
@@ -72,7 +72,7 @@ CMD="mpirun -np ${MPIRUN_NP}  --hostfile ${HOSTFILE} \
     bash -c '
     source ${DTK_ENV} && \
     source ${NCCL_ENV} && \
-    bash train_qwen3_8B.sh \
+    bash train_qwen3vl_8B.sh \
     ${HOST} \
     ${PORT} \
     --data_path=$DATA_PATH \
