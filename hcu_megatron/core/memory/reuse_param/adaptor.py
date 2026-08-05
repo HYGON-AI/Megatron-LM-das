@@ -1,3 +1,6 @@
+# Copyright (c) 2024, Huawei Technologies Co., Ltd. All rights reserved.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import math
 import types
 from functools import wraps

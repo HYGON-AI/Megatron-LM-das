@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import warnings
 from functools import wraps
 from dataclasses import make_dataclass, field

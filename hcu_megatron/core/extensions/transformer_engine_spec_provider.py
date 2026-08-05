@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
 from functools import partial, wraps
 
 from megatron.core.transformer.moe.experts import GroupedMLPSubmodules

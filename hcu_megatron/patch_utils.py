@@ -1,3 +1,4 @@
+# Some of this code was adopted from https://gitcode.com/Ascend/MindSpeed
 import importlib
 import inspect
 import sys

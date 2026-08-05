@@ -1,3 +1,5 @@
+# Some of this code was adopted from https://github.com/MayDomine/Seq1F1B/
+
 from sympy import symbols, Eq, solve
 
 

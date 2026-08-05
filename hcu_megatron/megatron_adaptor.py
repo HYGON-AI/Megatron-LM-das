@@ -1,3 +1,4 @@
+# This code was adopted from https://gitcode.com/Ascend/MindSpeed
 import argparse
 
 from megatron.training import get_args

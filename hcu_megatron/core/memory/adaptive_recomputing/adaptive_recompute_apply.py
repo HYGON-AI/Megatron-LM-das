@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
 import torch
 from megatron.core import tensor_parallel
 from megatron.training import print_rank_0

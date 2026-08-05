@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
 # PowerSGD with external EFLayoutManager
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Any

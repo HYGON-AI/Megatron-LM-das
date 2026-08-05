@@ -1,3 +1,5 @@
+# This code was adopted from https://github.com/sail-sg/VocabularyParallelism
+
 from typing import Any, Callable, List, Optional
 
 import torch

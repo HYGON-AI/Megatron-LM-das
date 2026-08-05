@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 from functools import wraps
 
 from megatron.training import get_args

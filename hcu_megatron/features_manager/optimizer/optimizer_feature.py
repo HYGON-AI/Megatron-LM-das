@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from argparse import ArgumentParser
 from megatron.core.utils import is_te_min_version
 

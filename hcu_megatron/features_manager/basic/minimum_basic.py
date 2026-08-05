@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from argparse import ArgumentParser
 
 from ..feature import AbstractFeature

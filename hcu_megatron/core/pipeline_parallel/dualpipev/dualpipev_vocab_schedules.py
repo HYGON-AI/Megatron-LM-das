@@ -1,3 +1,6 @@
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025, Huawei Technologies Co., Ltd. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import contextlib
 from typing import Iterator, List, Union, Optional, Callable
 

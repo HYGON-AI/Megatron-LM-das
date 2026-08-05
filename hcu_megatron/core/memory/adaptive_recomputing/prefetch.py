@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
 import re
 import torch
 from megatron.training import get_args

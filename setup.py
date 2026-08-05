@@ -4,12 +4,12 @@ import setuptools
 if sys.version_info < (3,):
     raise Exception("Python 2 is not supported by hcu-megatron.")
 
-__description__ = 'hcu-megatron of Sugon'
-__version__ = '0.17.0+das.opt1.dtk2604'
-__author__ = 'Sugon'
+__description__ = 'hcu-megatron of Hygon'
+__version__ = '0.18.2+das.opt1.dtk2604'
+__author__ = 'Hygon'
 __keywords__ = 'hcu-megatron, language, deep learning, NLP'
 __package_name__ = 'hcu-megatron'
-__contact_names__ = 'Sugon'
+__contact_names__ = 'Hygon'
 
 try:
     with open("README.md", "r") as fh:

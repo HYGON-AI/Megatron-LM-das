@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from megatron.training import print_rank_0
 from hcu_megatron.core.memory.swap_attention.prefetch import prefetch_register_post_backward_hook, prefetch_register_pre_forward_hook, get_swap_prefetch, get_layer_id
 from hcu_megatron.core.memory.adaptive_recomputing.adaptive_recompute_apply import get_recompute_hook

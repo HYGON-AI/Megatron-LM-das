@@ -1,3 +1,5 @@
+# Some of this code was adopted from https://github.com/AMD-AGI/Primus
+
 from typing import List, Optional
 
 import torch

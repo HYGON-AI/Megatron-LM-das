@@ -1,3 +1,6 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025, Songlin Yang, Jan Kautz, Ali Hatamizadeh.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import torch
 import torch.nn.functional as F
 from torch import Tensor

@@ -1,3 +1,5 @@
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 """Common functions used in train_*.py and pretrain_*.py scripts."""
 
 from typing import Callable, Optional, Union
