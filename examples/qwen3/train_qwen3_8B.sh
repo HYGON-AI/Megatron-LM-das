@@ -60,7 +60,22 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10 #10 # 4 # 20
+# split hyperparameters
+TP=2
+PP=2
+CP=1
 
+# batch hyperparameters
+MBS=1
+GBS=32
+
+# seq hyperparameters
+SEQ_LEN=4096
+MAX_POSITION_EMBEDDINGS=40960
+
+# train iteration hyperparameters
+TRAIN_ITERS=500
+LR_WARMUP_ITERS=1
 
 MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -77,12 +92,12 @@ TORCH_DISTRIBUTED_ARGS=(
 )
 
 GPT_MODEL_ARGS=(
-    --seq-length 4096
+    --seq-length ${SEQ_LEN}
     --num-layers 36
     --hidden-size 4096
     --ffn-hidden-size 12288 
     --num-attention-heads 32
-    --max-position-embeddings 40960
+    --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --num-query-groups 8
     --group-query-attention
 
@@ -100,9 +115,9 @@ GPT_MODEL_ARGS=(
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
-    --micro-batch-size 1
-    --global-batch-size 32
-    --train-iters 500
+    --micro-batch-size ${MBS}
+    --global-batch-size ${GBS}
+    --train-iters ${TRAIN_ITERS}
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
@@ -116,7 +131,7 @@ TRAINING_ARGS=(
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
-    --lr-warmup-iters 1
+    --lr-warmup-iters ${LR_WARMUP_ITERS}
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
@@ -129,9 +144,9 @@ TRAINING_ARGS=(
 
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 2
-    --pipeline-model-parallel-size 2
-    --context-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
+    --context-parallel-size ${CP}
     --use-distributed-optimizer 
     --sequence-parallel
 )
@@ -167,7 +182,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 4
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_qwen_cp2_qknorm
+    --profile-dir torch_prof_qwen3_8B_tp${TP}-pp${PP}-cp${CP}
     --use-pytorch-profiler
     --pytorch-profiler-collect-callstack
     --record-memory-history
@@ -181,29 +196,32 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-if [[ "$launch_backend" == "mpirun" ]]; then
+if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
     APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
-    ${GPT_MODEL_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${MODEL_PARALLEL_ARGS[@]} \
-    ${DATA_ARGS[@]} \
-    ${EVAL_AND_LOGGING_ARGS[@]} \
-    ${MPI_DISTRIBUTED_ARGS[@]} \
-    ${INITIALIZATION_ARGS[@]} \
-    ${FP8_PARALLEL_ARGS[@]} \
-    "
-else
+        ${GPT_MODEL_ARGS[@]} \
+        ${TRAINING_ARGS[@]} \
+        ${MODEL_PARALLEL_ARGS[@]} \
+        ${DATA_ARGS[@]} \
+        ${EVAL_AND_LOGGING_ARGS[@]} \
+        ${MPI_DISTRIBUTED_ARGS[@]} \
+        ${INITIALIZATION_ARGS[@]} \
+        ${FP8_PARALLEL_ARGS[@]} \
+        "
+elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
     APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
-    ${MEGATRON_PATH}/pretrain_gpt.py \
-    ${GPT_MODEL_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${MODEL_PARALLEL_ARGS[@]} \
-    ${DATA_ARGS[@]} \
-    ${EVAL_AND_LOGGING_ARGS[@]} \
-    ${INITIALIZATION_ARGS[@]} \
-    "
+        ${MEGATRON_PATH}/pretrain_gpt.py \
+        ${GPT_MODEL_ARGS[@]} \
+        ${TRAINING_ARGS[@]} \
+        ${MODEL_PARALLEL_ARGS[@]} \
+        ${DATA_ARGS[@]} \
+        ${EVAL_AND_LOGGING_ARGS[@]} \
+        ${INITIALIZATION_ARGS[@]} \
+        ${FP8_PARALLEL_ARGS[@]} \
+        "
+else
+    echo "Only mpirun and torchrun are supported as launch methods"
+    exit 1
 fi
-
 if [[ $profiling == "torch" ]]; then
     APP+=" ${TORCH_PROFIE_ARGS[@]}"
 elif [[ $profiling == "hip" ]]; then
@@ -213,10 +231,12 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-if [[ "$launch_backend" == "mpirun" ]]; then
-    ${launch_with_binding} ${LOCAL_RANK} ${MPIAPP}
-elif [[ "$launch_backend" == "torchrun" ]]; then
-    echo $TORCHRUN_APP
-    ${TORCHRUN_APP}
+if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+    ${launch_with_binding} ${LOCAL_RANK} ${APP}
+elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+    echo ${APP}
+    ${APP}
+else
+    echo "Only mpirun and torchrun are supported as launch methods"
+    exit 1
 fi
-# ${launch_with_binding} ${LOCAL_RANK} ${APP}
