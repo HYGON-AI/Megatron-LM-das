@@ -10,6 +10,8 @@ do
         checkpoint_path=${para#*=}
     elif [[ $para == --launch_with_binding* ]];then
         launch_with_binding=${para#*=}
+    elif [[ $para == --launch_backend* ]];then
+        launch_backend=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     fi
@@ -26,7 +28,13 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
+export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
+MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_PORT=${MASTER_PORT:-6000}
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -38,11 +46,25 @@ export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 # enable BatchLinear
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
 export NVTE_OVERLAP_GRAD_REDUCE=1
+# split hyperparameters
+TP=1
+PP=8
+CP=1
+EP=8
+ETP=1
 
-DATA_PATH="/public/home/fugx1/datasets/oscar-1GB-head/alpaca_text_document"  
-TOKENIZER_MODEL_PATH="/public/home/fugx1/datasets/llama2_7b_hf/tokenizer.model"
+# batch hyperparameters
+MBS=1
+GBS=8192
 
-DISTRIBUTED_ARGS=(
+# seq hyperparameters
+SEQ_LEN=4096
+MAX_POSITION_EMBEDDINGS=4096
+
+# train iteration hyperparameters
+TRAIN_ITERS=10
+
+MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
@@ -51,11 +73,19 @@ DISTRIBUTED_ARGS=(
     --distributed-backend nccl
 )
 
+TORCH_DISTRIBUTED_ARGS=(
+    --nnodes $NNODES
+    --node_rank $NODE_RANK
+    --master_addr $MASTER_ADDR
+    --master_port $MASTER_PORT
+    --nproc_per_node $GPUS_PER_NODE
+)
+
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 4096
-    --max-position-embeddings 4096
+    --seq-length ${SEQ_LEN}
+    --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --num-layers 45
     --moe-layer-freq [0]*3+[1]*42
     --hidden-size 4096
@@ -126,9 +156,9 @@ DATA_ARGS=(
 )
 
 TRAINING_ARGS=(
-    --train-iters 10
-    --micro-batch-size 1
-    --global-batch-size 8192
+    --train-iters ${TRAIN_ITERS}
+    --micro-batch-size ${MBS}
+    --global-batch-size ${GBS}
     --lr 3.9e-6
     --min-lr 3.9e-7
     --lr-decay-style cosine
@@ -142,11 +172,11 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 8
-    --expert-model-parallel-size 8
-    --expert-tensor-parallel-size 1
-    --context-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
+    --expert-model-parallel-size ${EP}
+    --expert-tensor-parallel-size ${ETP}
+    --context-parallel-size ${CP}
     --num-layers-per-virtual-pipeline-stage 2
     --use-distributed-optimizer
     --sequence-parallel
@@ -178,7 +208,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_deepseek671B
+    --profile-dir torch_prof_glm5_300B_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
@@ -197,16 +227,30 @@ if [ -n "${WANDB_API_KEY}" ]; then
     )
 fi
 
-APP="python3 -u ${MEGATRON_PATH}/pretrain_gpt.py \
-    ${DISTRIBUTED_ARGS[@]} \
-    ${MODEL_ARGS[@]} \
-    ${MOE_ARGS[@]} \
-    ${DATA_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${MODEL_PARALLEL_ARGS[@]} \
-    ${LOGGING_ARGS[@]} \
-    "
-
+if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+    APP="python3 -u ${MEGATRON_PATH}/pretrain_gpt.py \
+        ${MPI_DISTRIBUTED_ARGS[@]} \
+        ${MODEL_ARGS[@]} \
+        ${MOE_ARGS[@]} \
+        ${DATA_ARGS[@]} \
+        ${TRAINING_ARGS[@]} \
+        ${MODEL_PARALLEL_ARGS[@]} \
+        ${LOGGING_ARGS[@]} \
+        "
+elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+    APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
+        ${MEGATRON_PATH}/pretrain_gpt.py \
+        ${MODEL_ARGS[@]} \
+        ${MOE_ARGS[@]} \
+        ${DATA_ARGS[@]} \
+        ${TRAINING_ARGS[@]} \
+        ${MODEL_PARALLEL_ARGS[@]} \
+        ${LOGGING_ARGS[@]} \
+        "
+else
+    echo "Only mpirun and torchrun are supported as launch methods"
+    exit 1
+fi
 if [[ $profiling == "torch" ]]; then
     APP+=" ${TORCH_PROFIE_ARGS[@]}"
 elif [[ $profiling == "hip" ]]; then
@@ -216,4 +260,12 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${launch_with_binding} ${LOCAL_RANK} ${APP}
+if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+    ${launch_with_binding} ${LOCAL_RANK} ${APP}
+elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+    echo ${APP}
+    ${APP}
+else
+    echo "Only mpirun and torchrun are supported as launch methods"
+    exit 1
+fi
