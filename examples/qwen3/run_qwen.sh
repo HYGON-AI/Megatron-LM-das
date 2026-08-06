@@ -16,7 +16,7 @@ DATA_PATH=""                                                             # Data 
 TOKENIZER_MODEL_PATH=""                                                  # HuggingFace path to model. example Qwen/Qwen3-32B
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
-TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_qwen3vl_8B.sh}                         # script under examples/qwen3 to run
+TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_qwen3vl_8B.sh}                        # script under examples/qwen3 to run
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
@@ -39,12 +39,11 @@ fi
 
 HOST="$(sed -n "1p" "${HOSTFILE}" | awk -F ' ' '{print $1}')"
 
-NNODES=$(sort "${HOSTFILE}" | uniq | wc -l)
 if [[ "${LAUNCHER}" == "mpirun" ]]; then
-    MPIRUN_NP=$((NNODES * 8))
+    MPIRUN_NP=$((node_num * 8))
     PORT=${PORT:-11452}
 else
-    MPIRUN_NP=${NNODES}
+    MPIRUN_NP=${node_num}
     GPUS_PER_NODE=${GPUS_PER_NODE:-8}
     MASTER_ADDR=${MASTER_ADDR:-${HOST}}
     MASTER_PORT=${MASTER_PORT:-11452}
@@ -58,7 +57,7 @@ if [[ "${LAUNCHER}" == "torchrun" ]]; then
         -x PYTHONPATH \
         -x MASTER_ADDR=${MASTER_ADDR} \
         -x MASTER_PORT=${MASTER_PORT} \
-        -x NNODES=${NNODES} \
+        -x NNODES=${node_num} \
         -x GPUS_PER_NODE=${GPUS_PER_NODE} \
     "
 fi
@@ -84,7 +83,7 @@ CMD="mpirun -np ${MPIRUN_NP} --hostfile ${HOSTFILE} \
     --tokenizer_path=${TOKENIZER_MODEL_PATH} \
     --checkpoint_path=${CHECKPOINT_PATH} \
     --launch_with_binding=${LAUNCH_WITH_BINDING} \
-    --profiling=${profiling}' 2>&1 | tee log-${NNODES}nodes-$(date +%F-%H%M).log
+    --profiling=${profiling}' 2>&1 | tee log-${node_num}nodes-$(date +%F-%H%M).log
 "
 
 eval ${CMD}
