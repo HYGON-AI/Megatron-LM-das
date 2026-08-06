@@ -107,9 +107,7 @@ GPT_MODEL_ARGS=(
     --num-query-groups 4
     --group-query-attention
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
-    --kv-channels 128
 
     --use-bridge
     --bridge-hf-model ${TOKENIZER_MODEL_PATH}

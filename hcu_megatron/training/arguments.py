@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 
 from typing import Union
@@ -51,10 +52,17 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = process_adaptor_args(parser)
 
     # Parse.
+    explicit_args = {
+        action.dest
+        for action in parser._actions
+        for option_string in action.option_strings
+        if option_string and any(arg == option_string or arg.startswith(f"{option_string}=") for arg in sys.argv[1:])
+    }
     if ignore_unknown_args:
         args, _ = parser.parse_known_args()
     else:
         args = parser.parse_args()
+    args._explicit_args = explicit_args
 
     args._is_global_batch_size_explicitly_specified = args.global_batch_size is not None
 
@@ -63,6 +71,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         from megatron.training.yaml_arguments import load_yaml
 
         args = load_yaml(args.yaml_cfg)
+        args._explicit_args = explicit_args
 
     # Args from environment
     if os.getenv("LAUNCH_BACKEND", "mpirun") == "torchrun":

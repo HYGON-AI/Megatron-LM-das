@@ -546,7 +546,12 @@ class QwenVLDataset(MultiModalDataset):
             # ── 加载图片 ──
             imgs = None
             if 'images' in json_data and len(json_data['images']) > 0:
-                imgs = fetch_images(json_data['images'], self.tar_dir)
+                try:
+                    imgs = fetch_images(json_data['images'], self.tar_dir)
+                except Exception as e:
+                    domain_states.domain_lines += example["domain_line"]
+                    print(f"Abort Sample at dp-rank:{self.underlying.dp_rank}[image load failed: {e}]")
+                    continue
                 # 图片有效性校验：None / 过小 / 宽高比过大 → 跳过
                 imgs_valid = True
                 for img in imgs:
@@ -821,7 +826,12 @@ class GemmaVLDataset(MultiModalDataset):
             # ── 加载图片 ──
             imgs = None
             if "images" in json_data and len(json_data["images"]) > 0:
-                imgs = fetch_images(json_data["images"], self.tar_dir)
+                try:
+                    imgs = fetch_images(json_data["images"], self.tar_dir)
+                except Exception as e:
+                    domain_states.domain_lines += example["domain_line"]
+                    print(f"Abort Sample at dp-rank:{self.underlying.dp_rank}[image load failed: {e}]")
+                    continue
                 imgs_valid = True
                 for img in imgs:
                     if img is None:

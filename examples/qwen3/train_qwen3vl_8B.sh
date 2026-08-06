@@ -94,13 +94,12 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 32
+    --num-layers 36
     --hidden-size 4096
-    --ffn-hidden-size 11008 
+    --ffn-hidden-size 12288 
     --num-attention-heads 32
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -149,7 +148,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
