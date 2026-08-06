@@ -49,20 +49,18 @@ GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge-0.4.2/src:$PYTHONPATH
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
 
 # default env
 export GLOG_minloglevel=3
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=4
+export GPU_MAX_HW_QUEUES=10
 # split hyperparameters
 TP=2
 PP=2
 CP=1
-FIRST_PP_LAYERS=28
-LAST_PP_LAYERS=36
 
 # batch hyperparameters
 MBS=1
@@ -70,7 +68,7 @@ GBS=32
 
 # seq hyperparameters
 SEQ_LEN=4096
-MAX_POSITION_EMBEDDINGS=128000
+MAX_POSITION_EMBEDDINGS=4096
 
 # train iteration hyperparameters
 TRAIN_ITERS=50
@@ -93,19 +91,17 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 64
-    --hidden-size 5120
-    --ffn-hidden-size 27648 
-    --num-attention-heads 40
-    --num-query-groups 8
+    --num-layers 28
+    --hidden-size 3584
+    --ffn-hidden-size 18944 
+    --num-attention-heads 28
+    --num-query-groups 4
     --group-query-attention
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
+    --position-embedding-type rope
+    --rotary-base 1000000
     --normalization RMSNorm
     --untie-embeddings-and-output-weights
-
-    --use-bridge
-    --bridge-hf-model ${TOKENIZER_MODEL_PATH}
-    # --load-weights
 )
 
 TRAINING_ARGS=(
@@ -137,8 +133,6 @@ TRAINING_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
-    --decoder-first-pipeline-num-layers ${FIRST_PP_LAYERS}
-    --decoder-last-pipeline-num-layers ${LAST_PP_LAYERS}
     --context-parallel-size ${CP}
     --use-distributed-optimizer 
     --sequence-parallel
@@ -151,6 +145,7 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen2.5vl
     --processor-path ${TOKENIZER_MODEL_PATH}
+    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -170,7 +165,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_qwen25vl_32B_tp${TP}-pp${PP}-cp${CP}
+    --profile-dir torch_prof_qwen25vl_7B_tp${TP}-pp${PP}-cp${CP}
     --use-pytorch-profiler
 )
 
