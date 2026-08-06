@@ -99,7 +99,6 @@ GPT_MODEL_ARGS=(
     --num-attention-heads 64
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -149,7 +148,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 

@@ -106,10 +106,6 @@ GPT_MODEL_ARGS=(
     --normalization RMSNorm
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
-
-    # --use-bridge
-    # --bridge-hf-model ${TOKENIZER_MODEL_PATH}
-    # # --load-weights
 )
 
 TRAINING_ARGS=(

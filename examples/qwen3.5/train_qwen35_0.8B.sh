@@ -93,13 +93,10 @@ GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
     --num-layers 24
     --hidden-size 1024
-    --ffn-hidden-size 5504 
-    --num-attention-heads 16
+    --ffn-hidden-size 3584 
+    --num-attention-heads 8
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    --num-query-groups 8
-    --group-query-attention
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -123,7 +120,6 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
@@ -149,7 +145,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -159,8 +154,6 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    # --save $CHECKPOINT_PATH
-    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 

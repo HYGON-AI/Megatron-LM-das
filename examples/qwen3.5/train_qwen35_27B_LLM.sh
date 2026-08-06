@@ -145,8 +145,6 @@ TRAINING_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
-    # --decoder-first-pipeline-num-layers 4
-    # --decoder-last-pipeline-num-layers 32
     --context-parallel-size ${CP}
     --use-distributed-optimizer
     --sequence-parallel
@@ -155,10 +153,6 @@ MODEL_PARALLEL_ARGS=(
 DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    # --dataloader-type external
-    # --vlm-data-config-path ${DATA_PATH}
-    # --model-arch qwen3vl
-    # --processor-path ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
     --split 950,50,0
 )

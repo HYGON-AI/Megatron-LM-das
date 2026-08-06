@@ -93,13 +93,10 @@ GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
     --num-layers 32
     --hidden-size 2560
-    --ffn-hidden-size 12288
+    --ffn-hidden-size 9216
     --num-attention-heads 16
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    # --num-query-groups None
-    # --group-query-attention
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -123,7 +120,6 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
@@ -137,8 +133,6 @@ TRAINING_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
-    # --decoder-first-pipeline-num-layers 4
-    # --decoder-last-pipeline-num-layers 32
     --context-parallel-size ${CP}
     --use-distributed-optimizer 
     --sequence-parallel
@@ -151,7 +145,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
