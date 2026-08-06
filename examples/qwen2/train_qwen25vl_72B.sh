@@ -93,10 +93,10 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 64
-    --hidden-size 5120
-    --ffn-hidden-size 27648 
-    --num-attention-heads 40
+    --num-layers 80
+    --hidden-size 8192
+    --ffn-hidden-size 29568 
+    --num-attention-heads 64
     --num-query-groups 8
     --group-query-attention
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}

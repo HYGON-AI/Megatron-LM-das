@@ -96,15 +96,12 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 12288
-    --num-attention-heads 32
+    --num-layers 40
+    --hidden-size 2048
+    --ffn-hidden-size 512
+    --num-attention-heads 16
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    # --num-query-groups None
-    # --group-query-attention
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -113,15 +110,12 @@ GPT_MODEL_ARGS=(
 )
 
 MOE_ARGS=(
-    --num-experts 128
-    --moe-ffn-hidden-size 768
+    --num-experts 256
+    --moe-ffn-hidden-size 512
     --moe-router-topk 8
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-3
     --moe-token-dispatcher-type alltoall # flex # 
-    # --moe-flex-dispatcher-backend deepep 
-    # --moe-enable-deepep
-    # --moe-deepep-num-sms 48
     --moe-permute-fusion
     --moe-grouped-gemm
     --moe-router-fusion
@@ -143,7 +137,6 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
@@ -174,7 +167,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
