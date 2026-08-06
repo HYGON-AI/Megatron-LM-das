@@ -16,13 +16,14 @@ DATA_PATH=""                                                             # path 
 TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
-TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_mixtral_8x7B_${NODE_COUNT}nodes.sh}                              # script under this example directory to run
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
 # Those variables no need to modify
 hostfile_input=${1}
 node_num=${2}
+
+TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_mixtral_8x7B_${node_num}nodes.sh}   # script under this example directory to run
 
 if [[ "${LAUNCHER}" != "mpirun" && "${LAUNCHER}" != "torchrun" ]]; then
     echo "Only mpirun and torchrun are supported as launch methods"
@@ -37,14 +38,13 @@ else
     sed -n "1,${node_num}p" "${hostfile_input}" | sed 's/$/ slots=1/' > "${HOSTFILE}"
 fi
 
-NODE_COUNT=$(sort "${HOSTFILE}" | uniq | wc -l)
 HOST="$(sed -n "1p" "${HOSTFILE}" | awk -F ' ' '{print $1}')"
 
 if [[ "${LAUNCHER}" == "mpirun" ]]; then
-    MPIRUN_NP=$((NODE_COUNT * 8))
+    MPIRUN_NP=$((node_num * 8))
     PORT=${PORT:-25905}
 else
-    MPIRUN_NP=${NODE_COUNT}
+    MPIRUN_NP=${node_num}
     GPUS_PER_NODE=${GPUS_PER_NODE:-8}
     MASTER_ADDR=${MASTER_ADDR:-${HOST}}
     MASTER_PORT=${MASTER_PORT:-25905}
@@ -58,7 +58,7 @@ if [[ "${LAUNCHER}" == "torchrun" ]]; then
         -x PYTHONPATH \
         -x MASTER_ADDR=${MASTER_ADDR} \
         -x MASTER_PORT=${MASTER_PORT} \
-        -x NNODES=${NODE_COUNT} \
+        -x NNODES=${node_num} \
         -x GPUS_PER_NODE=${GPUS_PER_NODE} \
     "
 fi
@@ -83,7 +83,7 @@ CMD="mpirun -np ${MPIRUN_NP} --hostfile ${HOSTFILE} \
     --tokenizer_path=${TOKENIZER_MODEL_PATH} \
     --checkpoint_path=${CHECKPOINT_PATH} \
     --launch_with_binding=${LAUNCH_WITH_BINDING} \
-    --profiling=${profiling}' 2>&1 | tee log-${NODE_COUNT}nodes-$(date +%F-%H%M).log
+    --profiling=${profiling}' 2>&1 | tee log-${node_num}nodes-$(date +%F-%H%M).log
 "
 
 eval ${CMD}
