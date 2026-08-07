@@ -5,11 +5,11 @@ import copy
 from collections import defaultdict
 
 from PIL import Image
-from PIL import PngImagePlugin
 import torch
 from torch.utils.data import IterableDataset as TorchIterableDataset
 
 from hcu_megatron.core.datasets.mega_indexed_jsonl_dataset import MegaIndexedJsonlDatasetMM
+
 
 tar_file_cache = {}  # tar_filepath: (tar_context, access_cnt)
 tar_file_cache_size = 25
@@ -61,13 +61,6 @@ def fetch_image(
 
 
 def fetch_images(images: list[dict], tar_dir: str) -> list[Image.Image]:
-    # NOTE(guanyouhe): 这里图片附加信息过大会导致打开图片失败，修改一下这个值就好
-    if PngImagePlugin.MAX_TEXT_CHUNK < 1024 * 1024 * 1024:
-        print(
-            f"Warning: PngImagePlugin.MAX_TEXT_CHUNK changed from {PngImagePlugin.MAX_TEXT_CHUNK} to 1024 * 1024 * 1024"
-        )
-        PngImagePlugin.MAX_TEXT_CHUNK = 1024 * 1024 * 1024  # 1GB
-
     return [fetch_image(ele, tar_dir) for ele in images]
 
 

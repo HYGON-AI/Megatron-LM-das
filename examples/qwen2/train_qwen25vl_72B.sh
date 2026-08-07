@@ -8,12 +8,12 @@ do
         data_path=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
+    elif [[ $para == --checkpoint_path* ]];then
+        checkpoint_path=${para#*=}
     elif [[ $para == --launch_with_binding* ]];then
         launch_with_binding=${para#*=}
     elif [[ $para == --launch_backend* ]];then
         launch_backend=${para#*=}
-    elif [[ $para == --checkpoint_path* ]];then
-        checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     elif [[ $para == --reproduce* ]];then
@@ -49,7 +49,7 @@ GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
+export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge-0.4.2/src:$PYTHONPATH
 
 # default env
 export GLOG_minloglevel=3
@@ -58,9 +58,11 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=4
 # split hyperparameters
-TP=1
+TP=2
 PP=2
 CP=1
+FIRST_PP_LAYERS=28
+LAST_PP_LAYERS=36
 
 # batch hyperparameters
 MBS=1
@@ -68,7 +70,7 @@ GBS=32
 
 # seq hyperparameters
 SEQ_LEN=4096
-MAX_POSITION_EMBEDDINGS=262144
+MAX_POSITION_EMBEDDINGS=128000
 
 # train iteration hyperparameters
 TRAIN_ITERS=50
@@ -91,10 +93,12 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 32
-    --hidden-size 2560
-    --ffn-hidden-size 9216
-    --num-attention-heads 16
+    --num-layers 80
+    --hidden-size 8192
+    --ffn-hidden-size 29568 
+    --num-attention-heads 64
+    --num-query-groups 8
+    --group-query-attention
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
     --untie-embeddings-and-output-weights
@@ -133,6 +137,8 @@ TRAINING_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
+    --decoder-first-pipeline-num-layers ${FIRST_PP_LAYERS}
+    --decoder-last-pipeline-num-layers ${LAST_PP_LAYERS}
     --context-parallel-size ${CP}
     --use-distributed-optimizer 
     --sequence-parallel
@@ -143,28 +149,28 @@ DATA_ARGS=(
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --dataloader-type external
     --vlm-data-config-path ${DATA_PATH}
-    --model-arch qwen3vl
+    --model-arch qwen2.5vl
     --processor-path ${TOKENIZER_MODEL_PATH}
     --split 949,50,1
 )
 
 EVAL_AND_LOGGING_ARGS=(
     --log-throughput
-    --eval-iters -1
+    --eval-iters 5
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0
+    --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_qwen35_4B_tp${TP}-pp${PP}-cp${CP}
+    --profile-dir torch_prof_qwen25vl_32B_tp${TP}-pp${PP}-cp${CP}
     --use-pytorch-profiler
 )
 

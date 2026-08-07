@@ -94,12 +94,9 @@ GPT_MODEL_ARGS=(
     --num-layers 32
     --hidden-size 4096
     --ffn-hidden-size 12288
-    --num-attention-heads 32
+    --num-attention-heads 16
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    # --num-query-groups None
-    # --group-query-attention
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -123,7 +120,6 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
@@ -137,8 +133,6 @@ TRAINING_ARGS=(
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
-    # --decoder-first-pipeline-num-layers 4
-    # --decoder-last-pipeline-num-layers 32
     --context-parallel-size ${CP}
     --use-distributed-optimizer 
     --sequence-parallel

@@ -97,9 +97,10 @@ GPT_MODEL_ARGS=(
     --hidden-size 5120
     --ffn-hidden-size 27648 
     --num-attention-heads 40
+    --num-query-groups 8
+    --group-query-attention
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -150,7 +151,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen2.5vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
