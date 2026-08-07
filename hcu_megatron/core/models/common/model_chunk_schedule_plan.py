@@ -171,11 +171,10 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         Builds the callable nodes for the transformer/mtp layer:
             attn_qkv, core_attn, attn_proj, mlp, moe_dispatch and moe_combine, and mtp_post_process.
         """
-
-        from megatron.core.models.gpt.fine_grained_callables import TransformerLayerNode
         from megatron.core.transformer.moe.moe_layer import MoELayer
         from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 
+        from hcu_megatron.core.models.gpt.fine_grained_callables import TransformerLayerNode
         from hcu_megatron.core.models.gpt.fine_grained_callables import build_layer_callables_with_split_attn
 
         # build the forward and backward callables for the transformer/mtp layer
@@ -347,12 +346,17 @@ class TransformerLayerSchedulePlanWithSplitAttn:
                 f_input = f_layer.attn_proj.forward(
                     f_input,
                 )
-                f_input = f_layer.moe_dispatch.forward(f_input,)
 
         if b_layer is not None:
             b_grad = b_layer.mlp.backward(b_grad)
 
+        if f_layer is not None:
+            with f_layer.get_fp8_context():
+                f_input = f_layer.moe_dispatch.forward(f_input,)
+
         if b_layer is not None:
+            if not block_level_wgrad_compute:
+                b_layer.mlp.backward_dw()
             b_grad = b_layer.moe_dispatch.backward(b_grad)
 
         if f_layer is not None:
@@ -361,8 +365,6 @@ class TransformerLayerSchedulePlanWithSplitAttn:
 
         b_attn_post_f_combine_sync_event = B_ATTN_POST_F_COMBINE_SYNC_EVENT if is_sync_1f1b else None
         if b_layer is not None:
-            if not block_level_wgrad_compute:
-                b_layer.mlp.backward_dw()
             b_grad = b_layer.attn_proj.backward(
                 b_grad,
                 stream_record_event=b_attn_post_f_combine_sync_event,

@@ -91,7 +91,7 @@ class MLASelfAttention():
         # self or cross attn.
         # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
         with off_interface(self.offload_qkv_linear, hidden_states, "qkv_linear") as hidden_states:
-            query, key, value, q_compressed, kv_compressed = self.get_query_key_value_tensors(
+            query, key, value, q_compressed, _ = self.get_query_key_value_tensors(
                 hidden_states,
                 key_value_states,
                 position_ids,
@@ -105,7 +105,13 @@ class MLASelfAttention():
 
         self.hidden_states = hidden_states
 
-        return query, key, value, q_compressed, kv_compressed
+        if (
+            not (self.checkpoint_core_attention and self.training)
+            and (inference_context is None or inference_context.is_static_batching())
+            and self.config.experimental_attention_variant == "dsa"
+        ):
+            return query, key, value, q_compressed
+        return query, key, value
 
     def compute_attn(
         self,
@@ -122,8 +128,6 @@ class MLASelfAttention():
         *,
         inference_params=None,
     ):
-        query, key, value, q_compressed, kv_compressed = qkv_output
-
         assert rotary_pos_emb is None, "Rotary position embeddings should not be passed into MLA."
         assert attention_bias is None, "Attention bias should not be passed into MLA."
         assert (
@@ -140,6 +144,7 @@ class MLASelfAttention():
                 self.config.cache_mla_latents
             ), "currently to use dynamic backend for MLA cache mla latents must be true"
 
+        query, key, value = qkv_output[:3]
         # ===================================================
         # Adjust key, value for inference
         # ===================================================
@@ -174,7 +179,7 @@ class MLASelfAttention():
                     # For dsa we need to pass in the original hidden states and the compressed
                     # query representation.
                     extra_kwargs["x"] = self.hidden_states
-                    extra_kwargs["qr"] = q_compressed
+                    extra_kwargs["qr"] = qkv_output[3]  # q_compressed
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:
