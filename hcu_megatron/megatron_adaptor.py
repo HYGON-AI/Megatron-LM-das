@@ -47,6 +47,11 @@ def get_adaptor_args():
     return _ADAPTOR_ARGS
 
 
+def destroy_adaptor_args():
+    global _ADAPTOR_ARGS
+    _ADAPTOR_ARGS = None
+
+
 def patch_features():
     adaptor_args = get_adaptor_args()
 
@@ -61,6 +66,7 @@ def patch_features():
 
 
 def repatch(patch_adaptor_args, patch_megatron_args):
+    destroy_adaptor_args()
     MegatronPatchesManager.remove_patches()
 
     adaptor_args = get_adaptor_args()
