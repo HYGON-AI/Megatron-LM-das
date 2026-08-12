@@ -36,8 +36,12 @@ NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
+
+# default env
 export GPU_MAX_HW_QUEUES=4
+
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
+
 num_layers=61
 num_expert=256
 
@@ -220,7 +224,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_deepseekv3_671B_256nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
+    --profile-dir torch_prof_deepseekv3_671B_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
