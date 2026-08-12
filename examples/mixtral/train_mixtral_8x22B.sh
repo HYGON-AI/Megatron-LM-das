@@ -36,44 +36,37 @@ NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10
-export PYTHONPATH=${MEGATRON_PATH}:$PYTHONPATH
 
-# enable BatchLinear
-export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
-export NVTE_OVERLAP_GRAD_REDUCE=1
+# default env
+export GPU_MAX_HW_QUEUES=4
 
-export RCCL_MODEL_MATCHING_DISABLE=1
-export TRITON_HOME=/tmp
+export GROUPED_GEMM_BatchLinear=1
+
 # split hyperparameters
-TP=1
-PP=2
+TP=4
+PP=8
 CP=1
 EP=8
 ETP=1
 
 # batch hyperparameters
 MBS=1
-GBS=64
+GBS=256
 
 # seq hyperparameters
 SEQ_LEN=4096
-MAX_POSITION_EMBEDDINGS=4096
+MAX_POSITION_EMBEDDINGS=65536
 
 # train iteration hyperparameters
 TRAIN_ITERS=10
+LR_WARMUP_ITERS=2000
+LR_DECAY_ITERS=10000
 
 MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
-    --distributed-timeout-minutes 60
-    --distributed-backend nccl
 )
 
 TORCH_DISTRIBUTED_ARGS=(
@@ -89,89 +82,58 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length ${SEQ_LEN}
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    --num-layers 16
-    --moe-layer-freq 1 # [0]*3+[1]*42
-    --hidden-size 4096
-    --ffn-hidden-size 12288
-    --num-attention-heads 64
+    --num-layers 56
+    --hidden-size 6144
+    --ffn-hidden-size 16384
+    --num-attention-heads 48
     --init-method-std 0.01
     --attention-dropout 0.0
     --hidden-dropout 0.0
     --normalization RMSNorm
-    --norm-epsilon 1e-5
     --position-embedding-type rope
     --swiglu
     --untie-embeddings-and-output-weights
-    --rotary-base 10000
-    --use-flash-attn
-    --multi-latent-attention
-    --enable-experimental
-    --no-check-for-nan-in-loss-and-grad
-    --cross-entropy-loss-fusion
-    --cross-entropy-fusion-impl te
-    --manual-gc
-    --manual-gc-interval 20
-    --no-create-attention-mask-in-dataloader
-    --kv-channels 128
-    --make-vocab-size-divisible-by 3232
-    --qk-layernorm
-    --q-lora-rank 1536
-    --kv-lora-rank 512
-    --qk-head-dim 128
-    --qk-pos-emb-head-dim 64
-    --v-head-dim 128
-    --rotary-scaling-factor 1
-    --mscale 1.0
-    --mscale-all-dim 1.0
-    --mtp-num-layers 1
-    --mtp-loss-scaling-factor 0.3
+    --group-query-attention
+    --num-query-groups 8
+    --no-masked-softmax-fusion
+    --no-position-embedding
+    --rotary-base 1000000
+    --ckpt-format torch
 )
 
 MOE_ARGS=(
-    --num-experts 32
-    --moe-aux-loss-coeff 1e-4
-    # --moe-enable-deepep
-    # --moe-deepep-num-sms 48
-    --moe-token-dispatcher-type alltoall # flex
-    --moe-ffn-hidden-size 1536
-    --moe-shared-expert-intermediate-size 1536
-    --moe-router-topk 8
-    --moe-router-topk-scaling-factor 2.5
-    --moe-router-dtype fp32
-    --moe-router-pre-softmax
-    --moe-router-score-function sigmoid
-    --moe-router-enable-expert-bias
-    --moe-router-bias-update-rate 1e-3
-    --moe-router-load-balancing-type seq_aux_loss
-    --moe-router-fusion
-    --moe-router-force-load-balancing
+    --num-experts 8
+    --moe-router-topk 2
+    --moe-router-load-balancing-type aux_loss
+    --moe-aux-loss-coeff 1e-3
+    --moe-token-dispatcher-type alltoall
+    --moe-expert-capacity-factor 1
+    --moe-pad-expert-input-to-capacity
     --moe-permute-fusion
-    --moe-grouped-gemm
+    #--moe-grouped-gemm
 )
 
 DATA_ARGS=(
     --tokenizer-type Llama2Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
-    --split 949,50,1
-    --num-workers 6
-    --no-mmap-bin-files
+    --split 99990,8,2
 )
 
 TRAINING_ARGS=(
-    --train-iters ${TRAIN_ITERS}
     --micro-batch-size ${MBS}
     --global-batch-size ${GBS}
-    --lr 3.9e-6
-    --min-lr 3.9e-7
+    --lr 1e-4
+    --train-iters ${TRAIN_ITERS}
+    --lr-decay-iters ${LR_DECAY_ITERS}
     --lr-decay-style cosine
-    --lr-warmup-init 3.9e-7
-    --lr-warmup-fraction 0.01
+    --min-lr 1.0e-6
     --weight-decay 0.1
+    --lr-warmup-iters ${LR_WARMUP_ITERS}
     --clip-grad 1.0
     --bf16
-    --adam-beta1 0.9
-    --adam-beta2 0.95
+    --overlap-param-gather
+    --overlap-grad-reduce
 )
 
 MODEL_PARALLEL_ARGS=(
@@ -180,38 +142,30 @@ MODEL_PARALLEL_ARGS=(
     --expert-model-parallel-size ${EP}
     --expert-tensor-parallel-size ${ETP}
     --context-parallel-size ${CP}
-    --num-layers-per-virtual-pipeline-stage 2
     --use-distributed-optimizer
     --sequence-parallel
-    --overlap-param-gather
-    --overlap-grad-reduce
 )
 
 LOGGING_ARGS=(
-    --log-throughput
-    --log-interval 1
-    --log-memory-to-tensorboard
-    --log-validation-ppl-to-tensorboard
-    --logging-level 40
-    --save-interval 10000
-    --eval-interval 200
-    --eval-iters -1
+    --log-throughput \
+    --log-interval 1 \
+    --save-interval 10000 \
+    --eval-interval 1000 \
+    --eval-iters -1 \
     #--save $CHECKPOINT_PATH \
     #--load $CHECKPOINT_PATH \
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard"
-    --no-load-optim
-    --no-load-rng
+    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" \
+    --no-load-optim \
+    --no-load-rng \
     --no-save-optim
-    --auto-detect-ckpt-format
-    --dist-ckpt-strictness log_all
 )
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0
+    --profile-ranks 0 1 8 9 16 17 24 25
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_glm5_300b_2nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
+    --profile-dir torch_prof_mixtral_8x22B_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
@@ -225,8 +179,8 @@ HIP_PROFIE_ARGS=(
 
 if [ -n "${WANDB_API_KEY}" ]; then
     LOGGING_ARGS+=(
-        --wandb-project ${WANDB_PROJECT:-"DeepseekV3"}
-        --wandb-exp-name ${WANDB_NAME:-"DeepseekV3_671B"}
+        --wandb-project ${WANDB_PROJECT:-"Mixtral"}
+        --wandb-exp-name ${WANDB_NAME:-"Mixtral_8x22B"}
     )
 fi
 

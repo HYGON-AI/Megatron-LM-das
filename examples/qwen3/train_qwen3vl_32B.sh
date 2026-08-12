@@ -49,16 +49,10 @@ GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
 
 # default env
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=4
-# export MIOPEN_FIND_MODE=3 # 1: 查找最快算法，可能导致第一次运行不稳定；2: 固定算法，保证每次运行稳定但可能不是最快的；3: 先查找再固定算法，兼顾稳定和性能
+
 # split hyperparameters
 TP=2
 PP=2

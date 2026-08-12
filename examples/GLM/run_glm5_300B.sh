@@ -7,6 +7,10 @@ do
     fi
 done
 
+# Those variables no need to modify
+hostfile_input=${1}
+node_num=${2}
+
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
@@ -16,13 +20,9 @@ DATA_PATH=""                                                             # path 
 TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
+TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_glm5_300B.sh} # script under this example directory to run
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
-
-# Those variables no need to modify
-hostfile_input=${1}
-node_num=${2}
-TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_glm5_300b_${node_num}nodes.sh}      # script under this example directory to run
 
 if [[ "${LAUNCHER}" != "mpirun" && "${LAUNCHER}" != "torchrun" ]]; then
     echo "Only mpirun and torchrun are supported as launch methods"

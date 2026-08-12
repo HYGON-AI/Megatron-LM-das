@@ -36,16 +36,13 @@ NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
-export GPU_MAX_HW_QUEUES=10
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
 
-# enable BatchLinear
+# default env
+export GPU_MAX_HW_QUEUES=4
+
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
 export NVTE_OVERLAP_GRAD_REDUCE=1
+
 # split hyperparameters
 TP=1
 PP=8

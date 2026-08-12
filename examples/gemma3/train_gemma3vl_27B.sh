@@ -48,17 +48,10 @@ NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
 
 # default env
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=4
-# export MIOPEN_FIND_MODE=3 # 1: 查找最快算法，可能导致第一次运行不稳定；2: 固定算法，保证每次运行稳定但可能不是最快的；3: 先查找再固定算法，兼顾稳定和性能
-# export MIOPEN_ENABLE_LOGGING_CMD=1
+
 # split hyperparameters
 TP=2
 PP=1
@@ -93,13 +86,12 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 34
-    --hidden-size 2560
-    --ffn-hidden-size 10240 
-    --num-attention-heads 10
+    --num-layers 62
+    --hidden-size 5376
+    --ffn-hidden-size 21504 
+    --num-attention-heads 32
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -132,23 +124,15 @@ TRAINING_ARGS=(
     --overlap-grad-reduce
     --use-flash-attn
 
-    # --fine-grained-activation-offloading
-    # --offload-modules core_attn attn_proj qkv_linear
 )
 
 MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --sequence-parallel
     --pipeline-model-parallel-size ${PP}
-    # --decoder-first-pipeline-num-layers 12
-    # --decoder-last-pipeline-num-layers 24
     --context-parallel-size ${CP}
 
     --use-distributed-optimizer
-     
-    # --optimizer-cpu-offload
-    # --use-precision-aware-optimizer
-    # --use-torch-optimizer-for-cpu-offload
 )
 
 DATA_ARGS=(
