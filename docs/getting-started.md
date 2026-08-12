@@ -39,10 +39,10 @@
         harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10 \
         /bin/bash
     ```
-3. 拉取hcu-megatron源码
+3. 拉取Megatron-LM-das源码
     ```bash
-    git clone http://42.228.13.241:10068/dcutoolkit/deeplearing/dcu_megatron.git
-    cd dcu_megatron
+    git clone https://github.com/HYGON-AI/Megatron-LM-das.git
+    cd Megatron-LM-das
     git checkout origin/core_v0.18.2
     git submodule update --init --recursive
     ```
@@ -225,10 +225,10 @@
         harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10 \
         /bin/bash
     ```
-3. 拉取hcu-megatron源码
+3. 拉取Megatron-LM-das源码
     ```bash
-    git clone http://42.228.13.241:10068/dcutoolkit/deeplearing/dcu_megatron.git
-    cd dcu_megatron
+    git clone https://github.com/HYGON-AI/Megatron-LM-das.git
+    cd Megatron-LM-das
     git checkout origin/core_v0.18.2
     git submodule update --init --recursive
     ```
