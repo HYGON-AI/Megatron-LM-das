@@ -4,7 +4,7 @@
 
 ## 前置条件
 
-- 已安装 HCU 驱动和 DTK（参考 [environment-setup.md](environment-setup.md)）
+- 已安装 HCU 驱动和 DTK
 - Python 3.10+ 环境
 - 至少8张 HCU（64GB 显存推荐）
 
@@ -301,9 +301,3 @@
 
     bash run_qwen.sh hostfile 2
     ```
-
-## 下一步
-
-- [模型部署文档](model-deployment/)
-- [多模态方案概览](multimodal/overview.md)
-- [性能调优指南](optimization/performance-tuning.md)

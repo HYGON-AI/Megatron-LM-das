@@ -1,12 +1,10 @@
 [submodule "Megatron-LM"]
-	path = Megatron-LM
+	path = 3rparty/Megatron-LM
 	url = https://github.com/NVIDIA/Megatron-LM.git
 	branch = main 
-[submodule]
-	Megatron-LM = main
 [submodule "Megatron-Energon"]
-	path = Megatron-Energon
+	path = 3rparty/Megatron-Energon
 	url = https://github.com/NVIDIA/Megatron-Energon.git
 [submodule "Megatron-Bridge"]
-	path = Megatron-Bridge
+	path = 3rparty/Megatron-Bridge
 	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git

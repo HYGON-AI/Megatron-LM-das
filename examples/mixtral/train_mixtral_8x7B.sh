@@ -36,11 +36,15 @@ NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GPU_MAX_HW_QUEUES=10
+
+# default env
+export GPU_MAX_HW_QUEUES=4
+
 export GROUPED_GEMM_BatchLinear=1
+
 # split hyperparameters
 TP=2
-PP=1
+PP=4
 CP=1
 EP=8
 ETP=1
@@ -78,7 +82,7 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length ${SEQ_LEN}
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    --num-layers 4
+    --num-layers 32
     --hidden-size 4096
     --ffn-hidden-size 14336
     --num-attention-heads 32
@@ -158,10 +162,10 @@ LOGGING_ARGS=(
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 1 2 3 4 5 6 7
+    --profile-ranks 0 1 2 3 8 9 10 11 
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_mixtral_8x7B_1nodes_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
+    --profile-dir torch_prof_mixtral_8x7B_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 

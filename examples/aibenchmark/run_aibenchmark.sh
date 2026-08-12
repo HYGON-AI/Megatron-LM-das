@@ -5,6 +5,10 @@ do
     fi
 done
 
+# Those variables no need to modify
+hostfile_input=${1}
+node_num=${2}
+
 CURRENT_DIR=$( cd "$( dirname "$0" )" && pwd )
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
@@ -16,9 +20,6 @@ CHECKPOINT_PATH=""                                                       # path 
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
-# Those variables no need to modify
-hostfile_input=${1}
-node_num=${2}
 HOSTFILE="${hostfile_input}_slots"
 rm -f ${HOSTFILE} 
 cat ${hostfile_input} | sed -n "1,${node_num}p"|sed 's/$/ slots=8/' > ${HOSTFILE}

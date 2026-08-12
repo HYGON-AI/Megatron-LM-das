@@ -36,8 +36,12 @@ NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export GPU_MAX_HW_QUEUES=10
+
+# default env
+export GPU_MAX_HW_QUEUES=4
+
 export GROUPED_GEMM_BatchLinear=1
+
 # split hyperparameters
 TP=2
 PP=1
