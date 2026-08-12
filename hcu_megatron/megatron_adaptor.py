@@ -5,51 +5,7 @@ from megatron.training import get_args
 
 from .features_manager import ADAPTOR_FEATURES
 from .patch_utils import MegatronPatchesManager
-from hcu_megatron.training.arguments import process_adaptor_args
-
-
-_ADAPTOR_ARGS = None
-
-
-def add_args(args, key, value):
-    if key is not None:
-        key = key[2:].replace('-', '_')
-        if value is None:
-            value = True
-        elif len(value) == 1:
-            value = value[0]
-        setattr(args, key, value)
-
-
-def parser_unknown_args(args, unknown):
-    i = 0
-    key = value = None
-    while i < len(unknown):
-        if unknown[i].startswith("--"):
-            add_args(args, key, value)
-            key = unknown[i]
-            value = None
-        else:
-            if value is None:
-                value = [unknown[i]]
-            else:
-                value.append(unknown[i])
-        i += 1
-    add_args(args, key, value)
-
-
-def get_adaptor_args():
-    global _ADAPTOR_ARGS
-    if _ADAPTOR_ARGS is None:
-        parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
-        _ADAPTOR_ARGS, unknown = process_adaptor_args(parser).parse_known_args()
-        parser_unknown_args(_ADAPTOR_ARGS, unknown)
-    return _ADAPTOR_ARGS
-
-
-def destroy_adaptor_args():
-    global _ADAPTOR_ARGS
-    _ADAPTOR_ARGS = None
+from hcu_megatron.training.arguments import destroy_adaptor_args, get_adaptor_args
 
 
 def patch_features():

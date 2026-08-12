@@ -7,7 +7,6 @@ from typing import Callable, Optional
 import torch
 from torch import Tensor
 
-from megatron.training import get_args
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
@@ -37,6 +36,8 @@ try:
     HAVE_TE = True
 except ImportError:
     HAVE_TE = False
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class TransformerLayerNode(MegatronCoreTransformerLayerNode):
@@ -82,7 +83,7 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
             else:
                 data = tuple([make_viewless(e) if isinstance(e, torch.Tensor) else e for e in data])
 
-            if not get_args().integrate_recompute_to_ep_comm_overlap or is_recompute:
+            if not get_adaptor_args().integrate_recompute_to_ep_comm_overlap or is_recompute:
                 self.outputs = data
 
             if stream_record_event is not None:
@@ -115,11 +116,11 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
 
     def detach(self, t):
         """Detaches a tensor and stores it for backward computation."""
-        if get_args().integrate_recompute_to_ep_comm_overlap and not self.is_recompute:
+        if get_adaptor_args().integrate_recompute_to_ep_comm_overlap and not self.is_recompute:
             return t
         detached = make_viewless(t).detach()
         detached.requires_grad = t.requires_grad
-        if not get_args().integrate_recompute_to_ep_comm_overlap or self.is_recompute:
+        if not get_adaptor_args().integrate_recompute_to_ep_comm_overlap or self.is_recompute:
             self.before_detached = self.before_detached + (t,)
             self.detached = self.detached + (detached,)
         return detached
@@ -388,7 +389,7 @@ def build_mtp_layer_callables_without_split_attn(layer):
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
             if (
-                get_args().schedule_method == "dualpipev"
+                get_adaptor_args().schedule_method == "dualpipev"
                 and node.chunk_state.model.embedding.word_embeddings.weight is None
             ):
                 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
@@ -523,19 +524,27 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         hidden_states: torch.Tensor,
         is_recompute=False,
     ):
-        # Residual connection.
-        residual = hidden_states
-
         # Optional Input Layer norm
         if layer.recompute_input_layernorm:
             layer.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(layer.offload_attn_norm, hidden_states, "attn_norm") as hidden_states:
                 input_layernorm_output = layer.input_layernorm_checkpoint.checkpoint(
-                    layer.input_layernorm, hidden_states
+                    apply_module(layer.input_layernorm), hidden_states
                 )
         else:
             with off_interface(layer.offload_attn_norm, hidden_states, "attn_norm") as hidden_states:
-                input_layernorm_output = layer.input_layernorm(hidden_states)
+                input_layernorm_output = apply_module(layer.input_layernorm)(hidden_states)
+
+        if isinstance(input_layernorm_output, tuple):
+            if len(input_layernorm_output) != 2:
+                raise ValueError(
+                    f"When the output of input_layernorm is a tuple, it is "
+                    f"expected to have 2 elements (output, residual), but "
+                    f"got {len(input_layernorm_output)}"
+                )
+            input_layernorm_output, residual = input_layernorm_output
+        else:
+            residual = hidden_states
 
         # Self attention.
         qkv_output = layer.self_attention.compute_qkv(
@@ -899,7 +908,7 @@ def build_mtp_layer_callables_with_split_attn(layer):
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
             if (
-                get_args().schedule_method == "dualpipev"
+                get_adaptor_args().schedule_method == "dualpipev"
                 and node.chunk_state.model.embedding.word_embeddings.weight is None
             ):
                 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk

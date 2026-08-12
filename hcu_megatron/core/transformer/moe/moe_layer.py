@@ -25,7 +25,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
 from megatron.core.utils import internal_api
 
-from megatron.training import get_args
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def moe_layer_init_wrapper(moe_layer_init_func):
@@ -58,7 +58,7 @@ def moe_layer_init_wrapper(moe_layer_init_func):
         )
 
         # Initialize token dispatcher
-        if get_args().integrate_recompute_to_ep_comm_overlap:
+        if get_adaptor_args().integrate_recompute_to_ep_comm_overlap:
             if config.moe_token_dispatcher_type == "allgather":
                 self.recompute_token_dispatcher = MoEAllGatherTokenDispatcher(
                     self.num_local_experts,
@@ -154,7 +154,7 @@ class MoELayer():
     """
 
     def get_token_dispatcher(self, is_recompute=False,):
-        if get_args().integrate_recompute_to_ep_comm_overlap and is_recompute:
+        if get_adaptor_args().integrate_recompute_to_ep_comm_overlap and is_recompute:
             return self.recompute_token_dispatcher
 
         return self.token_dispatcher

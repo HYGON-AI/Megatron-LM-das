@@ -7,7 +7,6 @@ import torch
 from torch import Tensor
 from flash_attn.flash_attn_interface import _flash_attn_varlen_forward, _flash_attn_varlen_backward
 
-from megatron.training import get_args
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.inference.utils import InferenceMode
 from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
@@ -44,6 +43,8 @@ try:
     import megatron.core.models.common.embeddings.yarn_rotary_pos_embedding as _yarn_mod
 except ImportError:
     pass
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def _yarn_get_concentration_factor_from_config(config):
@@ -84,7 +85,7 @@ def attention_init_wrapper(attention_init_func):
             name=name,
         )
 
-        if get_args().pipe_sp_splits != 1:
+        if get_adaptor_args().pipe_sp_splits != 1:
             self.core_attention_flash = FlashSeqSelfAttention(
                 causal=True, softmax_scale=self.config.softmax_scale, attention_dropout=self.config.attention_dropout
             )
@@ -247,7 +248,7 @@ class FlashSeqSelfAttention(torch.nn.Module):
 
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q,k,v)))
         assert all((i.is_cuda for i in (q,k,v)))
-        args = get_args()
+        args = get_adaptor_args()
         batch_size, seqlen_q = q.shape[0], q.shape[1]
         seqlen_k = k.shape[1]
         if torch.is_tensor(micro_sp_idx):
@@ -461,7 +462,7 @@ class Attention():
             value = value.squeeze(1)
         nvtx_range_pop(suffix="adjust_key_value")
 
-        args = get_args()
+        args = get_adaptor_args()
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================

@@ -15,6 +15,8 @@ from megatron.core import mpu, tensor_parallel
 from megatron.core.utils import is_torch_min_version
 from megatron.training.utils import print_rank_0, warn_rank_0
 
+from hcu_megatron.training.arguments import get_adaptor_args
+
 
 def initialize_megatron_wrapper(initialize_megatron_func):
     @wraps(initialize_megatron_func)
@@ -196,7 +198,6 @@ def _set_random_seed(
     use_cudagraphable_rng: bool = False,
 ):
     """Set random seed for reproducability."""
-    args = get_args()
     if seed_ is not None and seed_ > 0:
         # Ensure that different pipeline MP stages get different seeds.
         seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
@@ -210,7 +211,8 @@ def _set_random_seed(
             tensor_parallel.model_parallel_cuda_manual_seed(
                 seed, te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
             )
-        if args.reproduce:
+        if get_adaptor_args().reproduce:
+            args = get_args()
             assert (args.attention_dropout > 0) is False, f"To utilize the reproduction function, args.attention_dropout = {args.attention_dropout} must be set to 0."
             assert (args.hidden_dropout > 0) is False, f"To utilize the reproduction function, args.hidden_dropout = {args.hidden_dropout} must be set to 0."
             torch.backends.cudnn.deterministic = True # 设置cudnn后端为确定性算法
