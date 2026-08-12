@@ -9,7 +9,7 @@
 ## 下载方式
 1. 在线 git clone 方式：
   ```bash
-  git clone -b 最新分支 --recurse-submodules https://developer.sourcefind.cn/codes/OpenDAS/dcu_megatron.git
+  git clone -b 最新分支 --recurse-submodules https://github.com/HYGON-AI/Megatron-LM-das.git
   ```
 2. 离线下载方式：
   ```bash
