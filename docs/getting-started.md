@@ -45,6 +45,7 @@
     cd Megatron-LM-das
     git checkout origin/core_v0.18.2
     git submodule update --init --recursive
+    pip install -r ./requirements/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
     ```
 4. 下载模型配置
 
@@ -231,6 +232,7 @@
     cd Megatron-LM-das
     git checkout origin/core_v0.18.2
     git submodule update --init --recursive
+    pip install -r ./requirements/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
     ```
 4. 下载模型配置
 
