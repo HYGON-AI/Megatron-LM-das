@@ -10,6 +10,8 @@ do
         tokenizer_path=${para#*=}
     elif [[ $para == --launch_with_binding* ]];then
         launch_with_binding=${para#*=}
+    elif [[ $para == --launch_backend* ]];then
+        launch_backend=${para#*=}
     elif [[ $para == --checkpoint_path* ]];then
         checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
@@ -38,39 +40,62 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
+export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
+MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_PORT=${MASTER_PORT:-6000}
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-LM:$PYTHONPATH
-export PYTHONPATH=${MEGATRON_PATH}/Megatron-Bridge/src:$PYTHONPATH
 
 # default env
-export GLOG_minloglevel=3
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export HSA_FORCE_FINE_GRAIN_PCIE=1
-export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=4
 
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
-export TRITON_HOME=/tmp
 
-DISTRIBUTED_ARGS=(
+# split hyperparameters
+TP=1
+PP=4
+CP=1
+EP=8
+ETP=1
+
+# batch hyperparameters
+MBS=1
+GBS=32
+
+# seq hyperparameters
+SEQ_LEN=2048
+MAX_POSITION_EMBEDDINGS=262144
+
+# train iteration hyperparameters
+TRAIN_ITERS=50
+LR_WARMUP_ITERS=1
+
+MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
     --world-size ${WORLD_SIZE}
     --local-rank ${LOCAL_RANK}
     --dist-url tcp://${DIST_URL}:${DIST_PORT}
 )
 
+TORCH_DISTRIBUTED_ARGS=(
+    --nnodes $NNODES
+    --node_rank $NODE_RANK
+    --master_addr $MASTER_ADDR
+    --master_port $MASTER_PORT
+    --nproc_per_node $GPUS_PER_NODE
+)
+
 GPT_MODEL_ARGS=(
-    --seq-length 2048
-    --num-layers 32
-    --hidden-size 4096
-    --ffn-hidden-size 12288
-    --num-attention-heads 32
-    --max-position-embeddings 262144
-    # --num-query-groups None
-    # --group-query-attention
+    --seq-length ${SEQ_LEN}
+    --num-layers 40
+    --hidden-size 2048
+    --ffn-hidden-size 512
+    --num-attention-heads 16
+    --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
-    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 
     --use-bridge
@@ -79,15 +104,12 @@ GPT_MODEL_ARGS=(
 )
 
 MOE_ARGS=(
-    --num-experts 128
-    --moe-ffn-hidden-size 768
+    --num-experts 256
+    --moe-ffn-hidden-size 512
     --moe-router-topk 8
     --moe-router-load-balancing-type aux_loss
     --moe-aux-loss-coeff 1e-3
     --moe-token-dispatcher-type alltoall # flex # 
-    # --moe-flex-dispatcher-backend deepep 
-    # --moe-enable-deepep
-    # --moe-deepep-num-sms 48
     --moe-permute-fusion
     --moe-grouped-gemm
     --moe-router-fusion
@@ -96,9 +118,9 @@ MOE_ARGS=(
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
     --use-mcore-models 
-    --micro-batch-size 1
-    --global-batch-size 32
-    --train-iters 50
+    --micro-batch-size ${MBS}
+    --global-batch-size ${GBS}
+    --train-iters ${TRAIN_ITERS}
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
@@ -109,11 +131,10 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
-    --lr-warmup-iters 1
+    --lr-warmup-iters ${LR_WARMUP_ITERS}
     --ckpt-format torch
     --ddp-average-in-collective
     --overlap-grad-reduce
@@ -121,13 +142,13 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
     --sequence-parallel
-    --context-parallel-size 1
-    --pipeline-model-parallel-size 4
+    --context-parallel-size ${CP}
+    --pipeline-model-parallel-size ${PP}
 
-    --expert-tensor-parallel-size 1
-    --expert-model-parallel-size 8
+    --expert-tensor-parallel-size ${ETP}
+    --expert-model-parallel-size ${EP}
     --moe-router-force-load-balancing
     
     --use-distributed-optimizer
@@ -140,7 +161,6 @@ DATA_ARGS=(
     --vlm-data-config-path ${DATA_PATH}
     --model-arch qwen3vl
     --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -160,7 +180,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_llama_1nodes_tp4-pp1-cp1
+    --profile-dir torch_prof_qwen35_35B_A3B_tp${TP}-pp${PP}-ep${EP}-etp${ETP}-cp${CP}
     --use-pytorch-profiler
 )
 
@@ -172,17 +192,32 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
-    ${GPT_MODEL_ARGS[@]} \
-    ${MOE_ARGS[@]} \
-    ${TRAINING_ARGS[@]} \
-    ${MODEL_PARALLEL_ARGS[@]} \
-    ${DATA_ARGS[@]} \
-    ${EVAL_AND_LOGGING_ARGS[@]} \
-    ${DISTRIBUTED_ARGS[@]} \
-    ${INITIALIZATION_ARGS[@]} \
-    "
-
+if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+    APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
+        ${GPT_MODEL_ARGS[@]} \
+        ${MOE_ARGS[@]} \
+        ${TRAINING_ARGS[@]} \
+        ${MODEL_PARALLEL_ARGS[@]} \
+        ${DATA_ARGS[@]} \
+        ${EVAL_AND_LOGGING_ARGS[@]} \
+        ${MPI_DISTRIBUTED_ARGS[@]} \
+        ${INITIALIZATION_ARGS[@]} \
+        "
+elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+    APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
+        ${MEGATRON_PATH}/pretrain_vlm.py \
+        ${GPT_MODEL_ARGS[@]} \
+        ${MOE_ARGS[@]} \
+        ${TRAINING_ARGS[@]} \
+        ${MODEL_PARALLEL_ARGS[@]} \
+        ${DATA_ARGS[@]} \
+        ${EVAL_AND_LOGGING_ARGS[@]} \
+        ${INITIALIZATION_ARGS[@]} \
+        "
+else
+    echo "Only mpirun and torchrun are supported as launch methods"
+    exit 1
+fi
 if [[ $profiling == "torch" ]]; then
     APP+=" ${TORCH_PROFIE_ARGS[@]}"
 elif [[ $profiling == "hip" ]]; then
@@ -192,4 +227,12 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-${launch_with_binding} ${LOCAL_RANK} ${APP}
+if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+    ${launch_with_binding} ${LOCAL_RANK} ${APP}
+elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+    echo ${APP}
+    ${APP}
+else
+    echo "Only mpirun and torchrun are supported as launch methods"
+    exit 1
+fi

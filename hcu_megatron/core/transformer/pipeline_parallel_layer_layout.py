@@ -1,3 +1,5 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import copy
 from functools import lru_cache
 from typing import Optional

@@ -1,3 +1,4 @@
+# This code was adopted from https://github.com/sail-sg/VocabularyParallelism
 
 class VocabInputStore:
     """

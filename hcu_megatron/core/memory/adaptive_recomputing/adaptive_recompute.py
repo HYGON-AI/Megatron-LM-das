@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
 import sys
 from copy import deepcopy
 from functools import wraps

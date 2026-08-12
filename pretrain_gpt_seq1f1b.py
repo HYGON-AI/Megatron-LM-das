@@ -1,4 +1,5 @@
 # Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
 """Pretrain GPT"""
 

@@ -1,3 +1,5 @@
+# Some of this code was adopted from https://github.com/MayDomine/Seq1F1B/
+
 from dataclasses import dataclass
 from hcu_megatron.core.pipeline_parallel.seq1f1b.split_solver import solver
 from megatron.training import get_args

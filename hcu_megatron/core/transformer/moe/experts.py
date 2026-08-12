@@ -1,3 +1,6 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# Some of this code was adopted from https://github.com/AMD-AGI/Primus
 import torch
 import torch.nn.functional as F
 

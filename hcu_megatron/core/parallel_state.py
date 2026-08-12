@@ -1,3 +1,5 @@
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import time
 import inspect
 from functools import wraps

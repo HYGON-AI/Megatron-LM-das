@@ -1,3 +1,5 @@
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import contextlib
 from collections.abc import Callable
 from functools import wraps
@@ -8,7 +10,6 @@ import torch
 from torch.utils.checkpoint import _get_autocast_kwargs
 
 from megatron.core.tensor_parallel.random import _set_cuda_rng_state, get_cuda_rng_tracker, _get_all_rng_states, CheckpointWithoutOutputFunction
-# from hcu_megatron.core.tensor_parallel.random import CheckpointWithoutOutput
 
 from hcu_megatron.core.tensor_parallel.checkpoint_manager import get_pipeline_checkpoint_manager
 

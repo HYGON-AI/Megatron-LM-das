@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# This code was adopted from https://github.com/sail-sg/VocabularyParallelism
 from megatron.core import mpu
 from megatron.training import get_args
 

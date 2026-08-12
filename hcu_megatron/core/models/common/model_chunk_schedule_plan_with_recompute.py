@@ -1,3 +1,5 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import contextlib
 from contextlib import nullcontext
 
@@ -788,8 +790,6 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
                     r_or_f_input = r_or_f_layer.attn_proj.forward(r_or_f_input, is_recompute=r_layer is not None,)
 
         if b_layer is not None:
-            if not block_level_wgrad_compute:
-                b_layer.mlp.backward_dw()
             b_grad = b_layer.mlp.backward(b_grad)
 
         if r_or_f_layer is not None:
@@ -798,6 +798,8 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
                     r_or_f_input = r_or_f_layer.moe_dispatch.forward(r_or_f_input, is_recompute=r_layer is not None,)
 
         if b_layer is not None:
+            if not block_level_wgrad_compute:
+                b_layer.mlp.backward_dw()
             b_grad = b_layer.moe_dispatch.backward(b_grad)
 
         if r_or_f_layer is not None:

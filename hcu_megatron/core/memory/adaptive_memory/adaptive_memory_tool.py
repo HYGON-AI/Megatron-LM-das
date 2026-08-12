@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
+
 from enum import IntEnum
 from typing import Set, Dict
 import pickle

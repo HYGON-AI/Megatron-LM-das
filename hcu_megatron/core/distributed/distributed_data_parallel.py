@@ -1,3 +1,6 @@
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
 import torch
 
 from megatron.training import get_args

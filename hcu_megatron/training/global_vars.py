@@ -1,3 +1,5 @@
+# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import os
 
 from megatron.training import global_vars
@@ -26,7 +28,7 @@ def _set_tensorboard_writer(args):
 def _set_wandb_writer(args):
     _ensure_var_is_not_initialized(global_vars._GLOBAL_WANDB_WRITER,
                                    'wandb writer')
-    if getattr(args, 'wandb_project', '') and args.rank == 0 if args.schedule_method == "dualpipev" else (args.world_size - 1):
+    if getattr(args, 'wandb_project', '') and args.rank == (0 if args.schedule_method == "dualpipev" else (args.world_size - 1)):
         if args.wandb_exp_name == '':
             raise ValueError("Please specify the wandb experiment name!")
 
@@ -57,7 +59,7 @@ def _set_wandb_writer(args):
 def _set_one_logger(args):
     _ensure_var_is_not_initialized(global_vars._GLOBAL_ONE_LOGGER, 'one logger')
 
-    if args.enable_one_logger and args.rank == 0 if args.schedule_method == "dualpipev" else (args.world_size - 1):
+    if args.enable_one_logger and args.rank == (0 if args.schedule_method == "dualpipev" else (args.world_size - 1)):
         if args.one_logger_async or getattr(args, 'wandb_project', ''):
             one_logger_async = True
         else:

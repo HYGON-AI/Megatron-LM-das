@@ -1,3 +1,5 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from contextlib import nullcontext
 from functools import partial
 from typing import Callable, Optional
@@ -99,6 +101,17 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
     def forward_impl(self, *args, is_recompute=False):
         """Calls the submodule as the forward pass."""
         return self.submodule(self, *args, is_recompute=is_recompute)
+
+    def backward(self, *output_grad, stream_wait_event=None, stream_record_event=None):
+        """Execute backward pass and corresponding hooks."""
+        grads = super(MegatronCoreTransformerLayerNode, self).backward(
+            *output_grad,
+            stream_wait_event=stream_wait_event,
+            stream_record_event=stream_record_event,
+        )
+        if not self.delay_wgrad_compute and self.is_layer_first_node:
+            self._post_backward_hook()
+        return grads
 
     def detach(self, t):
         """Detaches a tensor and stores it for backward computation."""
@@ -508,6 +521,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     def submodule_attention_qkv_forward(
         node: ScheduleNode,
         hidden_states: torch.Tensor,
+        is_recompute=False,
     ):
         # Residual connection.
         residual = hidden_states
@@ -540,6 +554,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     def submodule_attention_core_attn_forward(
         node: ScheduleNode,
         *qkv_output,
+        is_recompute=False,
     ):
         core_attn_out = layer.self_attention.compute_attn(
             qkv_output,
@@ -556,6 +571,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     def submodule_attention_proj_forward(
         node: ScheduleNode,
         core_attn_out,
+        is_recompute=False,
     ):
 
         attn_residual = node.layer_state.attn_residual
@@ -594,6 +610,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     def _submodule_attention_proj_router_compound_forward(
         node: ScheduleNode,
         core_attn_out,
+        is_recompute=False,
     ):
         """
         Performs a combined forward pass that includes self-attention and MLP routing logic.
@@ -629,7 +646,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
 
         probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
         local_tokens, probs = layer.mlp.preprocess(
-            pre_mlp_layernorm_output, probs, routing_map
+            pre_mlp_layernorm_output, probs, routing_map, is_recompute=is_recompute
         )
 
         outputs = [
@@ -640,7 +657,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         ]
         return tuple(outputs)
 
-    def _submodule_shared_expert_forward(node: ScheduleNode, pre_mlp_layernorm_output):
+    def _submodule_shared_expert_forward(node: ScheduleNode, pre_mlp_layernorm_output, is_recompute=False,):
         """
         Performs a forward pass for shared experts.
         """
@@ -672,6 +689,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     def submodule_attention_proj_router_shared_expert_compound_forward(
         node: ScheduleNode,
         core_attn_out,
+        is_recompute=False,
     ):
         """
         Performs a combined forward pass that includes self-attention, MLP routing and shared-experts logic.
@@ -685,6 +703,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         ) = _submodule_attention_proj_router_compound_forward(
             node,
             core_attn_out,
+            is_recompute=is_recompute,
         )
 
         shared_expert_output = _submodule_shared_expert_forward(node, pre_mlp_layernorm_output)
@@ -698,7 +717,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         return local_tokens, probs
 
     def submodule_dispatch_forward(
-        node: ScheduleNode, local_tokens: torch.Tensor, probs: torch.Tensor
+        node: ScheduleNode, local_tokens: torch.Tensor, probs: torch.Tensor, is_recompute=False,
     ):
         """
         Dispatches tokens to the experts based on the router output.
@@ -709,19 +728,19 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             # backward graph from connecting to attn submodule
             token_dispatcher._comm_manager.token_probs = probs
 
-        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
+        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs, is_recompute=is_recompute,)
         node.layer_state.dispatched_probs = node.detach(dispatched_probs)
    
         return dispatched_tokens
 
-    def submodule_routed_experts_forward(node: ScheduleNode, dispatched_input):
+    def submodule_routed_experts_forward(node: ScheduleNode, dispatched_input, is_recompute=False):
         """
         Performs a forward pass for the MLP submodule, including only routed-expert computations.
         """
         def custom_forward(
             dispatched_input, permuted_probs
         ):
-            expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs)
+            expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs, is_recompute=is_recompute)
             assert mlp_bias is None, f"mlp_bias is not supported for {type(layer.mlp.token_dispatcher)}"
             return expert_output
 
@@ -764,6 +783,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
     def submodule_combine_forward(
         node: ScheduleNode,
         output: torch.Tensor,
+        is_recompute=False,
     ):
         """
         # Triggers token combine and the remaining computation in the transformer layer.
@@ -775,8 +795,8 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         """
         residual = node.layer_state.residual
         shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
-        output = layer.mlp.combine(output)
-        output = layer.mlp.postprocess(output, shared_expert_output)
+        output = layer.mlp.combine(output, is_recompute=is_recompute,)
+        output = layer.mlp.postprocess(output, shared_expert_output, is_recompute=is_recompute,)
         mlp_output_with_bias = (output, None)
 
         with layer.bias_dropout_add_exec_handler():

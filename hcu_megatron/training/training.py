@@ -1,3 +1,5 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import dataclasses
 import gc
 import os
@@ -178,49 +180,52 @@ from ..core.distributed.power_sgd import EFLayoutManager
 stimer = StragglerDetector()
 
 
-# Field-name patterns that identify runtime / parallelism / offload / distributed
-# knobs on TransformerConfig. These are owned by Megatron CLI args (not by HF
-# config.json), so when --use-bridge is enabled we overlay them from
-# core_transformer_config_from_args(args) onto the provider produced by AutoBridge.
-# Architecture fields (num_layers / hidden_size / num_attention_heads / vocab_size
-# / activation_func / ...) intentionally match none of these patterns and remain
-# HF-derived. New parallelism / offload fields added upstream flow through
-# automatically without editing this list.
-_BRIDGE_RUNTIME_FIELD_PATTERNS = (
-    "_parallel_size",
-    "parallel_sizes",
-    "sequence_parallel",
-    "hybrid_context_parallel",
-    "max_seqlen_per_dp_cp_rank",
-    "num_layers_in_first_pipeline_stage",
-    "num_layers_in_last_pipeline_stage",
-    "offload",
-    "cpu_offload",
-    "use_precision_aware_optimizer",
-    "gradient_accumulation_fusion",
-    "moe_router_force_load_balancing",
-    # Activation recomputation — chosen at training time per memory budget,
-    # not baked into the HF checkpoint. Providers inherit these from
-    # TransformerConfig with defaults of None, so without overlay the CLI
-    # --recompute-* flags silently no-op under --use-bridge.
-    "recompute_granularity",
-    "recompute_method",
-    "recompute_num_layers",
-    "recompute_modules",
-    "distribute_saved_activations",
-)
+# core_transformer_config_from_args() derives a few TransformerConfig field names from
+# differently named CLI args. If the source arg was explicitly present on the command
+# line, treat the derived config field as CLI-owned too.
+_BRIDGE_CLI_TO_CONFIG_FIELD_ALIASES = {
+    "decoder_first_pipeline_num_layers": ("num_layers_in_first_pipeline_stage",),
+    "decoder_last_pipeline_num_layers": ("num_layers_in_last_pipeline_stage",),
+    "num_experts": ("num_moe_experts",),
+    "fp8_param_gather": ("fp8_param",),
+    "fp4_param_gather": ("fp4_param",),
+    "no_persist_layer_norm": ("persist_layer_norm",),
+    "params_dtype": ("pipeline_dtype",),
+    "bf16": ("pipeline_dtype",),
+    "fp16": ("pipeline_dtype",),
+    "overlap_p2p_comm": ("batch_p2p_comm",),
+    "swiglu": ("activation_func", "gated_linear_unit", "bias_activation_fusion"),
+    "squared_relu": ("activation_func",),
+    "quick_geglu": ("activation_func", "gated_linear_unit"),
+    "bias_swiglu_fusion": ("bias_activation_fusion",),
+    "bias_gelu_fusion": ("bias_activation_fusion",),
+    "init_method_xavier_uniform": ("init_method", "scaled_init_method"),
+    "group_query_attention": ("num_query_groups",),
+    "num_query_groups": ("num_query_groups",),
+    "cp_comm_type": ("cp_comm_type",),
+    "hybrid_layer_pattern": ("is_hybrid_model", "experimental_attention_variant"),
+    "seed": ("inference_sampling_seed",),
+    "rotary_interleaved": ("rotary_interleaved",),
+}
 
 
-def _bridge_select_runtime_field_names(provider, transformer_config):
-    """Return the set of field names to overlay from `transformer_config` onto `provider`.
+def _bridge_select_runtime_field_names(provider, transformer_config, args):
+    """Return TransformerConfig field names explicitly requested by CLI.
 
-    Computed as the intersection of both dataclasses' fields, filtered by
-    `_BRIDGE_RUNTIME_FIELD_PATTERNS`.
+    CLI-specified fields override the HF/provider config. Fields not explicitly
+    specified stay provider-owned.
     """
     provider_names = {f.name for f in dataclasses.fields(provider)}
     tc_names = {f.name for f in dataclasses.fields(transformer_config)}
     common = provider_names & tc_names
-    return {n for n in common if any(pat in n for pat in _BRIDGE_RUNTIME_FIELD_PATTERNS)}
+
+    explicit_fields = set()
+    for name in getattr(args, "_explicit_args", set()):
+        if name in tc_names:
+            explicit_fields.add(name)
+        explicit_fields.update(_BRIDGE_CLI_TO_CONFIG_FIELD_ALIASES.get(name, ()))
+
+    return common & explicit_fields
 
 
 def _bridge_apply_runtime_overrides(provider, transformer_config, args):
@@ -238,7 +243,7 @@ def _bridge_apply_runtime_overrides(provider, transformer_config, args):
     import copy
     from megatron.bridge.training.utils.omegaconf_utils import apply_overrides
 
-    runtime_names = _bridge_select_runtime_field_names(provider, transformer_config)
+    runtime_names = _bridge_select_runtime_field_names(provider, transformer_config, args)
     no_copy_keys = getattr(provider, "_NO_COPY_KEYS", set())
 
     overrides = {}
@@ -910,17 +915,10 @@ def setup_model_and_optimizer(
             # Coverage — three layers, each with its own selection rule:
             #
             # 1) `_bridge_apply_runtime_overrides` → covers TransformerConfig
-            #    fields whose NAME matches `_BRIDGE_RUNTIME_FIELD_PATTERNS`:
-            #      *_parallel_size, parallel_sizes, sequence_parallel,
-            #      hybrid_context_parallel, max_seqlen_per_dp_cp_rank,
-            #      num_layers_in_{first,last}_pipeline_stage, *offload*,
-            #      cpu_offload*, use_precision_aware_optimizer,
-            #      gradient_accumulation_fusion, moe_router_force_load_balancing,
-            #      recompute_{granularity,method,num_layers,modules},
-            #      distribute_saved_activations.
-            #    These are parallelism / distributed / offload / activation-
-            #    recomputation knobs — the user picks them per-run via CLI, they
-            #    have no meaningful HF default.
+            #    fields explicitly requested on the CLI. CLI field names that map
+            #    to differently named TransformerConfig fields are handled by
+            #    `_BRIDGE_CLI_TO_CONFIG_FIELD_ALIASES`. Fields not specified on
+            #    the command line remain HF/provider-owned.
             #    Also overlays RoPE fusion / position-embedding-type (skipped for
             #    mrope/yarn) and use_transformer_engine_op_fuser.
             #

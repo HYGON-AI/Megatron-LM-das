@@ -1,3 +1,5 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from typing import Any, Optional, TYPE_CHECKING, Dict, Union
 from functools import wraps
 from dataclasses import dataclass, field

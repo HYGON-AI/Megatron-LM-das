@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from hcu_megatron.core.memory.recompute.recompute_common import should_recompute
 
 

@@ -1,4 +1,5 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Some of this code was adopted from https://github.com/MayDomine/Seq1F1B/
 
 import contextlib
 from functools import partial
