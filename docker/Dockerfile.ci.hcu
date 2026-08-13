@@ -1,0 +1,39 @@
+# Copyright (c) 2026, HYGON-AI. All rights reserved.
+#
+# Dedicated CI image for Megatron-LM-das (reserved interface; v1 CI can reuse
+# the base image directly):
+#
+#   Build without a wheel:
+#     docker build \
+#       --build-arg DAS_BASE_IMAGE=harbor.sourcefind.cn:5443/dcu/admin/base/custom:<base-tag> \
+#       -t harbor.sourcefind.cn:5443/dcu/admin/base/custom:megatron-lm-das-ubuntu22.04-dtk26.04-py3.10-<date> \
+#       -f docker/Dockerfile.ci.hcu .
+#
+#   Build with a prebuilt wheel (place it under docker/):
+#     cp hcu_megatron-0.17.0+das.opt1.dtk2604.whl docker/
+#     docker build \
+#       --build-arg DAS_BASE_IMAGE=harbor.sourcefind.cn:5443/dcu/admin/base/custom:<base-tag> \
+#       --build-arg DAS_MEGATRON_WHEEL=docker/hcu_megatron-0.17.0+das.opt1.dtk2604.whl \
+#       -t harbor.sourcefind.cn:5443/dcu/admin/base/custom:megatron-lm-das-... \
+#       -f docker/Dockerfile.ci.hcu .
+#
+#   Then set DAS_HCU_CI_IMAGE to the resulting digest-pinned image; no
+#   workflow changes needed.
+#
+# Base image requirements: DTK >= 25.04, torch >= 2.6.0,
+# transformer_engine >= 2.4.0 (per hcu-megatron README). The verl-das image
+# below satisfies them (torch 2.10.0+das.opt1.dtk2604 / TE 2.10.0+das.opt1.dtk2604).
+ARG DAS_BASE_IMAGE=harbor.sourcefind.cn:5443/dcu/admin/base/custom:verl-das-ubuntu22.04-dtk26.04-py3.10-20260617-2235
+
+FROM ${DAS_BASE_IMAGE}
+
+# Test runtime deps with pinned versions (coverage for unit test coverage;
+# numpy/einops already come with the base image).
+RUN pip install --no-cache-dir "coverage==7.6.1" "pytest-mock==3.14.0"
+
+# Optional: prebuilt hcu-megatron wheel (provides compiled ops such as
+# fused_weight_gradient_mlp_cuda). Defaults to an empty placeholder whose
+# size guard (-s) skips installation; pass a real wheel to install it.
+ARG DAS_MEGATRON_WHEEL=docker/.empty
+COPY ${DAS_MEGATRON_WHEEL} /tmp/hcu-megatron.whl
+RUN if [ -s /tmp/hcu-megatron.whl ]; then pip install /tmp/hcu-megatron.whl; fi && rm -f /tmp/hcu-megatron.whl

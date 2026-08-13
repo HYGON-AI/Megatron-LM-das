@@ -1,0 +1,622 @@
+# Copyright (c) 2026, HYGON-AI. All rights reserved.
+#
+# CICD Megatron-LM-das: main CI pipeline, structurally aligned with the upstream
+# NVIDIA/Megatron-LM cicd-main.yml (trigger -> authorize/classify -> configure ->
+# test matrix -> aggregation gate), with runtime details following HYGON verl-das
+# conventions (HCU containers, authorization, workspace restore, aggregation).
+#
+# Triggers:
+#   - pull_request on core_v0.18.2
+#   - schedule: daily 19:00 UTC (nightly)
+#   - workflow_dispatch (test_case: pr | nightly | unit-only)
+#
+# Security model (2026-08 review):
+#   - plain pull_request (no pull_request_target); fork PR secrets are not
+#     available and GPU tests are additionally rejected by `authorize`;
+#   - control-plane jobs (authorize/check-changes/configure/lint/validate/finish)
+#     run on GitHub-hosted ubuntu-latest, never on self-hosted runners;
+#   - GPU jobs are gated by `gpu-gate`: PR runs require manual approval.
+#     DEPLOYMENT REQUIREMENT: an admin must add required reviewers to the
+#     das-hcu-gpu environment, otherwise GitHub auto-approves unprotected
+#     environments and the gate is ineffective;
+#   - GPU job runner labels are injected purely via vars (no hardcoded hosts).
+#
+# Config surface (repo vars, see .github/CI-README.md):
+#   DAS_HCU_CI_RUNNER_LABEL  self-hosted runner label (e.g. hcu-ci)
+#   DAS_HCU_CI_IMAGE         test container image (HCU env), must be digest-pinned
+#   DAS_HCU_MODEL_ROOT       model root (reserved; uncomment mount when needed)
+#   DAS_HCU_DATA_ROOT        data root (reserved; uncomment mount when needed)
+#   DAS_HCU_MEGATRON_WHEEL   optional hcu-megatron wheel path/URL
+
+name: CICD Megatron-LM-das
+
+on:
+  pull_request:
+    branches:
+      - core_v0.18.2
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+      - ready_for_review
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      test_case:
+        description: Test case to run
+        required: true
+        default: pr
+        type: choice
+        options:
+          - pr
+          - nightly
+          - unit-only
+
+concurrency:
+  group: cicd-megatron-lm-das-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read
+
+env:
+  DAS_HCU_CI_RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+  DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+  DAS_HCU_MODEL_ROOT: ${{ vars.DAS_HCU_MODEL_ROOT }}
+  DAS_HCU_DATA_ROOT: ${{ vars.DAS_HCU_DATA_ROOT }}
+  DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+
+jobs:
+  # --------------------------------------------------------------- authorize
+  # Trust boundary: fork PRs never run GPU tests; control plane always runs.
+  authorize:
+    name: Authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      is_fork: ${{ steps.check.outputs.is_fork }}
+    steps:
+      - name: Check trust boundary
+        id: check
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
+              echo "is_fork=true" | tee -a "${GITHUB_OUTPUT}"
+              echo "Fork PR: GPU tests are disabled; control-plane checks only."
+            else
+              echo "is_fork=false" | tee -a "${GITHUB_OUTPUT}"
+              echo "Same-repository PR authorized."
+            fi
+          else
+            echo "is_fork=false" | tee -a "${GITHUB_OUTPUT}"
+            echo "${EVENT_NAME} run authorized."
+          fi
+
+  # ----------------------------------------------------------- check-changes
+  # Change classification: tests run by default (runtime=true) and are skipped
+  # only when every changed path hits the docs-only whitelist. schedule/dispatch force full.
+  check-changes:
+    name: Check changes
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      runtime: ${{ steps.resolve.outputs.runtime }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Classify changed paths (docs-only whitelist)
+        id: changes
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${BASE_SHA}" ]]; then
+            BASE_SHA="$(git rev-parse "${HEAD_SHA}^")"
+          fi
+
+          # default: run tests unless all changes are docs-only
+          runtime=true
+          non_docs=false
+          while IFS= read -r path; do
+            [[ -z "${path}" ]] && continue
+            case "${path}" in
+              docs/*|*.md|.github/CI-README.md) ;;
+              *) non_docs=true ;;
+            esac
+          done < <(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
+
+          if [[ "${non_docs}" == "false" ]]; then
+            runtime=false
+            echo "docs-only change; tests skipped."
+          fi
+
+          echo "runtime=${runtime}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Force full runtime on schedule / dispatch
+        id: changes-force
+        if: github.event_name != 'pull_request'
+        run: echo "runtime=true" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Resolve runtime flag
+        id: resolve
+        shell: bash
+        env:
+          PR_RUNTIME: ${{ steps.changes.outputs.runtime }}
+          FORCE_RUNTIME: ${{ steps.changes-force.outputs.runtime }}
+        run: |
+          if [[ "${FORCE_RUNTIME}" == "true" || "${PR_RUNTIME}" == "true" ]]; then
+            echo "runtime=true" | tee -a "${GITHUB_OUTPUT}"
+          else
+            echo "runtime=false" | tee -a "${GITHUB_OUTPUT}"
+          fi
+
+  # --------------------------------------------------------------- configure
+  # Decision center (mirrors upstream configure): scope/cadence driven by
+  # trigger and PR labels.
+  #   - PR default: L0 (unit tests only)
+  #   - PR + label `Run functional tests`: L1 (unit + functional smoke)
+  #   - fork PR: all GPU tests off (run_unit/run_functional=false)
+  #   - schedule / dispatch(nightly): L1 with more iterations
+  #   - dispatch(unit-only): unit tests only
+  configure:
+    name: Configure
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      scope: ${{ steps.configure.outputs.scope }}
+      cadence: ${{ steps.configure.outputs.cadence }}
+      run_unit: ${{ steps.configure.outputs.run_unit }}
+      run_functional: ${{ steps.configure.outputs.run_functional }}
+      functional_iters: ${{ steps.configure.outputs.functional_iters }}
+      n_repeat: ${{ steps.configure.outputs.n_repeat }}
+    steps:
+      - name: Configure
+        id: configure
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_CASE: ${{ inputs.test_case || '' }}
+          IS_FORK: ${{ needs.authorize.outputs.is_fork }}
+        run: |
+          set -euo pipefail
+
+          SCOPE=L0
+          CADENCE=pr
+          RUN_UNIT=true
+          RUN_FUNCTIONAL=false
+          FUNCTIONAL_ITERS=5
+          N_REPEAT=1
+
+          HAS_RUN_FUNCTIONAL=false
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            LABELS=$(curl -sS \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/labels" \
+              | grep -o '"name": *"[^"]*"' | sed 's/.*"name": *"\([^"]*\)"/\1/' || true)
+            if echo "${LABELS}" | grep -Fxq "Run functional tests"; then
+              HAS_RUN_FUNCTIONAL=true
+            fi
+          fi
+
+          # fork PRs never run GPU tests
+          if [[ "${EVENT_NAME}" == "pull_request" ]] && [[ "${IS_FORK}" == "true" ]]; then
+            RUN_UNIT=false
+            RUN_FUNCTIONAL=false
+          fi
+
+          if [[ "${EVENT_NAME}" == "schedule" ]] || [[ "${TEST_CASE}" == "nightly" ]]; then
+            SCOPE=L1
+            CADENCE=nightly
+            RUN_FUNCTIONAL=true
+            FUNCTIONAL_ITERS=20
+            N_REPEAT=2
+          elif [[ "${TEST_CASE}" == "unit-only" ]]; then
+            SCOPE=L0
+            CADENCE=pr
+            RUN_FUNCTIONAL=false
+          elif [[ "${EVENT_NAME}" == "pull_request" ]] && [[ "${HAS_RUN_FUNCTIONAL}" == "true" ]]; then
+            SCOPE=L1
+            CADENCE=pr
+            RUN_FUNCTIONAL=true
+            FUNCTIONAL_ITERS=5
+          fi
+
+          echo "scope=${SCOPE}" | tee -a "${GITHUB_OUTPUT}"
+          echo "cadence=${CADENCE}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_unit=${RUN_UNIT}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_functional=${RUN_FUNCTIONAL}" | tee -a "${GITHUB_OUTPUT}"
+          echo "functional_iters=${FUNCTIONAL_ITERS}" | tee -a "${GITHUB_OUTPUT}"
+          echo "n_repeat=${N_REPEAT}" | tee -a "${GITHUB_OUTPUT}"
+
+          cat <<SUMMARY >> "${GITHUB_STEP_SUMMARY}"
+          ## CI decisions
+
+          | Setting | Value |
+          |---|---|
+          | scope | \`${SCOPE}\` |
+          | cadence | \`${CADENCE}\` |
+          | run_unit | \`${RUN_UNIT}\` |
+          | run_functional | \`${RUN_FUNCTIONAL}\` |
+          | functional_iters | \`${FUNCTIONAL_ITERS}\` |
+          | n_repeat | \`${N_REPEAT}\` |
+          SUMMARY
+
+  # ----------------------------------------------------------------- linting
+  # Lightweight static checks (GitHub-hosted, no self-hosted runner needed):
+  # bash syntax + python bytecode compile.
+  linting:
+    name: Linting
+    needs:
+      - authorize
+      - check-changes
+    if: needs.check-changes.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: false
+
+      - name: Bash syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for script in tests/das/**/*.sh tests/unit_tests/run_ci_test.sh; do
+            if [[ -f "${script}" ]]; then
+              bash -n "${script}"
+            fi
+          done
+          echo "bash syntax OK"
+
+      - name: Python compile check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q hcu_megatron tests/das
+          echo "python compile OK"
+
+  # --------------------------------------------------------- validate-config
+  # Validate repo config (GitHub-hosted): fail fast with guidance when vars
+  # are missing, independent of runner availability.
+  validate-config:
+    name: Validate HCU config
+    needs:
+      - authorize
+      - check-changes
+    if: needs.check-changes.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate repository variables
+        shell: bash
+        env:
+          IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+          RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RUNNER_LABEL}" ]]; then
+            echo "❌ DAS_HCU_CI_RUNNER_LABEL is not configured" >&2
+            echo "   -> configure it in repo Settings -> Secrets and variables -> Actions -> Variables" >&2
+            exit 1
+          fi
+          if [[ -z "${IMAGE}" ]]; then
+            echo "❌ DAS_HCU_CI_IMAGE is not configured" >&2
+            echo "   -> configure it in repo Settings -> Secrets and variables -> Actions -> Variables" >&2
+            exit 1
+          fi
+          # image must be digest-pinned (same policy as verl-das)
+          if ! [[ "${IMAGE}" =~ .+@sha256:[0-9a-fA-F]{64}$ ]]; then
+            echo "❌ DAS_HCU_CI_IMAGE must be pinned with @sha256:<64 hex digits>" >&2
+            echo "   current value: ${IMAGE}" >&2
+            exit 1
+          fi
+
+          echo "✅ HCU config validated"
+          {
+            echo "## HCU config validation"
+            echo
+            echo "- runner label: \`${RUNNER_LABEL}\`"
+            echo "- image: \`${IMAGE%%@*}\`@sha256:***(digest pinned)***"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # ---------------------------------------------------------------- gpu-gate
+  # GPU approval gate: PR runs wait for das-hcu-gpu environment approval
+  # (deploy step: admin adds required reviewers to the environment);
+  # schedule/dispatch skip the gate so nightly is never blocked.
+  gpu-gate:
+    name: GPU test approval gate
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+    if: needs.check-changes.outputs.runtime == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: das-hcu-gpu
+    timeout-minutes: 5
+    steps:
+      - name: Approved
+        run: echo "GPU tests approved for PR run."
+
+  # -------------------------------------------------------------- unit-tests
+  # Unit tests (8-GPU distributed pytest, bucketed matrix; mirrors the upstream unit-tests matrix).
+  unit-tests:
+    name: Unit tests - ${{ matrix.bucket }}
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+      - linting
+      - gpu-gate
+    if: |
+      needs.check-changes.outputs.runtime == 'true'
+      && needs.configure.outputs.run_unit == 'true'
+      && (github.event_name != 'pull_request' || needs.gpu-gate.result == 'success')
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        bucket:
+          - tests/unit_tests/pipeline_parallel
+          - tests/unit_tests/transformer
+    container:
+      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
+      options: >-
+        --privileged
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --cap-add=SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size=64g
+        --ipc=host
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+    env:
+      DAS_HCU_CI_RUN_ID: unit-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_LOG_DIR: ci-logs/unit-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_ARTIFACT_NAME: das-unit-${{ matrix.bucket }}
+      DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+      BUCKET: ${{ matrix.bucket }}
+      N_REPEAT: ${{ needs.configure.outputs.n_repeat }}
+      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
+      DTK_ENV: /opt/dtk/env.sh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          submodules: false
+          clean: true
+
+      - name: Run unit tests
+        uses: ./.github/actions/run-test
+        with:
+          test_script: tests/das/pr/run_unit_tests.sh
+
+  # --------------------------------------------------------- restore-after-unit
+  # Restore runner workspace ownership after root-in-container writes.
+  restore-after-unit:
+    name: Restore workspace after unit tests
+    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.configure.outputs.run_unit == 'true' && needs.unit-tests.result != 'skipped'
+    needs:
+      - check-changes
+      - configure
+      - unit-tests
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 5
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore runner workspace ownership
+        shell: bash
+        run: bash tests/das/ci/restore_runner_permissions.sh
+
+  # --------------------------------------------------------- functional-smoke
+  # Functional smoke (L1 / nightly): synthetic data + tiny GPT pretrain e2e.
+  functional-smoke:
+    name: Functional smoke (pretrain_gpt.py)
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+      - linting
+      - gpu-gate
+      - unit-tests
+      - restore-after-unit
+    if: |
+      needs.check-changes.outputs.runtime == 'true'
+      && needs.configure.outputs.run_functional == 'true'
+      && (github.event_name != 'pull_request' || needs.gpu-gate.result == 'success')
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 120
+    container:
+      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
+      options: >-
+        --privileged
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --cap-add=SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size=64g
+        --ipc=host
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+        # Reserved: uncomment the two lines below and set the matching vars
+        #   - ${{ vars.DAS_HCU_MODEL_ROOT }}:${{ vars.DAS_HCU_MODEL_ROOT }}:ro
+        #   - ${{ vars.DAS_HCU_DATA_ROOT }}:${{ vars.DAS_HCU_DATA_ROOT }}:ro
+    env:
+      DAS_HCU_CI_RUN_ID: functional-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_LOG_DIR: ci-logs/functional-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_ARTIFACT_NAME: das-functional-smoke
+      DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+      DAS_SMOKE_TRAIN_ITERS: ${{ needs.configure.outputs.functional_iters }}
+      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
+      DTK_ENV: /opt/dtk/env.sh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          submodules: false
+          clean: true
+
+      - name: Run functional smoke
+        uses: ./.github/actions/run-test
+        with:
+          test_script: tests/das/nightly/run_functional_smoke.sh
+
+  # -------------------------------------------------------- restore-after-smoke
+  restore-after-smoke:
+    name: Restore workspace after functional smoke
+    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.configure.outputs.run_functional == 'true' && needs.functional-smoke.result != 'skipped'
+    needs:
+      - check-changes
+      - configure
+      - functional-smoke
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 5
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore runner workspace ownership
+        shell: bash
+        run: bash tests/das/ci/restore_runner_permissions.sh
+
+  # ------------------------------------------------------------------- finish
+  # Aggregation gate (GitHub-hosted, mirrors upstream Nemo_CICD_Test + verl finish):
+  # verifies job conclusions per cadence/scope and prints the CI summary.
+  finish:
+    name: Finish
+    if: always()
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+      - linting
+      - gpu-gate
+      - unit-tests
+      - restore-after-unit
+      - functional-smoke
+      - restore-after-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate required jobs
+        shell: bash
+        env:
+          RUNTIME_CHANGED: ${{ needs.check-changes.outputs.runtime }}
+          RUN_UNIT: ${{ needs.configure.outputs.run_unit }}
+          RUN_FUNCTIONAL: ${{ needs.configure.outputs.run_functional }}
+          CADENCE: ${{ needs.configure.outputs.cadence }}
+          SCOPE: ${{ needs.configure.outputs.scope }}
+          AUTH_RESULT: ${{ needs.authorize.result }}
+          CHECK_RESULT: ${{ needs.check-changes.result }}
+          CONFIG_RESULT: ${{ needs.configure.result }}
+          VALIDATE_RESULT: ${{ needs.validate-config.result }}
+          LINT_RESULT: ${{ needs.linting.result }}
+          GATE_RESULT: ${{ needs.gpu-gate.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          RESTORE_UNIT_RESULT: ${{ needs.restore-after-unit.result }}
+          SMOKE_RESULT: ${{ needs.functional-smoke.result }}
+          RESTORE_SMOKE_RESULT: ${{ needs.restore-after-smoke.result }}
+        run: |
+          set -euo pipefail
+
+          [[ "${AUTH_RESULT}" == "success" ]]
+          [[ "${CHECK_RESULT}" == "success" ]]
+          [[ "${CONFIG_RESULT}" == "success" ]]
+
+          if [[ "${RUNTIME_CHANGED}" == "true" ]]; then
+            [[ "${VALIDATE_RESULT}" == "success" ]]
+            [[ "${LINT_RESULT}" == "success" ]]
+            if [[ "${RUN_UNIT}" == "true" ]]; then
+              [[ "${UNIT_RESULT}" == "success" ]]
+              [[ "${RESTORE_UNIT_RESULT}" == "success" ]]
+            else
+              [[ "${UNIT_RESULT}" == "skipped" ]]
+              [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
+            fi
+            if [[ "${RUN_FUNCTIONAL}" == "true" ]]; then
+              [[ "${SMOKE_RESULT}" == "success" ]]
+              [[ "${RESTORE_SMOKE_RESULT}" == "success" ]]
+            else
+              [[ "${SMOKE_RESULT}" == "skipped" ]]
+              [[ "${RESTORE_SMOKE_RESULT}" == "skipped" ]]
+            fi
+          else
+            [[ "${VALIDATE_RESULT}" == "skipped" ]]
+            [[ "${LINT_RESULT}" == "skipped" ]]
+            [[ "${UNIT_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
+            [[ "${SMOKE_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_SMOKE_RESULT}" == "skipped" ]]
+          fi
+
+          {
+            echo "## Megatron-LM-das CI result"
+            echo
+            echo "- runtime changed: ${RUNTIME_CHANGED}"
+            echo "- scope: ${SCOPE} / cadence: ${CADENCE}"
+            echo "- authorization: ${AUTH_RESULT}"
+            echo "- change classification: ${CHECK_RESULT}"
+            echo "- configure: ${CONFIG_RESULT}"
+            echo "- config validation: ${VALIDATE_RESULT}"
+            echo "- linting: ${LINT_RESULT}"
+            echo "- gpu gate (PR only): ${GATE_RESULT}"
+            echo "- unit tests: ${UNIT_RESULT}"
+            echo "- restore after unit tests: ${RESTORE_UNIT_RESULT}"
+            echo "- functional smoke: ${SMOKE_RESULT}"
+            echo "- restore after smoke: ${RESTORE_SMOKE_RESULT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
