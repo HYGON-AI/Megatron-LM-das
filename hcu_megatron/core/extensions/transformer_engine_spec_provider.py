@@ -3,7 +3,8 @@
 from functools import partial, wraps
 
 from megatron.core.transformer.moe.experts import GroupedMLPSubmodules
-from megatron.training import get_args
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def te_spec_provider_grouped_mlp_modules_wrapper(fn):
@@ -11,10 +12,8 @@ def te_spec_provider_grouped_mlp_modules_wrapper(fn):
     def wrapper(self, moe_use_grouped_gemm: bool):
         """Which module and submodules to use for grouped mlp"""
 
-        args = get_args()
-
         if (
-            args.use_primus_grouped_gemm
+            get_adaptor_args().use_primus_grouped_gemm
             and moe_use_grouped_gemm
         ):
             from hcu_megatron.core.transformer.moe.experts import PrimusTurboGroupedMLP

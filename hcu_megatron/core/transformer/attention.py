@@ -770,6 +770,7 @@ class Attention():
         """
         # Check if we need to skip RoPE
         # no_rope is 0-indexed array and self.layer_number is 1-indexed
+        gate = None
         if self.split_qkv:
             if self.config.attention_output_gate:
                 query, key, value, gate = qkv_output

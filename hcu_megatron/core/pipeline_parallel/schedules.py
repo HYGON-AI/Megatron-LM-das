@@ -7,33 +7,28 @@ from functools import wraps
 import torch
 from functools import partial
 from typing import Callable, Iterator, List, Optional, Union
+
+from megatron.core import parallel_state
+from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+    FineGrainedActivationOffloadingInterface as off_interface,
+)
+from megatron.core.pipeline_parallel.multimodule_communicator import MultiModulePipelineCommunicator
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
+from megatron.core.pipeline_parallel.schedules import (
+    backward_step_multimodule,
+    clear_embedding_activation_buffer,
+    check_first_val_step,
+    deallocate_output_tensor,
+    finish_embedding_wgrad_compute,
+    get_tensor_device,
+    set_current_microbatch
+)
 from megatron.core.process_groups_config import (
     MultiModuleProcessGroupCollection,
     ProcessGroupCollection,
 )
-from megatron.core.utils import (
-    get_attr_wrapped_model,
-    get_model_config,
-)
-from megatron.core.pipeline_parallel.multimodule_communicator import MultiModulePipelineCommunicator
-from megatron.core.pipeline_parallel.schedules import (
-    clear_embedding_activation_buffer,
-    backward_step_multimodule,
-    check_first_val_step,
-    deallocate_output_tensor,
-    finish_embedding_wgrad_compute,
-
-)
-
-from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
-    FineGrainedActivationOffloadingInterface as off_interface,
-)
+from megatron.core.timers import Timer
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
-
-from megatron.training import get_args
-from megatron.core import parallel_state
-from megatron.core.utils import get_attr_wrapped_model
 from megatron.core.transformer.moe.paged_stash import paged_stash_reset
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.multi_token_prediction import MTPLossAutoScaler
@@ -41,13 +36,16 @@ from megatron.core.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_pp_last_stage,
 )
-from megatron.core.pipeline_parallel.schedules import get_tensor_device, set_current_microbatch
-from megatron.core.timers import Timer
+from megatron.core.utils import (
+    get_attr_wrapped_model,
+    get_model_config,
+)
 
 from .ripipe_schedules import forward_backward_ripipe_pipelining
 from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
 from hcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
 from hcu_megatron.core.parallel_state import get_dualpipe_chunk
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def get_forward_backward_func_wrapper(fn):
@@ -63,7 +61,7 @@ def get_forward_backward_func_wrapper(fn):
 
         """
 
-        args = get_args()
+        args = get_adaptor_args()
         if args.schedule_method == "vanilla":
             if args.enable_vocab_parallel:
                 from hcu_megatron.core.pipeline_parallel.vocab_parallel_schedule import (
@@ -119,7 +117,7 @@ def forward_step_calc_loss(
     if cp_group_size is None and is_last_stage is None:
         # fallback to parallel state
         cp_group_size = parallel_state.get_context_parallel_world_size()
-        if get_args().schedule_method == "dualpipev":
+        if get_adaptor_args().schedule_method == "dualpipev":
             is_last_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 1
         else:
             is_last_stage = parallel_state.is_pipeline_last_stage(
@@ -135,7 +133,7 @@ def forward_step_calc_loss(
 
     num_tokens = torch.tensor(0, dtype=torch.int)
     if is_last_stage:
-        if get_args().enable_vocab_parallel:
+        if get_adaptor_args().enable_vocab_parallel:
             output_tensor = output_tensor.transpose(0, 1).contiguous()
 
         if loss_func is None:
@@ -764,7 +762,7 @@ def forward_backward_pipelining_without_interleaving(
             # Enable grad sync for the last microbatch in the batch if the full
             # backward pass completes in the 1F1B stage.
             if (
-                not get_args().delay_1f1b_cooldown_wgrad_compute
+                not get_adaptor_args().delay_1f1b_cooldown_wgrad_compute
                 and num_warmup_microbatches == 0
                 and last_iteration
             ):
@@ -775,7 +773,7 @@ def forward_backward_pipelining_without_interleaving(
                 input_tensor, output_tensor, output_tensor_grad, config
             )
 
-            if get_args().delay_1f1b_cooldown_wgrad_compute and not last_iteration:
+            if get_adaptor_args().delay_1f1b_cooldown_wgrad_compute and not last_iteration:
                 model.backward_dw()
 
             if last_iteration:
@@ -788,7 +786,7 @@ def forward_backward_pipelining_without_interleaving(
                     input_tensor_grad, recv_tensor_shapes, p2p_communicator.is_pp_first_stage
                 )
 
-            if get_args().delay_1f1b_cooldown_wgrad_compute and last_iteration:
+            if get_adaptor_args().delay_1f1b_cooldown_wgrad_compute and last_iteration:
                 model.backward_dw()
 
     # Run cooldown backward passes.
@@ -800,7 +798,7 @@ def forward_backward_pipelining_without_interleaving(
             # async grad reduction in first pipeline stage. Other
             # pipeline stages do grad reduction during pipeline
             # bubble.
-            if not get_args().delay_1f1b_cooldown_wgrad_compute and i == num_warmup_microbatches - 1:
+            if not get_adaptor_args().delay_1f1b_cooldown_wgrad_compute and i == num_warmup_microbatches - 1:
                 if config.grad_sync_func is None or p2p_communicator.is_pp_first_stage:
                     enable_grad_sync()
 
@@ -816,7 +814,7 @@ def forward_backward_pipelining_without_interleaving(
             )
 
             p2p_communicator.send_backward(input_tensor_grad, p2p_communicator.is_pp_first_stage)
-            if get_args().delay_1f1b_cooldown_wgrad_compute:
+            if get_adaptor_args().delay_1f1b_cooldown_wgrad_compute:
                 model.backward_dw()
 
         # Launch any remaining grad reductions.

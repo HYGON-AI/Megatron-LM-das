@@ -5,12 +5,12 @@ from contextlib import nullcontext
 
 import torch
 
-from megatron.training import get_args
 from megatron.core.tensor_parallel.random import _get_all_rng_states, _set_all_rng_states
 from megatron.core.pipeline_parallel.utils import NoopScheduleNode
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan as MegatronTransformerLayerSchedulePlan
 
 from .model_chunk_schedule_plan import TransformerLayerSchedulePlanWithSplitAttn as _TransformerLayerSchedulePlanWithSplitAttn
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 @contextlib.contextmanager
@@ -960,7 +960,7 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
         return f_input, b_grad
 
 
-if get_args().overlap_ep_comm_with_split_attn:
+if get_adaptor_args().overlap_ep_comm_with_split_attn:
     TransformerLayerSchedulePlanWithRecompute = TransformerLayerSchedulePlanWithSplitAttn
 else:
     TransformerLayerSchedulePlanWithRecompute = TransformerLayerSchedulePlanWithoutSplitAttn

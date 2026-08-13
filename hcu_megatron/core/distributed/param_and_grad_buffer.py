@@ -19,6 +19,8 @@ from megatron.core.distributed.param_and_grad_buffer import dist_reduce_scatter_
 from megatron.training.global_vars import get_args
 from megatron.training import get_timers
 
+from hcu_megatron.training.arguments import get_adaptor_args
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +93,7 @@ class _ParamAndGradBucketGroup:
         synchronous call.
         """
         args = get_args()
+        adaptor_args = get_adaptor_args()
         if self.is_first_batch and self.grad_reduce_handle is not None:
             # Make this start_grad_sync call a no-op if in first batch and collective has
             # already been dispatched.
@@ -175,7 +178,7 @@ class _ParamAndGradBucketGroup:
             communication_group = self.data_parallel_group
 
         # Coalesce communication kernels across buckets in the bucket group.
-        if args.enable_dynamic_grad_comp and args.compressor is not None:
+        if adaptor_args.enable_dynamic_grad_comp and args.compressor is not None:
             # Coalesce communication kernels across buckets in the bucket group.
             compressed_data_list = []
             if args.overlap_grad_reduce and args.all_reduce_time:
@@ -198,7 +201,7 @@ class _ParamAndGradBucketGroup:
                 self._pending_compressed_data = compressed_data_list
 
         else:
-            if args.enable_dynamic_grad_comp:
+            if adaptor_args.enable_dynamic_grad_comp:
                 if args.overlap_grad_reduce and args.all_reduce_time:
                     self.timers('DP_time', log_level=0).start()
 
@@ -230,7 +233,7 @@ class _ParamAndGradBucketGroup:
                         torch.distributed.all_reduce(
                             bucket.grad_data, op=reduce_op, group=communication_group, async_op=async_op
                         )
-        if args.enable_dynamic_grad_comp:
+        if adaptor_args.enable_dynamic_grad_comp:
             if args.overlap_grad_reduce and args.all_reduce_time:
                 self.timers('DP_time').stop()
 
@@ -292,6 +295,7 @@ class _ParamAndGradBucketGroup:
         makes synchronous call.
         """
         args = get_args()
+        adaptor_args = get_adaptor_args()
 
         self.param_gather_dispatched = False
         # If overlap_grad_reduce is False, start (and finish) synchronous communication call here.
@@ -322,7 +326,7 @@ class _ParamAndGradBucketGroup:
             "params have grad available)"
         )
 
-        if args.enable_dynamic_grad_comp:
+        if adaptor_args.enable_dynamic_grad_comp:
             if (args.compressor is not None and
                     hasattr(self, '_pending_compressed_data') and
                     self._pending_compressed_data is not None):
@@ -394,8 +398,8 @@ class _ParamAndGradBuffer:
             torch.Size([end_index - start_index]), start_index, buffer_type=BufferType.GRAD
         )
 
-        args = get_args()
-        if args.enable_dynamic_grad_comp:
+        adaptor_args = get_adaptor_args()
+        if adaptor_args.enable_dynamic_grad_comp:
             components = []
             offset_in_bucket = 0
             for param in bucket_params:

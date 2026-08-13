@@ -18,7 +18,8 @@ from megatron.core.transformer.moe.experts import GroupedMLPSubmodules
 from megatron.core.transformer.moe.experts import TEGroupedMLP as MegatronCoreTEGroupedMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
-from megatron.training.global_vars import get_args
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class TEGroupedMLP():
@@ -93,7 +94,7 @@ class PrimusTurboGroupedMLP(MegatronCoreTEGroupedMLP):
         submodules: GroupedMLPSubmodules,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
-        args = get_args()
+        args = get_adaptor_args()
 
         super().__init__(
             num_local_experts,

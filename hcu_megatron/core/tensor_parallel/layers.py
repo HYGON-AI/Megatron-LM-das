@@ -47,7 +47,6 @@ from megatron.core.tensor_parallel.layers import (
 )
 from megatron.core.tensor_parallel import VocabParallelEmbedding as MegatronCoreVocabParallelEmbedding
 from megatron.core.tensor_parallel.utils import VocabUtility
-from megatron.training import get_args
 
 try:
     import fused_weight_gradient_mlp_cuda
@@ -63,6 +62,7 @@ except ImportError:
     HAVE_TE = False
 
 from hcu_megatron.core.utils import is_flux_min_version
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class VocabParallelEmbedding:
@@ -99,7 +99,6 @@ class VocabParallelEmbedding:
         )
 
         # Allocate weights and initialize.
-        args = get_args()
         from hcu_megatron.core.models.gpt.utils import get_skip_embedding_allocation
         if get_skip_embedding_allocation(): # getattr(args, "mtp_process", False) and args.schedule_method == "dualpipev":
             self.weight = None
@@ -1144,7 +1143,7 @@ class FluxColumnParallelLinear(ColumnParallelLinear):
         )
 
         # flux params
-        args = get_args()
+        args = get_adaptor_args()
         self._forward_impl = ag_linear
         self.flux_transpose_weight = getattr(self.config, "flux_transpose_weight", False)
         self.previous_flux_params = (None,) * 6

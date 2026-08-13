@@ -5,7 +5,7 @@ import torch
 from importlib.metadata import version
 from packaging.version import Version as PkgVersion
 
-from megatron.training import get_args
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 _flux_version = None
@@ -98,7 +98,7 @@ def get_batch_on_this_tp_rank(
         'max_seqlen', 'local_cp_size', and 'hybrid_cp_group'.
     """
 
-    args = get_args()
+    args = get_adaptor_args()
 
     def _broadcast(item):
         if item is not None:

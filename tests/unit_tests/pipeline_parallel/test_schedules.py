@@ -25,7 +25,8 @@ from hcu_megatron.core.pipeline_parallel.seq1f1b.schedules import (
     seq1f1b_forward_backward_pipelining_with_interleaving
 )
 from hcu_megatron.core.pipeline_parallel.ripipe_schedules import forward_backward_ripipe_pipelining
-from hcu_megatron.megatron_adaptor import destroy_adaptor_args, get_adaptor_args, repatch
+from hcu_megatron.megatron_adaptor import repatch
+from hcu_megatron.training.arguments import destroy_adaptor_args, get_adaptor_args
 
 rank = Utils.rank
 
