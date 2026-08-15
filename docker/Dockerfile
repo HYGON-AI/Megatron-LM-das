@@ -1,5 +1,4 @@
-# 基础镜像已内置 DTK 26.04 / MPI5.0 / gcc11.4 / cmake3.29 / py3.10
-FROM harbor.sourcefind.cn:5443/dcu/admin/base/dtk:26.04-ubuntu22.04-mpi5.0-gcc11.4-cmake3.29-py3.10
+FROM 10.16.1.152:5000/jenkins/model_test_env/dtk:2604-ubuntu22.04-py3.10
 
 SHELL ["/bin/bash", "-c"]
 
@@ -35,13 +34,7 @@ RUN wget -q "${AICC_URL}" -O /tmp/aicc.run && \
 # ---layer---
 RUN TORCH_VERSION=2.10.0 \
     && TORCH_TAG="torch${TORCH_VERSION//./}" \
-    && pip install --no-cache-dir \
-        --extra-index-url https://mirrors.aliyun.com/pypi/simple/ \
-        --trusted-host mirrors.aliyun.com \
-        torch==${TORCH_VERSION} \
-        torchvision \
-        pytest-mock==3.14.0 \
-        coverage==7.6.1 \
+    && pip install --no-cache-dir torch==${TORCH_VERSION} torchvision \
     && das-install apex ${TORCH_TAG} \
     && das-install deepspeed ${TORCH_TAG} \
     && das-install transformer-engine ${TORCH_TAG} \
