@@ -30,13 +30,9 @@ jobs:
           echo "IMAGE_TAG=megatron:0.18.2-ubuntu22.04-dtk2604-py3.10-${BUILD_TIME}" >> "$GITHUB_ENV"
 
       - name: Build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          load: true
-          tags: ${{ env.HARBOR_SITE }}/${{ env.HARBOR_NAMESPACE }}/${{ env.IMAGE_TAG }}
-          network: host
-          build-args: |
-            AICC_URL=${{ env.AICC_URL }}
-            AICC_VERSION=${{ env.AICC_VERSION }}
+        run: |
+          docker build --no-cache --network=host \
+            --build-arg AICC_URL="${{ env.AICC_URL }}" \
+            --build-arg AICC_VERSION="${{ env.AICC_VERSION }}" \
+            -t "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" \
+            -f docker/Dockerfile .
