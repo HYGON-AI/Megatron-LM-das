@@ -1,7 +1,7 @@
 name: docker-image
 
 on:
-  workflow_dispatch:
+  pull_request:
 
 env:
   HARBOR_SITE: 10.16.1.152:5000
