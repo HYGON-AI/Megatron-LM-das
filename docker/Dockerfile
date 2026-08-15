@@ -1,4 +1,5 @@
-FROM 10.16.1.152:5000/jenkins/model_test_env/dtk:2604-ubuntu22.04-py3.10
+# 基础镜像已内置 DTK 26.04 / MPI5.0 / gcc11.4 / cmake3.29 / py3.10
+FROM harbor.sourcefind.cn:5443/dcu/admin/base/dtk:26.04-ubuntu22.04-mpi5.0-gcc11.4-cmake3.29-py3.10
 
 SHELL ["/bin/bash", "-c"]
 
