@@ -1,6 +1,6 @@
 # Copyright (c) 2026, HYGON-AI. All rights reserved.
 #
-# CICD Megatron-LM-das: main CI pipeline, structurally aligned with the upstream
+# PR Test (HCU): combined PR and nightly pipeline, structurally aligned with the upstream
 # NVIDIA/Megatron-LM cicd-main.yml (trigger -> authorize/classify -> configure ->
 # test matrix -> aggregation gate), with runtime details following HYGON verl-das
 # conventions (HCU containers, authorization, workspace restore, aggregation).
@@ -28,7 +28,7 @@
 #   DAS_HCU_DATA_ROOT        data root (reserved; uncomment mount when needed)
 #   DAS_HCU_MEGATRON_WHEEL   optional hcu-megatron wheel path/URL
 
-name: CICD Megatron-LM-das
+name: PR Test (HCU)
 
 on:
   pull_request_target:
@@ -56,7 +56,7 @@ on:
           - unit-only
 
 concurrency:
-  group: cicd-megatron-lm-das-${{ github.event.pull_request.number || github.ref }}
+  group: pr-test-hcu-megatron-lm-das-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:

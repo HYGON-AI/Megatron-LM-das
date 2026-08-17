@@ -5,7 +5,7 @@ GitHub Actions 架构(单主流水线 + 配置决策中心 + 测试矩阵 + 聚�
 遵循 HYGON verl-das 既有惯例(HCU 容器化、精确 PR head 检出、变更分类、
 工作区恢复、聚合总结)。v1 提供 **PR 级测试** 与 **Nightly 测试** 两个基础档次。
 
-## 流水线结构(`.github/workflows/cicd-main.yml`)
+## 流水线结构(`.github/workflows/pr-test-hcu.yml`)
 
 | 触发 | 行为 |
 |---|---|
@@ -83,7 +83,7 @@ Dockerfile 固化, 双路径一致)。覆盖率采集使用 `coverage run --para
 
 ## 与官方(Megatron-LM)启动方式对齐
 
-| 维度 | 官方 cicd-main.yml | 本仓库 cicd-main.yml | 说明 |
+| 维度 | 官方 cicd-main.yml | 本仓库 pr-test-hcu.yml | 说明 |
 |---|---|---|---|
 | 流水线骨架 | pre-flight → configure → lint → 容器构建 → unit/integration 矩阵 → 聚合门 | authorize → check-changes → configure → lint → validate → unit/smoke → finish | 决策中心 + 测试矩阵 + 聚合门三段式一致 |
 | 单元测试启动 | `run_ci_test.sh` 内 `python -m torch.distributed.run`(8 卡) | 同左(原样保留 das 自己的 run_ci_test.sh) | 完全一致 |
@@ -98,7 +98,7 @@ Dockerfile 固化, 双路径一致)。覆盖率采集使用 `coverage run --para
 
 - **缺镜像/缺 runner**: 控制面会先跑完并给出 `validate-config` 错误指引;
   GPU job 找不到 runner 时排队等待(属正常现象, 注册 runner 后自动续跑)。
-- **新 PR 没有触发新逻辑**: 检查 `cicd-main.yml` 是否已经合入默认分支;
+- **新 PR 没有触发新逻辑**: 检查 `pr-test-hcu.yml` 是否已经合入默认分支;
   `pull_request_target` 不会从 PR head 加载 workflow。
 - **runner 工作区属主**: 容器 job 以 root 写入, 由 `restore-after-*` job 自动
   chown 恢复;子模块 `Megatron-LM/tests` 改名由 `trap` 保证成功/失败都恢复。
