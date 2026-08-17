@@ -6,19 +6,19 @@
 # conventions (HCU containers, authorization, workspace restore, aggregation).
 #
 # Triggers:
-#   - pull_request on core_v0.18.2
+#   - pull_request_target on core_v0.18.2
 #   - schedule: daily 19:00 UTC (nightly)
 #   - workflow_dispatch (test_case: pr | nightly | unit-only)
 #
-# Security model (2026-08 review):
-#   - plain pull_request (no pull_request_target); fork PR secrets are not
-#     available and GPU tests are additionally rejected by `authorize`;
+# Security model (aligned with HYGON-AI/verl-das e1d01629):
+#   - pull_request_target keeps workflow control on the default branch while
+#     every checkout uses the PR's exact head repository and head SHA;
+#   - same-repository and fork PRs are accepted. The HCU runner must therefore
+#     be a dedicated isolated CI machine;
 #   - control-plane jobs (authorize/check-changes/configure/lint/validate/finish)
 #     run on GitHub-hosted ubuntu-latest, never on self-hosted runners;
-#   - GPU jobs are gated by `gpu-gate`: PR runs require manual approval.
-#     DEPLOYMENT REQUIREMENT: an admin must add required reviewers to the
-#     das-hcu-gpu environment, otherwise GitHub auto-approves unprotected
-#     environments and the gate is ineffective;
+#   - workflow permissions are read-only and no repository secret is passed to
+#     PR test jobs;
 #   - GPU job runner labels are injected purely via vars (no hardcoded hosts).
 #
 # Config surface (repo vars, see .github/CI-README.md):
@@ -31,7 +31,7 @@
 name: CICD Megatron-LM-das
 
 on:
-  pull_request:
+  pull_request_target:
     branches:
       - core_v0.18.2
     types:
@@ -72,16 +72,14 @@ env:
 
 jobs:
   # --------------------------------------------------------------- authorize
-  # Trust boundary: fork PRs never run GPU tests; control plane always runs.
+  # Trust boundary: both same-repository and fork PRs may execute on the
+  # dedicated isolated HCU runner, matching verl-das.
   authorize:
     name: Authorize
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      is_fork: ${{ steps.check.outputs.is_fork }}
     steps:
-      - name: Check trust boundary
-        id: check
+      - name: Authorize PR source
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -90,16 +88,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            if [[ "${HEAD_REPOSITORY}" != "${BASE_REPOSITORY}" ]]; then
-              echo "is_fork=true" | tee -a "${GITHUB_OUTPUT}"
-              echo "Fork PR: GPU tests are disabled; control-plane checks only."
-            else
-              echo "is_fork=false" | tee -a "${GITHUB_OUTPUT}"
-              echo "Same-repository PR authorized."
-            fi
+          if [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
+            echo "HCU execution authorized for ${HEAD_REPOSITORY} targeting ${BASE_REPOSITORY}."
           else
-            echo "is_fork=false" | tee -a "${GITHUB_OUTPUT}"
             echo "${EVENT_NAME} run authorized."
           fi
 
@@ -118,12 +109,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
       - name: Classify changed paths (docs-only whitelist)
         id: changes
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request_target'
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -155,7 +147,7 @@ jobs:
 
       - name: Force full runtime on schedule / dispatch
         id: changes-force
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request_target'
         run: echo "runtime=true" | tee -a "${GITHUB_OUTPUT}"
 
       - name: Resolve runtime flag
@@ -176,7 +168,6 @@ jobs:
   # trigger and PR labels.
   #   - PR default: L0 (unit tests only)
   #   - PR + label `Run functional tests`: L1 (unit + functional smoke)
-  #   - fork PR: all GPU tests off (run_unit/run_functional=false)
   #   - schedule / dispatch(nightly): L1 with more iterations
   #   - dispatch(unit-only): unit tests only
   configure:
@@ -200,7 +191,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           TEST_CASE: ${{ inputs.test_case || '' }}
-          IS_FORK: ${{ needs.authorize.outputs.is_fork }}
         run: |
           set -euo pipefail
 
@@ -212,7 +202,7 @@ jobs:
           N_REPEAT=1
 
           HAS_RUN_FUNCTIONAL=false
-          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+          if [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
             PR_NUMBER="${{ github.event.pull_request.number }}"
             LABELS=$(curl -sS \
               -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -222,12 +212,6 @@ jobs:
             if echo "${LABELS}" | grep -Fxq "Run functional tests"; then
               HAS_RUN_FUNCTIONAL=true
             fi
-          fi
-
-          # fork PRs never run GPU tests
-          if [[ "${EVENT_NAME}" == "pull_request" ]] && [[ "${IS_FORK}" == "true" ]]; then
-            RUN_UNIT=false
-            RUN_FUNCTIONAL=false
           fi
 
           if [[ "${EVENT_NAME}" == "schedule" ]] || [[ "${TEST_CASE}" == "nightly" ]]; then
@@ -240,7 +224,7 @@ jobs:
             SCOPE=L0
             CADENCE=pr
             RUN_FUNCTIONAL=false
-          elif [[ "${EVENT_NAME}" == "pull_request" ]] && [[ "${HAS_RUN_FUNCTIONAL}" == "true" ]]; then
+          elif [[ "${EVENT_NAME}" == "pull_request_target" ]] && [[ "${HAS_RUN_FUNCTIONAL}" == "true" ]]; then
             SCOPE=L1
             CADENCE=pr
             RUN_FUNCTIONAL=true
@@ -282,6 +266,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           submodules: false
 
@@ -349,25 +334,6 @@ jobs:
             echo "- image: \`${IMAGE%%@*}\`@sha256:***(digest pinned)***"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  # ---------------------------------------------------------------- gpu-gate
-  # GPU approval gate: PR runs wait for das-hcu-gpu environment approval
-  # (deploy step: admin adds required reviewers to the environment);
-  # schedule/dispatch skip the gate so nightly is never blocked.
-  gpu-gate:
-    name: GPU test approval gate
-    needs:
-      - authorize
-      - check-changes
-      - configure
-      - validate-config
-    if: needs.check-changes.outputs.runtime == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    environment: das-hcu-gpu
-    timeout-minutes: 5
-    steps:
-      - name: Approved
-        run: echo "GPU tests approved for PR run."
-
   # -------------------------------------------------------------- unit-tests
   # Unit tests (8-GPU distributed pytest, bucketed matrix; mirrors the upstream unit-tests matrix).
   unit-tests:
@@ -378,11 +344,9 @@ jobs:
       - configure
       - validate-config
       - linting
-      - gpu-gate
     if: |
       needs.check-changes.outputs.runtime == 'true'
       && needs.configure.outputs.run_unit == 'true'
-      && (github.event_name != 'pull_request' || needs.gpu-gate.result == 'success')
     runs-on:
       - self-hosted
       - hcu
@@ -421,6 +385,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           submodules: false
@@ -462,13 +427,11 @@ jobs:
       - configure
       - validate-config
       - linting
-      - gpu-gate
       - unit-tests
       - restore-after-unit
     if: |
       needs.check-changes.outputs.runtime == 'true'
       && needs.configure.outputs.run_functional == 'true'
-      && (github.event_name != 'pull_request' || needs.gpu-gate.result == 'success')
     runs-on:
       - self-hosted
       - hcu
@@ -503,6 +466,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           submodules: false
@@ -545,7 +509,6 @@ jobs:
       - configure
       - validate-config
       - linting
-      - gpu-gate
       - unit-tests
       - restore-after-unit
       - functional-smoke
@@ -566,7 +529,6 @@ jobs:
           CONFIG_RESULT: ${{ needs.configure.result }}
           VALIDATE_RESULT: ${{ needs.validate-config.result }}
           LINT_RESULT: ${{ needs.linting.result }}
-          GATE_RESULT: ${{ needs.gpu-gate.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RESTORE_UNIT_RESULT: ${{ needs.restore-after-unit.result }}
           SMOKE_RESULT: ${{ needs.functional-smoke.result }}
@@ -614,7 +576,6 @@ jobs:
             echo "- configure: ${CONFIG_RESULT}"
             echo "- config validation: ${VALIDATE_RESULT}"
             echo "- linting: ${LINT_RESULT}"
-            echo "- gpu gate (PR only): ${GATE_RESULT}"
             echo "- unit tests: ${UNIT_RESULT}"
             echo "- restore after unit tests: ${RESTORE_UNIT_RESULT}"
             echo "- functional smoke: ${SMOKE_RESULT}"
