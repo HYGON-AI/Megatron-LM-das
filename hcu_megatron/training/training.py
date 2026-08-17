@@ -317,7 +317,7 @@ def _bridge_apply_vlm_overrides(provider, args):
 # vision term on top of the upstream LLM total. Local same-module functions
 # (training_log, checkpoint_and_decide_exit, ...) automatically bind to this
 # wrapper by Python name resolution; Megatron-LM's internal callers keep the
-# upstream version, which is fine because dcu_megatron uses its own train loop.
+# upstream version, which is fine because hcu_megatron uses its own train loop.
 
 
 def _bridge_extract_vision_meta(provider):

@@ -1,51 +1,5 @@
 # Hcu Megatron
 
-## 使用方式
-
-### 项目下载
-
-分为2种，git方式或离线方式
-
-1、git方式下载
-
-```shell
-git clone -b core_v0.12.0 --recurse-submodules http://10.16.6.30/dcutoolkit/deeplearing/hcu_megatron.git 或
-git clone -b core_v0.12.0 --recurse-submodules http://112.11.119.99:10068/dcutoolkit/deeplearing/hcu_megatron.git
-```
-
-2、离线下载
-
-2.1 离线下载该仓库的离线代码包
-
-2.2 点击Megatron-LM@版本号, 下载对应版本的Megatron-LM离线代码包
-
-2.3 将Megatron-LM离线代码包解压到hcu_megatron目录下的Megatron-LM目录
-
-
-
-### 项目使用
-在使用时，进入到examples目录下，有相关模型执行脚本，所用数据集请自行下载：https://r0ddbu55vzx.feishu.cn/drive/folder/ZxHHfCoX4lg75td2hTqcmiAin3g
-```
-examples/
-├── deepseek_v3
-├── gpt3
-├── llama
-├── mixtral
-└── qwen
-```
-
-### 节点筛查(此次检查是基于GPT-MOE 567B模型单机参数)
-
-```shell
-1、到check_nodes目录下，将要筛查的节点写入clushnode文件
-2、bash clush.sh，检查环境基本情况，如显存、内存等是否已释放
-3、打开check_nodes.sh，将基本环境变量补齐或做相应修改
-4、bash run_check.sh 1/4，进行单机或者四机的节点筛查 # 当前只支持单机和四机筛查
-```
-
-### 版本依赖
-torch >= 2.6.0
-
 ## 项目介绍
 本项目通过替换megatron的函数或类，引入新的特性或者实现更好的性能。替换的函数或类注册在hcu_megatron/adaptor/megatron_adaptor.py。
 
@@ -146,7 +100,7 @@ def unpermute(
 + 项目支持PowerSGD低秩分解与误差反馈机制，能够根据训练阶段、系统环境及各流水线层的梯度熵变化，动态调整梯度压缩率。在显著降低通信开销的同时，有效保留关键梯度信息，兼顾训练效率与模型收敛精度。具体见[edgc](./docs/features/edgc.md)介绍
 
 ### 项目支持激活值offload
-+ 在模型规格较大时，我们通常使用重计算降低显存占用，但是性能下降较严重，这里我们通过在前向计算时将激活值offload到CPU，在反向计算时，再将激活值copy到dcu来减少显存占用。具体见[激活值offload](./docs/features/async-activation-offload.md)
++ 在模型规格较大时，我们通常使用重计算降低显存占用，但是性能下降较严重，这里我们通过在前向计算时将激活值offload到CPU，在反向计算时，再将激活值copy到hcu来减少显存占用。具体见[激活值offload](./docs/features/async-activation-offload.md)
 
 ### 项目支持指定重计算层
 + megatron支持对所有transformer/mtp层进行重计算，该情形下模型训练显存占用小，但是训练性能通常较差。为了在显存满足要求的同时，提高模型训练性能，hcu megatron支持对指定tranformer/mtp层进行重计算。使用该重计算方式，需要开启以下参数：

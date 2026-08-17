@@ -1,3 +1,6 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
 import sys
 import setuptools
 
