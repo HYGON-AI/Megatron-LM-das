@@ -1,0 +1,46 @@
+name: docker-image
+
+on:
+  pull_request:
+
+env:
+  HARBOR_SITE: 10.16.1.152:5000
+  HARBOR_NAMESPACE: jenkins/model_test_env
+
+jobs:
+  build:
+    # 需要能访问内网 pip 源 / AICC 下载地址的自托管 runner
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 获取最新 AICC
+        run: |
+          AICC_URL="http://10.16.1.201:8000/ai_cc/nightly/"
+          LATEST_AICC=$(curl -s "${AICC_URL}" | grep -oP 'dtk_llvm_[^"]+\.run' | sed 's/\.run$//' | sort -t '_' -k4 -nr | head -n1)
+          echo "AICC_URL=${AICC_URL}${LATEST_AICC}.run" >> "$GITHUB_ENV"
+          echo "AICC_VERSION=${LATEST_AICC#dtk_llvm_}" >> "$GITHUB_ENV"
+
+      - name: 生成镜像 tag
+        run: |
+          BUILD_TIME=$(date +"%Y%m%d-%H%M")
+          echo "IMAGE_TAG=megatron:0.18.2-ubuntu22.04-dtk2604-py3.10-${BUILD_TIME}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          docker build --no-cache --network=host \
+            --build-arg AICC_URL="${{ env.AICC_URL }}" \
+            --build-arg AICC_VERSION="${{ env.AICC_VERSION }}" \
+            -t "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" \
+            -f docker/Dockerfile .
+
+      - name: Login to Harbor
+        run: |
+          echo "${{ secrets.HARBOR_PASSWORD }}" | docker login "${HARBOR_SITE}" -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
+
+      - name: Push
+        run: |
+          docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
