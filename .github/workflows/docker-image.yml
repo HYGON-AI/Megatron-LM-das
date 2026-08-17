@@ -36,3 +36,11 @@ jobs:
             --build-arg AICC_VERSION="${{ env.AICC_VERSION }}" \
             -t "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" \
             -f docker/Dockerfile .
+
+      - name: Login to Harbor
+        run: |
+          echo "${{ secrets.HARBOR_PASSWORD }}" | docker login "${HARBOR_SITE}" -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
+
+      - name: Push
+        run: |
+          docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
