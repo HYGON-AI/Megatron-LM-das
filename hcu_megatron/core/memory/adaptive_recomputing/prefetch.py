@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import re
 import torch
 from megatron.training import get_args

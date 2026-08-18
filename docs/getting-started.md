@@ -14,7 +14,7 @@
 
 1. 拉取镜像
 
-    `docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10`
+    `docker pull images:tgs`
     
     python3.10需要用 `from typing_extensions import override` 替换掉 `from typing import override`
 
@@ -36,15 +36,16 @@
         -v /opt/hyhal:/opt/hyhal:ro \
         -v /root/.ssh:/root/.ssh:ro \
         -v /path/to/workspace:/path/to/workspace \
-        harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10 \
+        images:tgs \
         /bin/bash
     ```
-3. 拉取hcu-megatron源码
+3. 拉取Megatron-LM-das源码
     ```bash
-    git clone http://42.228.13.241:10068/dcutoolkit/deeplearing/dcu_megatron.git
-    cd dcu_megatron
+    git clone https://github.com/HYGON-AI/Megatron-LM-das.git
+    cd Megatron-LM-das
     git checkout origin/core_v0.18.2
     git submodule update --init --recursive
+    pip install -r ./requirements/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
     ```
 4. 下载模型配置
 
@@ -202,7 +203,7 @@
 
 1. 拉取镜像
 
-    `docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10`
+    `docker pull images:tgs`
 
 2. 启动容器
     ```bash
@@ -222,15 +223,16 @@
         -v /opt/hyhal:/opt/hyhal:ro \
         -v /root/.ssh:/root/.ssh:ro \
         -v /path/to/workspace:/path/to/workspace \
-        harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10 \
+        images:tgs \
         /bin/bash
     ```
-3. 拉取hcu-megatron源码
+3. 拉取Megatron-LM-das源码
     ```bash
-    git clone http://42.228.13.241:10068/dcutoolkit/deeplearing/dcu_megatron.git
-    cd dcu_megatron
+    git clone https://github.com/HYGON-AI/Megatron-LM-das.git
+    cd Megatron-LM-das
     git checkout origin/core_v0.18.2
     git submodule update --init --recursive
+    pip install -r ./requirements/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
     ```
 4. 下载模型配置
 

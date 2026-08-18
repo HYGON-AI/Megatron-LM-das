@@ -1,4 +1,5 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
 import warnings
 from functools import wraps
 from dataclasses import make_dataclass, field
