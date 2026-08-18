@@ -172,10 +172,11 @@ class MoELayer():
         # expert on its side stream BEFORE fc1_latent_proj so it sees the full
         # hidden_states. The corresponding join+add runs in postprocess after
         # fc2_latent_proj. Skipped on the training / NCCL paths.
+        token_dispatcher = self.get_token_dispatcher(is_recompute)
         if (
             self.config.moe_latent_size
             and self.shared_expert_overlap
-            and isinstance(self.token_dispatcher, NVLSAllGatherVDispatcher)
+            and isinstance(token_dispatcher, NVLSAllGatherVDispatcher)
         ):
             stream = SharedExpertMLP.stream
             stream.wait_stream(torch.cuda.current_stream())
@@ -196,7 +197,7 @@ class MoELayer():
         # Project the hidden_states from hidden dimension down to latent dimenion.
         if self.config.moe_latent_size:
             hidden_states, _ = self.fc1_latent_proj(hidden_states)
-        hidden_states, probs = self.get_token_dispatcher(is_recompute).dispatch_preprocess(
+        hidden_states, probs = token_dispatcher.dispatch_preprocess(
             hidden_states, routing_map, probs
         )
         return hidden_states, probs
