@@ -15,7 +15,8 @@ GitHub Actions 架构(单主流水线 + 配置决策中心 + 测试矩阵 + 聚�
 
 Job 链: `authorize`(记录 PR 来源)→ `check-changes`(docs-only 白名单)→ `configure`
 (L0/L1 决策)→ `linting` / `validate-config` →
-`unit-tests`(矩阵 2 bucket, 8 卡分布式 pytest)→ `restore-after-unit` →
+`restore-before-unit` → `unit-tests`(矩阵 2 bucket, 8 卡分布式 pytest)→
+`restore-after-unit` →
 `functional-smoke`(合成数据 + 极小模型 pretrain)→ `restore-after-smoke` →
 `finish`(聚合门, 输出总结)。
 
@@ -28,7 +29,8 @@ Job 链: `authorize`(记录 PR 来源)→ `check-changes`(docs-only 白名单)�
 
 1. **默认分支控制面**: PR 使用 `pull_request_target`,授权和调度逻辑始终来自
    默认分支;每个 checkout 都显式使用
-   `pull_request.head.repo.full_name` + `pull_request.head.sha`,不执行模糊分支引用。
+   `pull_request.head.repo.full_name` + `pull_request.head.sha`,不执行模糊分支引用;
+   变更分类会从目标仓库获取 base 分支并以真实 merge-base 计算 PR 改动。
 2. **fork PR 开放**: 与 verl-das `e1d01629` 一致,同仓库和 fork PR 都可执行
    HCU 测试。由于 PR 代码会进入带设备和 `--privileged` 的容器,runner 必须是
    **专用、隔离、无生产凭据**的 CI 机器,不能与通用或生产任务共用。
@@ -44,7 +46,7 @@ Settings → Secrets and variables → Actions → **Variables**:
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `DAS_HCU_CI_RUNNER_LABEL` | ✅ | self-hosted runner 标签(如 `hcu-ci`),未配置时 validate-config 明确失败并给出指引 |
+| `DAS_HCU_CI_RUNNER_LABEL` | ✅ | 专用、隔离且当前只匹配一台机器的 self-hosted runner 标签(当前为 `hcu-ci-pr`),未配置时 validate-config 明确失败并给出指引 |
 | `DAS_HCU_CI_IMAGE` | ✅ | `.github/workflows/docker-image.yml` 推送的 Megatron 训练镜像;必须转换为 `镜像仓库@sha256:<64 位十六进制>` 固定 digest(与 verl-das 一致,防镜像漂移);未配置/未固定时 validate-config 明确失败 |
 | `DAS_HCU_MEGATRON_WHEEL` | 可选 | hcu-megatron 预编译 wheel 路径/URL,已注入全部测试 job;prepare_workspace 自动 `pip install` |
 | `DAS_HCU_MODEL_ROOT` | 预留 | 模型根目录;**接入时需取消注释 workflow 中 functional-smoke 的挂载行**(YAML 无法条件化 volume) |
@@ -77,8 +79,8 @@ checkout 双重核对;升级子模块时需同步更新该文件的 `EXPECTED_SU
 | `DAS_HCU_MEGATRON_WHEEL` | 未配置 | wheel 路径/URL,提供 `fused_weight_gradient_mlp_cuda` 等编译算子;未配置时 sitecustomize 注入 import 垫片(调用即报 NotImplementedError) |
 | `MEGATRON_PATH` / `DTK_ENV` / `CONDA_HOME` | 见脚本 | `run_ci_test.sh` 环境变量化占位符 |
 
-测试依赖版本锁定: `pytest-mock==3.14.0` / `coverage==7.6.1`(运行时按需安装 +
-Dockerfile 固化, 双路径一致)。覆盖率采集使用 `coverage run --parallel-mode`,
+测试依赖版本锁定: `pytest-mock==3.14.0` / `coverage==7.6.1`(Dockerfile 固化 +
+旧镜像运行时兜底安装, 双路径一致;兜底安装后会重新探测 coverage)。覆盖率采集使用 `coverage run --parallel-mode`,
 8 个 worker 各写独立文件, 最后 `coverage combine` 合并。
 
 ## 与官方(Megatron-LM)启动方式对齐
@@ -100,8 +102,9 @@ Dockerfile 固化, 双路径一致)。覆盖率采集使用 `coverage run --para
   GPU job 找不到 runner 时排队等待(属正常现象, 注册 runner 后自动续跑)。
 - **新 PR 没有触发新逻辑**: 检查 `pr-test-hcu.yml` 是否已经合入默认分支;
   `pull_request_target` 不会从 PR head 加载 workflow。
-- **runner 工作区属主**: 容器 job 以 root 写入, 由 `restore-after-*` job 自动
-  chown 恢复;子模块 `Megatron-LM/tests` 改名由 `trap` 保证成功/失败都恢复。
+- **runner 工作区属主**: 容器 job 以 root 写入;第一个 HCU checkout 前先恢复
+  上一次可能遗留的属主,本次测试后再由 `restore-after-*` 做第二次恢复;子模块
+  `Megatron-LM/tests` 改名由 `trap` 保证成功/失败都恢复。
 - **与 verl-das CI 并发**: 与 verl-das 共用机器时通过不同 label 隔离;
   并发高峰可能排队, 后续可加互斥。
 - **分支**: 仓库默认分支 `core_v0.18.2`, workflow 与 schedule 均挂在该分支。
@@ -109,18 +112,18 @@ Dockerfile 固化, 双路径一致)。覆盖率采集使用 `coverage run --para
 ## 注册 runner(一次性, 需仓库 admin)
 
 ```bash
-# 获取注册 token(nmz4, 需 repo admin)
+# 获取注册 token(需 repo admin)
 gh api -X POST repos/HYGON-AI/Megatron-LM-das/actions/runners/registration-token \
   -q .token
 
-# 在 bw18 上注册(标签含 self-hosted + hcu + 与 DAS_HCU_CI_RUNNER_LABEL 一致的自定义标签)
+# 在专用 HCU runner 上注册(当前 nmz36 / bw1100;自定义标签与 repo var 一致)
 mkdir -p ~/actions-runner-das && cd ~/actions-runner-das
 curl -o actions-runner.tar.gz -L https://github.com/actions/runner/releases/download/v2.327.0/actions-runner-linux-x64-2.327.0.tar.gz
 tar xzf actions-runner.tar.gz
 ./config.sh --url https://github.com/HYGON-AI/Megatron-LM-das \
   --token <TOKEN> \
-  --name nmz18-hygon-hcu-megatron-lm-das \
-  --labels self-hosted,Linux,X64,hcu,hcu-ci \
+  --name nmz36-hygon-hcu-megatron \
+  --labels self-hosted,Linux,X64,hcu,bw1100,hcu-ci-pr,nmz36 \
   --unattended --replace
 nohup ./run.sh > runner.log 2>&1 &
 ```

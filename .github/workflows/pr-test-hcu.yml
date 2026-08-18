@@ -56,8 +56,8 @@ on:
           - unit-only
 
 concurrency:
-  group: pr-test-hcu-megatron-lm-das-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: pr-test-hcu-megatron-lm-das-${{ github.event_name == 'schedule' && 'nightly' || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read
@@ -119,12 +119,29 @@ jobs:
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REPOSITORY: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
 
           if [[ -z "${BASE_SHA}" ]]; then
             BASE_SHA="$(git rev-parse "${HEAD_SHA}^")"
+          else
+            # The PR head can come from a fork that does not carry the latest
+            # base branch objects. Fetch the base repository explicitly and
+            # classify only the PR-side changes from the true merge base.
+            git remote remove ci-base 2>/dev/null || true
+            git remote add ci-base "https://github.com/${BASE_REPOSITORY}.git"
+            git fetch --no-tags ci-base \
+              "+refs/heads/${BASE_REF}:refs/remotes/ci-base/${BASE_REF}"
+            git cat-file -e "${BASE_SHA}^{commit}"
+          fi
+
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
+          if [[ -z "${MERGE_BASE}" ]]; then
+            echo "ERROR: no merge base between ${BASE_SHA} and ${HEAD_SHA}" >&2
+            exit 1
           fi
 
           # default: run tests unless all changes are docs-only
@@ -136,7 +153,7 @@ jobs:
               docs/*|*.md|.github/CI-README.md) ;;
               *) non_docs=true ;;
             esac
-          done < <(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
+          done < <(git diff --name-only "${MERGE_BASE}" "${HEAD_SHA}")
 
           if [[ "${non_docs}" == "false" ]]; then
             runtime=false
@@ -334,6 +351,65 @@ jobs:
             echo "- image: \`${IMAGE%%@*}\`@sha256:***(digest pinned)***"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+  # ---------------------------------------------------- restore-before-unit
+  # A cancelled/failed container job can leave root-owned files behind. Restore
+  # the dedicated runner workspace before the next checkout; post-test restore
+  # jobs remain as a second line of defense.
+  restore-before-unit:
+    name: Restore workspace before unit tests
+    needs:
+      - check-changes
+      - configure
+      - validate-config
+    if: |
+      needs.check-changes.outputs.runtime == 'true'
+      && needs.configure.outputs.run_unit == 'true'
+      && needs.validate-config.result == 'success'
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 10
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore existing workspace ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace="$(realpath -m -- "${GITHUB_WORKSPACE}")"
+          runner_temp="$(realpath -m -- "${RUNNER_TEMP}")"
+          work_root="$(dirname -- "${runner_temp}")"
+
+          case "${workspace}" in
+            "${work_root}"/*/*) ;;
+            *)
+              echo "ERROR: refusing to change ownership outside ${work_root}: ${workspace}" >&2
+              exit 1
+              ;;
+          esac
+
+          owner="$(stat -c '%u:%g' -- "${runner_temp}")"
+          if [[ ! "${owner}" =~ ^[1-9][0-9]*:[0-9]+$ ]]; then
+            echo "ERROR: unsafe runner ownership: ${owner}" >&2
+            exit 1
+          fi
+          if [[ ! "${DAS_HCU_CI_IMAGE}" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+            echo "ERROR: DAS_HCU_CI_IMAGE must use an immutable sha256 digest" >&2
+            exit 1
+          fi
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "ERROR: Docker is required to restore runner workspace ownership" >&2
+            exit 1
+          fi
+
+          docker run --rm \
+            --volume "${workspace}:/workspace" \
+            "${DAS_HCU_CI_IMAGE}" \
+            chown -R -- "${owner}" /workspace
+          echo "Restored ${workspace} ownership to ${owner}."
+
   # -------------------------------------------------------------- unit-tests
   # Unit tests (8-GPU distributed pytest, bucketed matrix; mirrors the upstream unit-tests matrix).
   unit-tests:
@@ -344,6 +420,7 @@ jobs:
       - configure
       - validate-config
       - linting
+      - restore-before-unit
     if: |
       needs.check-changes.outputs.runtime == 'true'
       && needs.configure.outputs.run_unit == 'true'
@@ -427,6 +504,7 @@ jobs:
       - configure
       - validate-config
       - linting
+      - restore-before-unit
       - unit-tests
       - restore-after-unit
     if: |
@@ -509,6 +587,7 @@ jobs:
       - configure
       - validate-config
       - linting
+      - restore-before-unit
       - unit-tests
       - restore-after-unit
       - functional-smoke
@@ -529,6 +608,7 @@ jobs:
           CONFIG_RESULT: ${{ needs.configure.result }}
           VALIDATE_RESULT: ${{ needs.validate-config.result }}
           LINT_RESULT: ${{ needs.linting.result }}
+          RESTORE_BEFORE_UNIT_RESULT: ${{ needs.restore-before-unit.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RESTORE_UNIT_RESULT: ${{ needs.restore-after-unit.result }}
           SMOKE_RESULT: ${{ needs.functional-smoke.result }}
@@ -544,9 +624,11 @@ jobs:
             [[ "${VALIDATE_RESULT}" == "success" ]]
             [[ "${LINT_RESULT}" == "success" ]]
             if [[ "${RUN_UNIT}" == "true" ]]; then
+              [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "success" ]]
               [[ "${UNIT_RESULT}" == "success" ]]
               [[ "${RESTORE_UNIT_RESULT}" == "success" ]]
             else
+              [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "skipped" ]]
               [[ "${UNIT_RESULT}" == "skipped" ]]
               [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
             fi
@@ -560,6 +642,7 @@ jobs:
           else
             [[ "${VALIDATE_RESULT}" == "skipped" ]]
             [[ "${LINT_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "skipped" ]]
             [[ "${UNIT_RESULT}" == "skipped" ]]
             [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
             [[ "${SMOKE_RESULT}" == "skipped" ]]
@@ -576,6 +659,7 @@ jobs:
             echo "- configure: ${CONFIG_RESULT}"
             echo "- config validation: ${VALIDATE_RESULT}"
             echo "- linting: ${LINT_RESULT}"
+            echo "- restore before unit tests: ${RESTORE_BEFORE_UNIT_RESULT}"
             echo "- unit tests: ${UNIT_RESULT}"
             echo "- restore after unit tests: ${RESTORE_UNIT_RESULT}"
             echo "- functional smoke: ${SMOKE_RESULT}"

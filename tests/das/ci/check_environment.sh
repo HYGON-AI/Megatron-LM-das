@@ -4,7 +4,7 @@
 # Environment self-check (runs inside the test container):
 #   - DTK env (DTK_ROOT overridable, default /opt/dtk)
 #   - torch importable, >= 8 GPUs visible
-#   - transformer_engine presence (missing -> warning only, native impl fallback)
+#   - transformer_engine presence (missing -> warning; functional smoke needs it)
 #   - coverage presence (missing -> sets DAS_COVERAGE_DISABLED=1, plain pytest)
 set -euo pipefail
 
@@ -37,7 +37,10 @@ try:
 
     print(f"transformer_engine={transformer_engine.__version__}")
 except ImportError:
-    print("transformer_engine: NOT INSTALLED (native impl will be used)")
+    print(
+        "transformer_engine: NOT INSTALLED "
+        "(unit tests may use local paths; the default functional smoke requires it)"
+    )
 PY
 
 if ! python3 -c "import coverage" >/dev/null 2>&1; then

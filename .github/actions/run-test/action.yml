@@ -32,6 +32,7 @@ runs:
         exit "${PIPESTATUS[0]}"
 
     - name: Compute artifact name
+      if: always()
       shell: bash
       run: |
         name="${DAS_HCU_CI_ARTIFACT_NAME:-das-logs}"
