@@ -2,7 +2,7 @@
 
 INITIALIZATION_ARGS=( --num-workers 2)
 
-for para in $*
+for para in "$@"
 do
     if [[ $para == --data_path* ]];then
         data_path=${para#*=}
@@ -16,6 +16,10 @@ do
         checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
+    elif [[ $para == --training_mode* ]];then
+        training_mode=${para#*=}
+    elif [[ $para == --train_iters* ]];then
+        train_iters=${para#*=}
     elif [[ $para == --reproduce* ]];then
         INITIALIZATION_ARGS=( --reproduce --num-workers 0)
         export MIOPEN_DEBUG_CONVOLUTION_DETERMINISTIC=1  # miopen 确定算法打开
@@ -30,17 +34,27 @@ do
 done
 
 # data path
-DATA_PATH=${data_path}
-TOKENIZER_MODEL_PATH=${tokenizer_path}
-CHECKPOINT_PATH=${checkpoint_path}
+DATA_PATH=${data_path:-${DATA_PATH:-}}
+TOKENIZER_MODEL_PATH=${tokenizer_path:-${TOKENIZER_MODEL_PATH:-}}
+CHECKPOINT_PATH=${checkpoint_path:-${CHECKPOINT_PATH:-/tmp/qwen3-8b}}
+TRAINING_MODE=${training_mode:-${TRAINING_MODE:-pretrain}}
+LOAD_HF_WEIGHTS=${LOAD_HF_WEIGHTS:-false}
 
+if [[ -z "${DATA_PATH}" || -z "${TOKENIZER_MODEL_PATH}" ]]; then
+    echo "DATA_PATH and TOKENIZER_MODEL_PATH must be set"
+    exit 1
+fi
+if [[ "${TRAINING_MODE}" != "pretrain" && "${TRAINING_MODE}" != "sft" ]]; then
+    echo "TRAINING_MODE must be pretrain or sft"
+    exit 1
+fi
 # 运行环境参数
-DIST_URL=${1}
-DIST_PORT=${2}
+DIST_URL=${1:-${DIST_URL:-localhost}}
+DIST_PORT=${2:-${DIST_PORT:-29500}}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
+export LAUNCH_BACKEND=${launch_backend:-${LAUNCH_BACKEND:-mpirun}}
 
 MASTER_ADDR=${MASTER_ADDR:-loadlhost}
 MASTER_PORT=${MASTER_PORT:-6000}
@@ -69,8 +83,12 @@ SEQ_LEN=4096
 MAX_POSITION_EMBEDDINGS=40960
 
 # train iteration hyperparameters
-TRAIN_ITERS=500
+TRAIN_ITERS=${train_iters:-${TRAIN_ITERS:-500}}
 LR_WARMUP_ITERS=1
+if [[ ! "${TRAIN_ITERS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TRAIN_ITERS must be a positive integer"
+    exit 1
+fi
 
 MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -86,7 +104,17 @@ TORCH_DISTRIBUTED_ARGS=(
     --nproc_per_node $GPUS_PER_NODE
 )
 
+BRIDGE_ARGS=()
+if [[ "${LOAD_HF_WEIGHTS}" == "true" ]]; then
+    BRIDGE_ARGS=(
+        --use-bridge
+        --bridge-hf-model ${TOKENIZER_MODEL_PATH}
+        --load-weights
+    )
+fi
+
 GPT_MODEL_ARGS=(
+    ${BRIDGE_ARGS[@]}
     --seq-length ${SEQ_LEN}
     --num-layers 36
     --hidden-size 4096
@@ -141,20 +169,24 @@ MODEL_PARALLEL_ARGS=(
     --sequence-parallel
 )
 
-DATA_ARGS=(
-    --tokenizer-type HuggingFaceTokenizer
-    --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    --data-path ${DATA_PATH} 
-    --split 949,50,1
-    # --sft
-    # --sft-tokenizer-prompt-format default
-    # --tokenizer-type SFTTokenizer
-    # --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    # --no-create-attention-mask-in-dataloader
-    # --train-data-path ${DATA_PATH}/train.jsonl
-    # --valid-data-path ${DATA_PATH}/valid.jsonl
-
-)
+if [[ "${TRAINING_MODE}" == "pretrain" ]]; then
+    DATA_ARGS=(
+        --tokenizer-type HuggingFaceTokenizer
+        --tokenizer-model ${TOKENIZER_MODEL_PATH}
+        --data-path ${DATA_PATH}
+        --split 949,50,1
+    )
+else
+    DATA_ARGS=(
+        --sft
+        --sft-tokenizer-prompt-format default
+        --tokenizer-type SFTTokenizer
+        --tokenizer-model ${TOKENIZER_MODEL_PATH}
+        --no-create-attention-mask-in-dataloader
+        --train-data-path ${DATA_PATH}/train.jsonl
+        --valid-data-path ${DATA_PATH}/valid.jsonl
+    )
+fi
 
 EVAL_AND_LOGGING_ARGS=(
     --log-throughput

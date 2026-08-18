@@ -1,0 +1,381 @@
+# Copyright (c) 2026, HYGON-AI. All rights reserved.
+
+name: Nightly Test (HCU)
+
+on:
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      test_case:
+        description: Nightly case to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - pretrain
+          - sft
+
+concurrency:
+  group: nightly-test-hcu
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DAS_HCU_CI_RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+  DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+  DAS_HCU_ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+  DAS_QWEN3_8B_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+  DAS_QWEN3_PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+  DAS_QWEN3_SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+  DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+  DAS_HCU_CI_TMP_ROOT: /tmp/das-hcu-ci
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TOKENIZERS_PARALLELISM: "false"
+
+jobs:
+  plan:
+    name: Plan nightly cases
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      selected: ${{ steps.select.outputs.selected }}
+      run_pretrain: ${{ steps.select.outputs.run_pretrain }}
+      run_sft: ${{ steps.select.outputs.run_sft }}
+    steps:
+      - name: Select cases
+        id: select
+        shell: bash
+        env:
+          SELECTED_CASE: ${{ inputs.test_case || 'all' }}
+        run: |
+          set -euo pipefail
+
+          case "${SELECTED_CASE}" in
+            all)
+              run_pretrain=true
+              run_sft=true
+              ;;
+            pretrain)
+              run_pretrain=true
+              run_sft=false
+              ;;
+            sft)
+              run_pretrain=false
+              run_sft=true
+              ;;
+            *)
+              echo "ERROR: unsupported nightly case: ${SELECTED_CASE}" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "selected=${SELECTED_CASE}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_pretrain=${run_pretrain}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_sft=${run_sft}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Validate nightly configuration
+        shell: bash
+        env:
+          IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+          RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+          ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+          MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+          PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+          SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+          RUN_PRETRAIN: ${{ steps.select.outputs.run_pretrain }}
+          RUN_SFT: ${{ steps.select.outputs.run_sft }}
+        run: |
+          set -euo pipefail
+
+          [[ -n "${RUNNER_LABEL}" ]] || { echo "ERROR: DAS_HCU_CI_RUNNER_LABEL is not configured" >&2; exit 1; }
+          [[ "${IMAGE}" =~ @sha256:[0-9a-fA-F]{64}$ ]] || {
+            echo "ERROR: DAS_HCU_CI_IMAGE must use an immutable sha256 digest" >&2
+            exit 1
+          }
+
+          for value in "${ASSET_ROOT}" "${MODEL_PATH}"; do
+            [[ "${value}" == /* ]] || { echo "ERROR: nightly asset paths must be absolute" >&2; exit 1; }
+          done
+          [[ "${ASSET_ROOT}" != "/" ]] || { echo "ERROR: DAS_HCU_ASSET_ROOT cannot be /" >&2; exit 1; }
+          case "${MODEL_PATH}" in
+            "${ASSET_ROOT}"/*) ;;
+            *) echo "ERROR: DAS_QWEN3_8B_MODEL_PATH must be under DAS_HCU_ASSET_ROOT" >&2; exit 1 ;;
+          esac
+          if [[ "${RUN_PRETRAIN}" == "true" ]]; then
+            [[ "${PRETRAIN_DATA_PATH}" == /* ]] || { echo "ERROR: DAS_QWEN3_PRETRAIN_DATA_PATH must be an absolute dataset prefix" >&2; exit 1; }
+            case "${PRETRAIN_DATA_PATH}" in
+              "${ASSET_ROOT}"/*) ;;
+              *) echo "ERROR: DAS_QWEN3_PRETRAIN_DATA_PATH must be under DAS_HCU_ASSET_ROOT" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "${RUN_SFT}" == "true" ]]; then
+            [[ "${SFT_DATA_PATH}" == /* ]] || { echo "ERROR: DAS_QWEN3_SFT_DATA_PATH must be an absolute directory" >&2; exit 1; }
+            case "${SFT_DATA_PATH}" in
+              "${ASSET_ROOT}"/*) ;;
+              *) echo "ERROR: DAS_QWEN3_SFT_DATA_PATH must be under DAS_HCU_ASSET_ROOT" >&2; exit 1 ;;
+            esac
+          fi
+
+  restore-before-nightly:
+    name: Restore workspace before Nightly
+    needs:
+      - plan
+    if: needs.plan.result == 'success'
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 10
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore existing workspace ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace="$(realpath -m -- "${GITHUB_WORKSPACE}")"
+          runner_temp="$(realpath -m -- "${RUNNER_TEMP}")"
+          work_root="$(dirname -- "${runner_temp}")"
+          case "${workspace}" in
+            "${work_root}"/*/*) ;;
+            *) echo "ERROR: refusing to change ownership outside ${work_root}: ${workspace}" >&2; exit 1 ;;
+          esac
+
+          owner="$(stat -c '%u:%g' -- "${runner_temp}")"
+          [[ "${owner}" =~ ^[1-9][0-9]*:[0-9]+$ ]] || {
+            echo "ERROR: unsafe runner ownership: ${owner}" >&2
+            exit 1
+          }
+
+          docker run --rm \
+            --volume "${workspace}:/workspace" \
+            "${DAS_HCU_CI_IMAGE}" \
+            chown -R -- "${owner}" /workspace
+
+  pretrain:
+    name: Qwen3-8B pretrain (10 steps)
+    needs:
+      - plan
+      - restore-before-nightly
+    if: needs.plan.outputs.run_pretrain == 'true'
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 180
+    container:
+      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
+      options: >-
+        --privileged
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --cap-add=SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size=64g
+        --ipc=host
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+        - ${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:ro
+    env:
+      DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+      TOKENIZER_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+      CHECKPOINT_PATH: /tmp/das-hcu-ci/nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+      TRAINING_MODE: pretrain
+      TRAIN_ITERS: "10"
+      LOAD_HF_WEIGHTS: "true"
+      LAUNCH_BACKEND: torchrun
+      DIST_URL: localhost
+      DIST_PORT: "29500"
+      MASTER_ADDR: localhost
+      MASTER_PORT: "29500"
+      NNODES: "1"
+      NODE_RANK: "0"
+      GPUS_PER_NODE: "8"
+      DAS_HCU_CI_RUN_ID: nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_LOG_DIR: ci-logs/nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-pretrain
+      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
+      DTK_ENV: /opt/dtk/env.sh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          submodules: false
+          clean: true
+
+      - name: Install requirements
+        shell: bash
+        run: python3 -m pip install -r requirements/requirements.txt
+
+      - name: Run Qwen3-8B pretrain example
+        uses: ./.github/actions/run-test
+        with:
+          test_script: examples/qwen3/train_qwen3_8B.sh
+
+  restore-after-pretrain:
+    name: Restore workspace after pretrain
+    if: always() && needs.plan.outputs.run_pretrain == 'true' && needs.pretrain.result != 'skipped'
+    needs:
+      - plan
+      - pretrain
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 5
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore runner workspace ownership
+        shell: bash
+        run: bash tests/das/ci/restore_runner_permissions.sh
+
+  sft:
+    name: Qwen3-8B SFT (10 steps)
+    needs:
+      - plan
+      - restore-before-nightly
+      - restore-after-pretrain
+    if: >-
+      always()
+      && needs.plan.result == 'success'
+      && needs.plan.outputs.run_sft == 'true'
+      && needs.restore-before-nightly.result == 'success'
+      && (needs.restore-after-pretrain.result == 'success' || needs.restore-after-pretrain.result == 'skipped')
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 180
+    container:
+      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
+      options: >-
+        --privileged
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --cap-add=SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size=64g
+        --ipc=host
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+        - ${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:ro
+    env:
+      DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+      TOKENIZER_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+      CHECKPOINT_PATH: /tmp/das-hcu-ci/nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+      TRAINING_MODE: sft
+      TRAIN_ITERS: "10"
+      LOAD_HF_WEIGHTS: "true"
+      LAUNCH_BACKEND: torchrun
+      DIST_URL: localhost
+      DIST_PORT: "29501"
+      MASTER_ADDR: localhost
+      MASTER_PORT: "29501"
+      NNODES: "1"
+      NODE_RANK: "0"
+      GPUS_PER_NODE: "8"
+      DAS_HCU_CI_RUN_ID: nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_LOG_DIR: ci-logs/nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-sft
+      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
+      DTK_ENV: /opt/dtk/env.sh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          submodules: false
+          clean: true
+
+      - name: Install requirements
+        shell: bash
+        run: python3 -m pip install -r requirements/requirements.txt
+
+      - name: Run Qwen3-8B SFT example
+        uses: ./.github/actions/run-test
+        with:
+          test_script: examples/qwen3/train_qwen3_8B.sh
+
+  restore-after-sft:
+    name: Restore workspace after SFT
+    if: always() && needs.plan.outputs.run_sft == 'true' && needs.sft.result != 'skipped'
+    needs:
+      - plan
+      - sft
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 5
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore runner workspace ownership
+        shell: bash
+        run: bash tests/das/ci/restore_runner_permissions.sh
+
+  finish:
+    name: Finish
+    if: always()
+    needs:
+      - plan
+      - restore-before-nightly
+      - pretrain
+      - restore-after-pretrain
+      - sft
+      - restore-after-sft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate nightly jobs
+        shell: bash
+        env:
+          SELECTED_CASE: ${{ needs.plan.outputs.selected }}
+          RUN_PRETRAIN: ${{ needs.plan.outputs.run_pretrain }}
+          RUN_SFT: ${{ needs.plan.outputs.run_sft }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          RESTORE_BEFORE_RESULT: ${{ needs.restore-before-nightly.result }}
+          PRETRAIN_RESULT: ${{ needs.pretrain.result }}
+          RESTORE_PRETRAIN_RESULT: ${{ needs.restore-after-pretrain.result }}
+          SFT_RESULT: ${{ needs.sft.result }}
+          RESTORE_SFT_RESULT: ${{ needs.restore-after-sft.result }}
+        run: |
+          set -euo pipefail
+          [[ "${PLAN_RESULT}" == "success" ]]
+          [[ "${RESTORE_BEFORE_RESULT}" == "success" ]]
+
+          if [[ "${RUN_PRETRAIN}" == "true" ]]; then
+            [[ "${PRETRAIN_RESULT}" == "success" ]]
+            [[ "${RESTORE_PRETRAIN_RESULT}" == "success" ]]
+          else
+            [[ "${PRETRAIN_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_PRETRAIN_RESULT}" == "skipped" ]]
+          fi
+
+          if [[ "${RUN_SFT}" == "true" ]]; then
+            [[ "${SFT_RESULT}" == "success" ]]
+            [[ "${RESTORE_SFT_RESULT}" == "success" ]]
+          else
+            [[ "${SFT_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_SFT_RESULT}" == "skipped" ]]
+          fi
+
+          {
+            echo "## HCU Nightly"
+            echo
+            echo "- selected cases: ${SELECTED_CASE}"
+            echo "- Qwen3-8B pretrain: ${PRETRAIN_RESULT}"
+            echo "- Qwen3-8B SFT: ${SFT_RESULT}"
+          } >> "${GITHUB_STEP_SUMMARY}"
