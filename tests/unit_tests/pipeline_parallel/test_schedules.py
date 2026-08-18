@@ -1,5 +1,5 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
 import sys

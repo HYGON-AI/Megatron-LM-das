@@ -1,5 +1,9 @@
 # Some of this code was adopted from https://github.com/AMD-AGI/Primus
-
+###############################################################################
+# Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+###############################################################################
 from typing import Tuple
 
 import torch
