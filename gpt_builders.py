@@ -1,4 +1,5 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from megatron.core import parallel_state
 from megatron.core.models.gpt import GPTModel

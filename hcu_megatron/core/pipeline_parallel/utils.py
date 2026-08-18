@@ -1,4 +1,5 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 from typing import Callable, Optional
 

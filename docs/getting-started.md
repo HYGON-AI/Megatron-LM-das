@@ -14,7 +14,7 @@
 
 1. 拉取镜像
 
-    `docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10`
+    `docker pull images:tgs`
     
     python3.10需要用 `from typing_extensions import override` 替换掉 `from typing import override`
 
@@ -36,7 +36,7 @@
         -v /opt/hyhal:/opt/hyhal:ro \
         -v /root/.ssh:/root/.ssh:ro \
         -v /path/to/workspace:/path/to/workspace \
-        harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10 \
+        images:tgs \
         /bin/bash
     ```
 3. 拉取Megatron-LM-das源码
@@ -203,7 +203,7 @@
 
 1. 拉取镜像
 
-    `docker pull harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10`
+    `docker pull images:tgs`
 
 2. 启动容器
     ```bash
@@ -223,7 +223,7 @@
         -v /opt/hyhal:/opt/hyhal:ro \
         -v /root/.ssh:/root/.ssh:ro \
         -v /path/to/workspace:/path/to/workspace \
-        harbor.sourcefind.cn:5443/dcu/admin/base/custom:pytorch2.9.0-ubuntu22.04-dtk26.04-py3.10_te2.10 \
+        images:tgs \
         /bin/bash
     ```
 3. 拉取Megatron-LM-das源码

@@ -1,4 +1,5 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Some of this code was adopted from https://github.com/MayDomine/Seq1F1B/
 
 import contextlib

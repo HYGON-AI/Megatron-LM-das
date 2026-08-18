@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import torch
 from megatron.core import mpu

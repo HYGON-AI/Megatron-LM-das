@@ -1,4 +1,5 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
 # This code was adopted from https://github.com/sail-sg/VocabularyParallelism
 from megatron.core import mpu
 from megatron.training import get_args

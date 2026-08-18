@@ -1,4 +1,5 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import torch
 

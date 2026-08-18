@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2024. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import sys
 from copy import deepcopy
 from functools import wraps
