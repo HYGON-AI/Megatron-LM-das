@@ -1,0 +1,676 @@
+# Copyright (c) 2026, HYGON-AI. All rights reserved.
+#
+# PR Test (HCU): combined PR and nightly pipeline, structurally aligned with the upstream
+# NVIDIA/Megatron-LM cicd-main.yml (trigger -> authorize/classify -> configure ->
+# test matrix -> aggregation gate), with runtime details following HYGON verl-das
+# conventions (HCU containers, authorization, workspace restore, aggregation).
+#
+# Triggers:
+#   - pull_request_target on core_v0.18.2 (all tests/unit_tests)
+#   - schedule: daily 19:00 UTC (nightly)
+#   - workflow_dispatch (test_case: pr | nightly | unit-only)
+#
+# Security model (aligned with HYGON-AI/verl-das e1d01629):
+#   - pull_request_target keeps workflow control on the default branch while
+#     every checkout uses the PR's exact head repository and head SHA;
+#   - same-repository and fork PRs are accepted. The HCU runner must therefore
+#     be a dedicated isolated CI machine;
+#   - control-plane jobs (authorize/check-changes/configure/lint/validate/finish)
+#     run on GitHub-hosted ubuntu-latest, never on self-hosted runners;
+#   - workflow permissions are read-only and no repository secret is passed to
+#     PR test jobs;
+#   - GPU job runner labels are injected purely via vars (no hardcoded hosts).
+#
+# Config surface (repo vars, see .github/CI-README.md):
+#   DAS_HCU_CI_RUNNER_LABEL  self-hosted runner label (e.g. hcu-ci)
+#   DAS_HCU_CI_IMAGE         test container image (HCU env), must be digest-pinned
+#   DAS_HCU_ASSET_ROOT       read-only runner path containing Qwen3-8B and datasets
+#   DAS_QWEN3_8B_MODEL_PATH  optional exact model path below the asset root
+#   DAS_QWEN3_PRETRAIN_DATA_PATH optional exact .bin/.idx prefix
+#   DAS_QWEN3_SFT_DATA_PATH  optional exact directory with train/valid.jsonl
+#   DAS_HCU_MEGATRON_WHEEL   optional hcu-megatron wheel path/URL
+
+name: PR Test (HCU)
+
+on:
+  pull_request_target:
+    branches:
+      - core_v0.18.2
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  schedule:
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      test_case:
+        description: Test case to run
+        required: true
+        default: pr
+        type: choice
+        options:
+          - pr
+          - nightly
+          - unit-only
+
+concurrency:
+  group: pr-test-hcu-megatron-lm-das-${{ github.event_name == 'schedule' && 'nightly' || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+permissions:
+  contents: read
+  issues: read
+
+env:
+  DAS_HCU_CI_RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+  DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+  DAS_HCU_ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+  DAS_QWEN3_8B_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+  DAS_QWEN3_PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+  DAS_QWEN3_SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+  DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+
+jobs:
+  # --------------------------------------------------------------- authorize
+  # Trust boundary: both same-repository and fork PRs may execute on the
+  # dedicated isolated HCU runner, matching verl-das.
+  authorize:
+    name: Authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Authorize PR source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
+            echo "HCU execution authorized for ${HEAD_REPOSITORY} targeting ${BASE_REPOSITORY}."
+          else
+            echo "${EVENT_NAME} run authorized."
+          fi
+
+  # ----------------------------------------------------------- check-changes
+  # Change classification: tests run by default (runtime=true) and are skipped
+  # only when every changed path hits the docs-only whitelist. schedule/dispatch force full.
+  check-changes:
+    name: Check changes
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      runtime: ${{ steps.resolve.outputs.runtime }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Classify changed paths (docs-only whitelist)
+        id: changes
+        if: github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${BASE_SHA}" ]]; then
+            BASE_SHA="$(git rev-parse "${HEAD_SHA}^")"
+          else
+            # The PR head can come from a fork that does not carry the latest
+            # base branch objects. Fetch the base repository explicitly and
+            # classify only the PR-side changes from the true merge base.
+            git remote remove ci-base 2>/dev/null || true
+            git remote add ci-base "https://github.com/${BASE_REPOSITORY}.git"
+            git fetch --no-tags ci-base \
+              "+refs/heads/${BASE_REF}:refs/remotes/ci-base/${BASE_REF}"
+            git cat-file -e "${BASE_SHA}^{commit}"
+          fi
+
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
+          if [[ -z "${MERGE_BASE}" ]]; then
+            echo "ERROR: no merge base between ${BASE_SHA} and ${HEAD_SHA}" >&2
+            exit 1
+          fi
+
+          # default: run tests unless all changes are docs-only
+          runtime=true
+          non_docs=false
+          while IFS= read -r path; do
+            [[ -z "${path}" ]] && continue
+            case "${path}" in
+              docs/*|*.md|.github/CI-README.md) ;;
+              *) non_docs=true ;;
+            esac
+          done < <(git diff --name-only "${MERGE_BASE}" "${HEAD_SHA}")
+
+          if [[ "${non_docs}" == "false" ]]; then
+            runtime=false
+            echo "docs-only change; tests skipped."
+          fi
+
+          echo "runtime=${runtime}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Force full runtime on schedule / dispatch
+        id: changes-force
+        if: github.event_name != 'pull_request_target'
+        run: echo "runtime=true" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Resolve runtime flag
+        id: resolve
+        shell: bash
+        env:
+          PR_RUNTIME: ${{ steps.changes.outputs.runtime }}
+          FORCE_RUNTIME: ${{ steps.changes-force.outputs.runtime }}
+        run: |
+          if [[ "${FORCE_RUNTIME}" == "true" || "${PR_RUNTIME}" == "true" ]]; then
+            echo "runtime=true" | tee -a "${GITHUB_OUTPUT}"
+          else
+            echo "runtime=false" | tee -a "${GITHUB_OUTPUT}"
+          fi
+
+  # --------------------------------------------------------------- configure
+  # Decision center (mirrors upstream configure): scope/cadence driven by the
+  # trigger. PR runs cover tests/unit_tests only; real-data Qwen3-8B pretrain
+  # and SFT are restricted to schedule / dispatch(nightly).
+  configure:
+    name: Configure
+    needs:
+      - authorize
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      scope: ${{ steps.configure.outputs.scope }}
+      cadence: ${{ steps.configure.outputs.cadence }}
+      run_unit: ${{ steps.configure.outputs.run_unit }}
+      run_nightly: ${{ steps.configure.outputs.run_nightly }}
+      nightly_iters: ${{ steps.configure.outputs.nightly_iters }}
+      n_repeat: ${{ steps.configure.outputs.n_repeat }}
+    steps:
+      - name: Configure
+        id: configure
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TEST_CASE: ${{ inputs.test_case || '' }}
+        run: |
+          set -euo pipefail
+
+          SCOPE=L0
+          CADENCE=pr
+          RUN_UNIT=true
+          RUN_NIGHTLY=false
+          NIGHTLY_ITERS=5
+          N_REPEAT=1
+
+          if [[ "${EVENT_NAME}" == "schedule" ]] || [[ "${TEST_CASE}" == "nightly" ]]; then
+            SCOPE=L1
+            CADENCE=nightly
+            RUN_NIGHTLY=true
+          elif [[ "${TEST_CASE}" == "unit-only" ]]; then
+            SCOPE=L0
+            CADENCE=pr
+            RUN_NIGHTLY=false
+          fi
+
+          echo "scope=${SCOPE}" | tee -a "${GITHUB_OUTPUT}"
+          echo "cadence=${CADENCE}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_unit=${RUN_UNIT}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_nightly=${RUN_NIGHTLY}" | tee -a "${GITHUB_OUTPUT}"
+          echo "nightly_iters=${NIGHTLY_ITERS}" | tee -a "${GITHUB_OUTPUT}"
+          echo "n_repeat=${N_REPEAT}" | tee -a "${GITHUB_OUTPUT}"
+
+          cat <<SUMMARY >> "${GITHUB_STEP_SUMMARY}"
+          ## CI decisions
+
+          | Setting | Value |
+          |---|---|
+          | scope | \`${SCOPE}\` |
+          | cadence | \`${CADENCE}\` |
+          | run_unit | \`${RUN_UNIT}\` |
+          | run_nightly | \`${RUN_NIGHTLY}\` |
+          | nightly_iters | \`${NIGHTLY_ITERS}\` |
+          | n_repeat | \`${N_REPEAT}\` |
+          SUMMARY
+
+  # ----------------------------------------------------------------- linting
+  # Lightweight static checks (GitHub-hosted, no self-hosted runner needed):
+  # bash syntax + python bytecode compile.
+  linting:
+    name: Linting
+    needs:
+      - authorize
+      - check-changes
+    if: needs.check-changes.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: false
+
+      - name: Bash syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          for script in tests/das/**/*.sh tests/unit_tests/run_ci_test.sh; do
+            if [[ -f "${script}" ]]; then
+              bash -n "${script}"
+            fi
+          done
+          echo "bash syntax OK"
+
+      - name: Python compile check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m compileall -q hcu_megatron tests/das
+          echo "python compile OK"
+
+  # --------------------------------------------------------- validate-config
+  # Validate repo config (GitHub-hosted): fail fast with guidance when vars
+  # are missing, independent of runner availability.
+  validate-config:
+    name: Validate HCU config
+    needs:
+      - authorize
+      - check-changes
+      - configure
+    if: needs.check-changes.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate repository variables
+        shell: bash
+        env:
+          IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+          RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+          RUN_NIGHTLY: ${{ needs.configure.outputs.run_nightly }}
+          ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${RUNNER_LABEL}" ]]; then
+            echo "❌ DAS_HCU_CI_RUNNER_LABEL is not configured" >&2
+            echo "   -> configure it in repo Settings -> Secrets and variables -> Actions -> Variables" >&2
+            exit 1
+          fi
+          if [[ -z "${IMAGE}" ]]; then
+            echo "❌ DAS_HCU_CI_IMAGE is not configured" >&2
+            echo "   -> configure it in repo Settings -> Secrets and variables -> Actions -> Variables" >&2
+            exit 1
+          fi
+          # image must be digest-pinned (same policy as verl-das)
+          if ! [[ "${IMAGE}" =~ .+@sha256:[0-9a-fA-F]{64}$ ]]; then
+            echo "❌ DAS_HCU_CI_IMAGE must be pinned with @sha256:<64 hex digits>" >&2
+            echo "   current value: ${IMAGE}" >&2
+            exit 1
+          fi
+          if [[ "${RUN_NIGHTLY}" == "true" ]]; then
+            if [[ -z "${ASSET_ROOT}" ]]; then
+              echo "❌ DAS_HCU_ASSET_ROOT is required for nightly runs" >&2
+              exit 1
+            fi
+            if [[ "${ASSET_ROOT}" != /* ]]; then
+              echo "❌ DAS_HCU_ASSET_ROOT must be an absolute runner path" >&2
+              exit 1
+            fi
+          fi
+
+          ASSETS_CONFIGURED=false
+          if [[ -n "${ASSET_ROOT}" ]]; then
+            ASSETS_CONFIGURED=true
+          fi
+
+          echo "✅ HCU config validated"
+          {
+            echo "## HCU config validation"
+            echo
+            echo "- runner label: \`${RUNNER_LABEL}\`"
+            echo "- image: \`${IMAGE%%@*}\`@sha256:***(digest pinned)***"
+            echo "- nightly assets configured: \`${ASSETS_CONFIGURED}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # ---------------------------------------------------- restore-before-unit
+  # A cancelled/failed container job can leave root-owned files behind. Restore
+  # the dedicated runner workspace before the next checkout; post-test restore
+  # jobs remain as a second line of defense.
+  restore-before-unit:
+    name: Restore workspace before unit tests
+    needs:
+      - check-changes
+      - configure
+      - validate-config
+    if: |
+      needs.check-changes.outputs.runtime == 'true'
+      && needs.configure.outputs.run_unit == 'true'
+      && needs.validate-config.result == 'success'
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 10
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore existing workspace ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          workspace="$(realpath -m -- "${GITHUB_WORKSPACE}")"
+          runner_temp="$(realpath -m -- "${RUNNER_TEMP}")"
+          work_root="$(dirname -- "${runner_temp}")"
+
+          case "${workspace}" in
+            "${work_root}"/*/*) ;;
+            *)
+              echo "ERROR: refusing to change ownership outside ${work_root}: ${workspace}" >&2
+              exit 1
+              ;;
+          esac
+
+          owner="$(stat -c '%u:%g' -- "${runner_temp}")"
+          if [[ ! "${owner}" =~ ^[1-9][0-9]*:[0-9]+$ ]]; then
+            echo "ERROR: unsafe runner ownership: ${owner}" >&2
+            exit 1
+          fi
+          if [[ ! "${DAS_HCU_CI_IMAGE}" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+            echo "ERROR: DAS_HCU_CI_IMAGE must use an immutable sha256 digest" >&2
+            exit 1
+          fi
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "ERROR: Docker is required to restore runner workspace ownership" >&2
+            exit 1
+          fi
+
+          docker run --rm \
+            --volume "${workspace}:/workspace" \
+            "${DAS_HCU_CI_IMAGE}" \
+            chown -R -- "${owner}" /workspace
+          echo "Restored ${workspace} ownership to ${owner}."
+
+  # -------------------------------------------------------------- unit-tests
+  # PR gate: run the complete repository-owned tests/unit_tests suite.
+  unit-tests:
+    name: Unit tests
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+      - linting
+      - restore-before-unit
+    if: |
+      needs.check-changes.outputs.runtime == 'true'
+      && needs.configure.outputs.run_unit == 'true'
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 60
+    container:
+      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
+      options: >-
+        --privileged
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --cap-add=SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size=64g
+        --ipc=host
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+    env:
+      DAS_HCU_CI_RUN_ID: unit-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_LOG_DIR: ci-logs/unit-${{ github.run_id }}-${{ github.run_attempt }}
+      DAS_HCU_CI_ARTIFACT_NAME: das-unit-tests
+      DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+      BUCKET: tests/unit_tests
+      N_REPEAT: ${{ needs.configure.outputs.n_repeat }}
+      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
+      DTK_ENV: /opt/dtk/env.sh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          submodules: false
+          clean: true
+
+      - name: Run unit tests
+        uses: ./.github/actions/run-test
+        with:
+          test_script: tests/das/pr/run_unit_tests.sh
+
+  # --------------------------------------------------------- restore-after-unit
+  # Restore runner workspace ownership after root-in-container writes.
+  restore-after-unit:
+    name: Restore workspace after unit tests
+    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.configure.outputs.run_unit == 'true' && needs.unit-tests.result != 'skipped'
+    needs:
+      - check-changes
+      - configure
+      - unit-tests
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 5
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore runner workspace ownership
+        shell: bash
+        run: bash tests/das/ci/restore_runner_permissions.sh
+
+  # ------------------------------------------------------- nightly-qwen3-8b
+  # Nightly only: load real Qwen3-8B weights and run both pretrain and SFT.
+  nightly-qwen3-8b:
+    name: Nightly Qwen3-8B pretrain and SFT
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+      - linting
+      - restore-before-unit
+      - unit-tests
+      - restore-after-unit
+    if: |
+      needs.check-changes.outputs.runtime == 'true'
+      && needs.configure.outputs.run_nightly == 'true'
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 240
+    container:
+      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
+      options: >-
+        --privileged
+        --device=/dev/kfd
+        --device=/dev/mkfd
+        --device=/dev/dri
+        --group-add video
+        --cap-add=SYS_PTRACE
+        --security-opt seccomp=unconfined
+        --shm-size=64g
+        --ipc=host
+      volumes:
+        - /opt/hyhal:/opt/hyhal:ro
+        - ${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:ro
+    env:
+      DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
+      DAS_HCU_ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+      DAS_QWEN3_8B_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+      DAS_QWEN3_PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+      DAS_QWEN3_SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+      DAS_QWEN3_TRAIN_ITERS: ${{ needs.configure.outputs.nightly_iters }}
+      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
+      DTK_ENV: /opt/dtk/env.sh
+    steps:
+      - name: Checkout repository
+        id: nightly_checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          submodules: false
+          clean: true
+
+      - name: Run Qwen3-8B pretrain
+        env:
+          NIGHTLY_MODE: pretrain
+          MASTER_PORT: "29500"
+          DAS_HCU_CI_RUN_ID: nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_LOG_DIR: ci-logs/nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-pretrain
+        uses: ./.github/actions/run-test
+        with:
+          test_script: tests/das/nightly/run_qwen3_8b.sh
+
+      - name: Run Qwen3-8B SFT
+        if: always() && steps.nightly_checkout.outcome == 'success'
+        env:
+          NIGHTLY_MODE: sft
+          MASTER_PORT: "29501"
+          DAS_HCU_CI_RUN_ID: nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_LOG_DIR: ci-logs/nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-sft
+        uses: ./.github/actions/run-test
+        with:
+          test_script: tests/das/nightly/run_qwen3_8b.sh
+
+  # ------------------------------------------------------ restore-after-nightly
+  restore-after-nightly:
+    name: Restore workspace after nightly tests
+    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.configure.outputs.run_nightly == 'true' && needs.nightly-qwen3-8b.result != 'skipped'
+    needs:
+      - check-changes
+      - configure
+      - nightly-qwen3-8b
+    runs-on:
+      - self-hosted
+      - hcu
+      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+    timeout-minutes: 5
+    env:
+      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
+    steps:
+      - name: Restore runner workspace ownership
+        shell: bash
+        run: bash tests/das/ci/restore_runner_permissions.sh
+
+  # ------------------------------------------------------------------- finish
+  # Aggregation gate (GitHub-hosted, mirrors upstream Nemo_CICD_Test + verl finish):
+  # verifies job conclusions per cadence/scope and prints the CI summary.
+  finish:
+    name: Finish
+    if: always()
+    needs:
+      - authorize
+      - check-changes
+      - configure
+      - validate-config
+      - linting
+      - restore-before-unit
+      - unit-tests
+      - restore-after-unit
+      - nightly-qwen3-8b
+      - restore-after-nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate required jobs
+        shell: bash
+        env:
+          RUNTIME_CHANGED: ${{ needs.check-changes.outputs.runtime }}
+          RUN_UNIT: ${{ needs.configure.outputs.run_unit }}
+          RUN_NIGHTLY: ${{ needs.configure.outputs.run_nightly }}
+          CADENCE: ${{ needs.configure.outputs.cadence }}
+          SCOPE: ${{ needs.configure.outputs.scope }}
+          AUTH_RESULT: ${{ needs.authorize.result }}
+          CHECK_RESULT: ${{ needs.check-changes.result }}
+          CONFIG_RESULT: ${{ needs.configure.result }}
+          VALIDATE_RESULT: ${{ needs.validate-config.result }}
+          LINT_RESULT: ${{ needs.linting.result }}
+          RESTORE_BEFORE_UNIT_RESULT: ${{ needs.restore-before-unit.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          RESTORE_UNIT_RESULT: ${{ needs.restore-after-unit.result }}
+          NIGHTLY_RESULT: ${{ needs.nightly-qwen3-8b.result }}
+          RESTORE_NIGHTLY_RESULT: ${{ needs.restore-after-nightly.result }}
+        run: |
+          set -euo pipefail
+
+          [[ "${AUTH_RESULT}" == "success" ]]
+          [[ "${CHECK_RESULT}" == "success" ]]
+          [[ "${CONFIG_RESULT}" == "success" ]]
+
+          if [[ "${RUNTIME_CHANGED}" == "true" ]]; then
+            [[ "${VALIDATE_RESULT}" == "success" ]]
+            [[ "${LINT_RESULT}" == "success" ]]
+            if [[ "${RUN_UNIT}" == "true" ]]; then
+              [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "success" ]]
+              [[ "${UNIT_RESULT}" == "success" ]]
+              [[ "${RESTORE_UNIT_RESULT}" == "success" ]]
+            else
+              [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "skipped" ]]
+              [[ "${UNIT_RESULT}" == "skipped" ]]
+              [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
+            fi
+            if [[ "${RUN_NIGHTLY}" == "true" ]]; then
+              [[ "${NIGHTLY_RESULT}" == "success" ]]
+              [[ "${RESTORE_NIGHTLY_RESULT}" == "success" ]]
+            else
+              [[ "${NIGHTLY_RESULT}" == "skipped" ]]
+              [[ "${RESTORE_NIGHTLY_RESULT}" == "skipped" ]]
+            fi
+          else
+            [[ "${VALIDATE_RESULT}" == "skipped" ]]
+            [[ "${LINT_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "skipped" ]]
+            [[ "${UNIT_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
+            [[ "${NIGHTLY_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_NIGHTLY_RESULT}" == "skipped" ]]
+          fi
+
+          {
+            echo "## Megatron-LM-das CI result"
+            echo
+            echo "- runtime changed: ${RUNTIME_CHANGED}"
+            echo "- scope: ${SCOPE} / cadence: ${CADENCE}"
+            echo "- authorization: ${AUTH_RESULT}"
+            echo "- change classification: ${CHECK_RESULT}"
+            echo "- configure: ${CONFIG_RESULT}"
+            echo "- config validation: ${VALIDATE_RESULT}"
+            echo "- linting: ${LINT_RESULT}"
+            echo "- restore before unit tests: ${RESTORE_BEFORE_UNIT_RESULT}"
+            echo "- unit tests: ${UNIT_RESULT}"
+            echo "- restore after unit tests: ${RESTORE_UNIT_RESULT}"
+            echo "- Qwen3-8B nightly: ${NIGHTLY_RESULT}"
+            echo "- restore after nightly: ${RESTORE_NIGHTLY_RESULT}"
+          } >> "${GITHUB_STEP_SUMMARY}"

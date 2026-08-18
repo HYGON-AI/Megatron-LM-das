@@ -35,7 +35,13 @@ RUN wget -q "${AICC_URL}" -O /tmp/aicc.run && \
 # ---layer---
 RUN TORCH_VERSION=2.10.0 \
     && TORCH_TAG="torch${TORCH_VERSION//./}" \
-    && pip install --no-cache-dir torch==${TORCH_VERSION} torchvision \
+    && pip install --no-cache-dir \
+        --extra-index-url https://mirrors.aliyun.com/pypi/simple/ \
+        --trusted-host mirrors.aliyun.com \
+        torch==${TORCH_VERSION} \
+        torchvision \
+        pytest-mock==3.14.0 \
+        coverage==7.6.1 \
     && das-install apex ${TORCH_TAG} \
     && das-install deepspeed ${TORCH_TAG} \
     && das-install transformer-engine ${TORCH_TAG} \
