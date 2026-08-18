@@ -8,7 +8,6 @@ from typing import Any, Callable, Literal, Optional
 import torch
 from torch import Tensor
 
-from megatron.training import get_args
 from megatron.core import tensor_parallel
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.extensions.transformer_engine import TELMHeadColumnParallelLinear
@@ -46,6 +45,7 @@ from megatron.core.utils import (
 from hcu_megatron.core.transformer.transformer_block import TransformerBlock
 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
 from hcu_megatron.core.tensor_parallel import VocabParallelOutput
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def gpt_model_postprocess(
@@ -182,7 +182,7 @@ def gpt_model_postprocess(
             reshaped = hidden_states.squeeze(1).unsqueeze(0)
             hidden_states = inference_context.last_token_logits(reshaped).unsqueeze(1)
 
-    if get_args().enable_vocab_parallel:
+    if get_adaptor_args().enable_vocab_parallel:
         assert labels is not None, "not supported yet"
         labels = labels.transpose(0, 1).contiguous()
         loss, _ = self.output_layer(hidden_states, weight=output_weight, labels=labels)
@@ -283,7 +283,7 @@ class GPTModel:
             or ((not self.pre_process) and self.split_vocab_embedding)
         )
 
-        args = get_args()
+        args = get_adaptor_args()
         self.dualpipev_first_chunk = getattr(args, 'dualpipev_first_chunk', True)
 
         if hasattr(self.config, 'position_embedding_type'):
@@ -399,7 +399,7 @@ class GPTModel:
             vp_stage=vp_stage,
             noop_block=self.noop_block,
             force_layer_norm=self.include_layer_norm,
-            post_layer_norm=not get_args().enable_vocab_parallel,
+            post_layer_norm=not get_adaptor_args().enable_vocab_parallel,
         )
 
         if self.mtp_process:
@@ -506,7 +506,7 @@ class GPTModel:
 
     def preprocess_for_fine_grained_offloading(self):
         """Preprocess for fine-grained activation offloading."""
-        if get_args().schedule_method == "dualpipev":
+        if get_adaptor_args().schedule_method == "dualpipev":
             off_interface.init_chunk_handler(
                 getattr(self, 'dualpipev_first_chunk', True),
                 min_offloaded_tensor_size=self.config.min_offloaded_tensor_size,
@@ -536,7 +536,7 @@ class GPTModel:
         Returns:
             Tensor: When dualpipe is enabled, return the weights from dual_chunk, otherwise follow the original logic.
         """
-        if not self.pre_process and self.post_process and get_args().schedule_method == 'dualpipev':
+        if not self.pre_process and self.post_process and get_adaptor_args().schedule_method == 'dualpipev':
             return get_shared_embedding_from_dual_chunk()
 
         if self.has_vocab_embedding or getattr(self, 'mtp_process', False):
@@ -650,7 +650,7 @@ class GPTModel:
 
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
-        args = get_args()
+        args = get_adaptor_args()
         in_inference_mode = InferenceMode.is_active()
 
         # Decoder embedding.

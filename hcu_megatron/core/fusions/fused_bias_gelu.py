@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import torch
 
 
-@torch.compile(fullgraph=True)
-def fused_bias_gelu(
+def fused_bias_gelu_impl(
     self,
     intermediate_parallel, 
     permuted_probs,
@@ -38,3 +38,10 @@ def fused_bias_gelu(
     intermediate_parallel = intermediate_parallel.to(original_dtype)
 
     return intermediate_parallel
+
+
+if bool(int(os.getenv("UNIT_TEST_MODE", "0"))):
+    # FailOnRecompileLimitHit error will be raised if torch.compile is used
+    fused_bias_gelu = fused_bias_gelu_impl
+else:
+    fused_bias_gelu = torch.compile(fullgraph=True)(fused_bias_gelu_impl)

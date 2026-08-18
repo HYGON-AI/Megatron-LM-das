@@ -33,7 +33,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 from megatron.core.typed_torch import copy_signature
 from megatron.core.utils import is_te_min_version
-from megatron.training import get_args
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -63,6 +62,7 @@ from hcu_megatron.core.tensor_parallel.layers import (
 )
 from hcu_megatron.core.transformer.hyper_connection import HyperConnectionModule
 from hcu_megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def get_gpt_layer_with_flux_submodules(
@@ -536,7 +536,7 @@ def get_gpt_decoder_layer_specs(
     """GPT block spec."""
 
     if use_transformer_engine:
-        if get_args().parallel_linear_impl == 'flux':
+        if get_adaptor_args().parallel_linear_impl == 'flux':
             gpt_layer_spec_clz = get_gpt_layer_with_flux_spec
         else:
             gpt_layer_spec_clz = get_gpt_layer_with_transformer_engine_spec

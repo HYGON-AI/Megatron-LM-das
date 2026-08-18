@@ -309,3 +309,46 @@ def _print_env_vars(title, exclude_vars=None):
         for arg in sorted(str_list, key=lambda x: x.lower()):
             print(arg, flush=True)
         print(f'-------------------- end of {title} ---------------------', flush=True)
+
+
+_ADAPTOR_ARGS = None
+
+def add_args(args, key, value):
+    if key is not None:
+        key = key[2:].replace('-', '_')
+        if value is None:
+            value = True
+        elif len(value) == 1:
+            value = value[0]
+        setattr(args, key, value)
+
+
+def parser_unknown_args(args, unknown):
+    i = 0
+    key = value = None
+    while i < len(unknown):
+        if unknown[i].startswith("--"):
+            add_args(args, key, value)
+            key = unknown[i]
+            value = None
+        else:
+            if value is None:
+                value = [unknown[i]]
+            else:
+                value.append(unknown[i])
+        i += 1
+    add_args(args, key, value)
+
+
+def get_adaptor_args():
+    global _ADAPTOR_ARGS
+    if _ADAPTOR_ARGS is None:
+        parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
+        _ADAPTOR_ARGS, unknown = process_adaptor_args(parser).parse_known_args()
+        parser_unknown_args(_ADAPTOR_ARGS, unknown)
+    return _ADAPTOR_ARGS
+
+
+def destroy_adaptor_args():
+    global _ADAPTOR_ARGS
+    _ADAPTOR_ARGS = None

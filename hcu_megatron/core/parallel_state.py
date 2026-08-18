@@ -11,13 +11,15 @@ from typing import Callable, List, Optional
 import torch
 import torch.distributed
 
-from megatron.training import get_args, print_rank_0
+from megatron.training import print_rank_0
 from megatron.core.utils import is_torch_min_version
 from megatron.core import parallel_state
 from megatron.core.parallel_state import (
     RankGenerator,
     overwrite_nccl_comm_cfgs,
 )
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 PARALLEL_GROUP_RANKS_MAP = defaultdict(list)
@@ -62,7 +64,7 @@ def get_nccl_options(pg_name, nccl_comm_cfgs):
     When an option (e.g., max_ctas) is not found in the config, use the NCCL default setting.
     """
     nccl_options = None
-    if get_args().enable_vocab_parallel:
+    if get_adaptor_args().enable_vocab_parallel:
         nccl_options = torch.distributed.ProcessGroupNCCL.Options()
     if pg_name in nccl_comm_cfgs:
         # When fields in nccl_options.config are not specified, NCCL applies default settings.
@@ -88,7 +90,7 @@ def get_nccl_options(pg_name, nccl_comm_cfgs):
                     f"Accepted values: 'IB' or 'socket'."
                 )
 
-    if get_args().enable_vocab_parallel and pg_name == "pp":
+    if get_adaptor_args().enable_vocab_parallel and pg_name == "pp":
         nccl_options.is_high_priority_stream = True
     return nccl_options
 
@@ -175,11 +177,11 @@ def get_train_iter():
 def log_timing_wrapper(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        megatron_args = get_args()
+        adaptor_args = get_adaptor_args()
         log_time = (
-            megatron_args.comm_time_log_iter is not None
+            adaptor_args.comm_time_log_iter is not None
             and get_train_iter() is not None
-            and get_train_iter() == megatron_args.comm_time_log_iter
+            and get_train_iter() == adaptor_args.comm_time_log_iter
         )
 
         if log_time:
@@ -284,7 +286,7 @@ def initialize_model_parallel_wrapper(fn):
             local_world_size=local_world_size,
         )
 
-        if get_args().enable_vocab_parallel:
+        if get_adaptor_args().enable_vocab_parallel:
             global _LM_HEAD_MODEL_PARALLEL_GROUP
             assert _LM_HEAD_MODEL_PARALLEL_GROUP is None, 'lm head model parallel group is already initialized'
 

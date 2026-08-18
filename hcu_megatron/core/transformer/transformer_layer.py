@@ -31,6 +31,7 @@ from megatron.core.utils import (
     nvtx_range_push,
 )
 from hcu_megatron.core.tensor_parallel.random import CheckpointManager
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 @functools.lru_cache(maxsize=None)
@@ -47,7 +48,7 @@ def get_transformer_layer_offset(
     config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
 ):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
-    args = get_args()
+    args = get_adaptor_args()
     pipeline_size = parallel_state.get_pipeline_model_parallel_world_size()
 
     if pp_rank is None:

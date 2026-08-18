@@ -2,7 +2,6 @@ from enum import IntEnum
 
 import torch
 from numpy import mean
-from megatron.training import print_rank_0
 
 from .adaptive_memory_tool import SingletonBase, CpuTensorCache
 from .adaptive_memory_tool import FuncLocationMgr, broadcast_obj
@@ -208,7 +207,6 @@ class SwapManager(metaclass=SingletonBase):
         if is_mark_first_layer:
             FuncLocationMgr().is_first_layer = False
 
-
     def h2d(self, layer_module):
         if not hasattr(layer_module, 'microbatch_swap_tensors_queue'):
             return
@@ -325,34 +323,6 @@ class SwapManager(metaclass=SingletonBase):
             if wt.is_allowed_oom_rescue_swap and wt.tensor.is_contiguous():
                 return True
         return False
-
-    def swap_out_by_size(self, size):
-        print_rank_0("Need size %d (%fMB)" % (size, size / 1024 / 1024))
-        if not self.is_exist_tensor_allowed_swap():
-            return False
-        swap_size = 0
-        swap_num = 0
-        only_swap_contiguous_tensor = self.is_exist_tensor_contiguous()
-        device_tensors = list(self.oom_rescue_device_tensors.keys())
-        for wrapped_tensor in device_tensors:
-            if swap_size >= size:
-                break
-            if not wrapped_tensor.is_allowed_oom_rescue_swap:
-                continue
-            if only_swap_contiguous_tensor and not wrapped_tensor.tensor.is_contiguous():
-                continue
-
-            storage_size, moved_tensor_count = self.move_storage_out(wrapped_tensor)
-            swap_size += storage_size
-            swap_num += moved_tensor_count
-
-        if swap_size != 0:
-            print_rank_0("swap tensor to CPU, tensor num: %d, release NPU memory size: %d (%fMB)" % (
-            swap_num, swap_size, swap_size / 1024 / 1024))
-            print_rank_0("tensor nums wrap manager for [device: %d, CPU: %d]" % (
-                len(self.oom_rescue_device_tensors), len(self.oom_rescue_host_tensors)))
-            self.oom_rescue_total_swap_out_size += swap_size
-        return True
 
     def reset_oom_rescue_tensors(self):
         self.oom_rescue_device_tensors.clear()
