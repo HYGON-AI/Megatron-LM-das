@@ -6,7 +6,7 @@
 # conventions (HCU containers, authorization, workspace restore, aggregation).
 #
 # Triggers:
-#   - pull_request_target on core_v0.18.2
+#   - pull_request_target on core_v0.18.2 (all tests/unit_tests)
 #   - schedule: daily 19:00 UTC (nightly)
 #   - workflow_dispatch (test_case: pr | nightly | unit-only)
 #
@@ -24,8 +24,10 @@
 # Config surface (repo vars, see .github/CI-README.md):
 #   DAS_HCU_CI_RUNNER_LABEL  self-hosted runner label (e.g. hcu-ci)
 #   DAS_HCU_CI_IMAGE         test container image (HCU env), must be digest-pinned
-#   DAS_HCU_MODEL_ROOT       model root (reserved; uncomment mount when needed)
-#   DAS_HCU_DATA_ROOT        data root (reserved; uncomment mount when needed)
+#   DAS_HCU_ASSET_ROOT       read-only runner path containing Qwen3-8B and datasets
+#   DAS_QWEN3_8B_MODEL_PATH  optional exact model path below the asset root
+#   DAS_QWEN3_PRETRAIN_DATA_PATH optional exact .bin/.idx prefix
+#   DAS_QWEN3_SFT_DATA_PATH  optional exact directory with train/valid.jsonl
 #   DAS_HCU_MEGATRON_WHEEL   optional hcu-megatron wheel path/URL
 
 name: PR Test (HCU)
@@ -38,8 +40,6 @@ on:
       - opened
       - synchronize
       - reopened
-      - labeled
-      - unlabeled
       - ready_for_review
   schedule:
     - cron: "0 19 * * *"
@@ -66,8 +66,10 @@ permissions:
 env:
   DAS_HCU_CI_RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
   DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
-  DAS_HCU_MODEL_ROOT: ${{ vars.DAS_HCU_MODEL_ROOT }}
-  DAS_HCU_DATA_ROOT: ${{ vars.DAS_HCU_DATA_ROOT }}
+  DAS_HCU_ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+  DAS_QWEN3_8B_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+  DAS_QWEN3_PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+  DAS_QWEN3_SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
   DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
 
 jobs:
@@ -181,12 +183,9 @@ jobs:
           fi
 
   # --------------------------------------------------------------- configure
-  # Decision center (mirrors upstream configure): scope/cadence driven by
-  # trigger and PR labels.
-  #   - PR default: L0 (unit tests only)
-  #   - PR + label `Run functional tests`: L1 (unit + functional smoke)
-  #   - schedule / dispatch(nightly): L1 with more iterations
-  #   - dispatch(unit-only): unit tests only
+  # Decision center (mirrors upstream configure): scope/cadence driven by the
+  # trigger. PR runs cover tests/unit_tests only; real-data Qwen3-8B pretrain
+  # and SFT are restricted to schedule / dispatch(nightly).
   configure:
     name: Configure
     needs:
@@ -197,15 +196,14 @@ jobs:
       scope: ${{ steps.configure.outputs.scope }}
       cadence: ${{ steps.configure.outputs.cadence }}
       run_unit: ${{ steps.configure.outputs.run_unit }}
-      run_functional: ${{ steps.configure.outputs.run_functional }}
-      functional_iters: ${{ steps.configure.outputs.functional_iters }}
+      run_nightly: ${{ steps.configure.outputs.run_nightly }}
+      nightly_iters: ${{ steps.configure.outputs.nightly_iters }}
       n_repeat: ${{ steps.configure.outputs.n_repeat }}
     steps:
       - name: Configure
         id: configure
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           TEST_CASE: ${{ inputs.test_case || '' }}
         run: |
@@ -214,45 +212,25 @@ jobs:
           SCOPE=L0
           CADENCE=pr
           RUN_UNIT=true
-          RUN_FUNCTIONAL=false
-          FUNCTIONAL_ITERS=5
+          RUN_NIGHTLY=false
+          NIGHTLY_ITERS=5
           N_REPEAT=1
-
-          HAS_RUN_FUNCTIONAL=false
-          if [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-            LABELS=$(curl -sS \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/labels" \
-              | grep -o '"name": *"[^"]*"' | sed 's/.*"name": *"\([^"]*\)"/\1/' || true)
-            if echo "${LABELS}" | grep -Fxq "Run functional tests"; then
-              HAS_RUN_FUNCTIONAL=true
-            fi
-          fi
 
           if [[ "${EVENT_NAME}" == "schedule" ]] || [[ "${TEST_CASE}" == "nightly" ]]; then
             SCOPE=L1
             CADENCE=nightly
-            RUN_FUNCTIONAL=true
-            FUNCTIONAL_ITERS=20
-            N_REPEAT=2
+            RUN_NIGHTLY=true
           elif [[ "${TEST_CASE}" == "unit-only" ]]; then
             SCOPE=L0
             CADENCE=pr
-            RUN_FUNCTIONAL=false
-          elif [[ "${EVENT_NAME}" == "pull_request_target" ]] && [[ "${HAS_RUN_FUNCTIONAL}" == "true" ]]; then
-            SCOPE=L1
-            CADENCE=pr
-            RUN_FUNCTIONAL=true
-            FUNCTIONAL_ITERS=5
+            RUN_NIGHTLY=false
           fi
 
           echo "scope=${SCOPE}" | tee -a "${GITHUB_OUTPUT}"
           echo "cadence=${CADENCE}" | tee -a "${GITHUB_OUTPUT}"
           echo "run_unit=${RUN_UNIT}" | tee -a "${GITHUB_OUTPUT}"
-          echo "run_functional=${RUN_FUNCTIONAL}" | tee -a "${GITHUB_OUTPUT}"
-          echo "functional_iters=${FUNCTIONAL_ITERS}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_nightly=${RUN_NIGHTLY}" | tee -a "${GITHUB_OUTPUT}"
+          echo "nightly_iters=${NIGHTLY_ITERS}" | tee -a "${GITHUB_OUTPUT}"
           echo "n_repeat=${N_REPEAT}" | tee -a "${GITHUB_OUTPUT}"
 
           cat <<SUMMARY >> "${GITHUB_STEP_SUMMARY}"
@@ -263,8 +241,8 @@ jobs:
           | scope | \`${SCOPE}\` |
           | cadence | \`${CADENCE}\` |
           | run_unit | \`${RUN_UNIT}\` |
-          | run_functional | \`${RUN_FUNCTIONAL}\` |
-          | functional_iters | \`${FUNCTIONAL_ITERS}\` |
+          | run_nightly | \`${RUN_NIGHTLY}\` |
+          | nightly_iters | \`${NIGHTLY_ITERS}\` |
           | n_repeat | \`${N_REPEAT}\` |
           SUMMARY
 
@@ -314,6 +292,7 @@ jobs:
     needs:
       - authorize
       - check-changes
+      - configure
     if: needs.check-changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -323,6 +302,8 @@ jobs:
         env:
           IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
           RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
+          RUN_NIGHTLY: ${{ needs.configure.outputs.run_nightly }}
+          ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
         run: |
           set -euo pipefail
 
@@ -342,6 +323,21 @@ jobs:
             echo "   current value: ${IMAGE}" >&2
             exit 1
           fi
+          if [[ "${RUN_NIGHTLY}" == "true" ]]; then
+            if [[ -z "${ASSET_ROOT}" ]]; then
+              echo "❌ DAS_HCU_ASSET_ROOT is required for nightly runs" >&2
+              exit 1
+            fi
+            if [[ "${ASSET_ROOT}" != /* ]]; then
+              echo "❌ DAS_HCU_ASSET_ROOT must be an absolute runner path" >&2
+              exit 1
+            fi
+          fi
+
+          ASSETS_CONFIGURED=false
+          if [[ -n "${ASSET_ROOT}" ]]; then
+            ASSETS_CONFIGURED=true
+          fi
 
           echo "✅ HCU config validated"
           {
@@ -349,6 +345,7 @@ jobs:
             echo
             echo "- runner label: \`${RUNNER_LABEL}\`"
             echo "- image: \`${IMAGE%%@*}\`@sha256:***(digest pinned)***"
+            echo "- nightly assets configured: \`${ASSETS_CONFIGURED}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
   # ---------------------------------------------------- restore-before-unit
@@ -411,9 +408,9 @@ jobs:
           echo "Restored ${workspace} ownership to ${owner}."
 
   # -------------------------------------------------------------- unit-tests
-  # Unit tests (8-GPU distributed pytest, bucketed matrix; mirrors the upstream unit-tests matrix).
+  # PR gate: run the complete repository-owned tests/unit_tests suite.
   unit-tests:
-    name: Unit tests - ${{ matrix.bucket }}
+    name: Unit tests
     needs:
       - authorize
       - check-changes
@@ -429,12 +426,6 @@ jobs:
       - hcu
       - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        bucket:
-          - tests/unit_tests/pipeline_parallel
-          - tests/unit_tests/transformer
     container:
       image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
       options: >-
@@ -452,9 +443,9 @@ jobs:
     env:
       DAS_HCU_CI_RUN_ID: unit-${{ github.run_id }}-${{ github.run_attempt }}
       DAS_HCU_CI_LOG_DIR: ci-logs/unit-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_ARTIFACT_NAME: das-unit-${{ matrix.bucket }}
+      DAS_HCU_CI_ARTIFACT_NAME: das-unit-tests
       DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
-      BUCKET: ${{ matrix.bucket }}
+      BUCKET: tests/unit_tests
       N_REPEAT: ${{ needs.configure.outputs.n_repeat }}
       MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
       DTK_ENV: /opt/dtk/env.sh
@@ -494,10 +485,10 @@ jobs:
         shell: bash
         run: bash tests/das/ci/restore_runner_permissions.sh
 
-  # --------------------------------------------------------- functional-smoke
-  # Functional smoke (L1 / nightly): synthetic data + tiny GPT pretrain e2e.
-  functional-smoke:
-    name: Functional smoke (pretrain_gpt.py)
+  # ------------------------------------------------------- nightly-qwen3-8b
+  # Nightly only: load real Qwen3-8B weights and run both pretrain and SFT.
+  nightly-qwen3-8b:
+    name: Nightly Qwen3-8B pretrain and SFT
     needs:
       - authorize
       - check-changes
@@ -509,12 +500,12 @@ jobs:
       - restore-after-unit
     if: |
       needs.check-changes.outputs.runtime == 'true'
-      && needs.configure.outputs.run_functional == 'true'
+      && needs.configure.outputs.run_nightly == 'true'
     runs-on:
       - self-hosted
       - hcu
       - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     container:
       image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
       options: >-
@@ -529,19 +520,19 @@ jobs:
         --ipc=host
       volumes:
         - /opt/hyhal:/opt/hyhal:ro
-        # Reserved: uncomment the two lines below and set the matching vars
-        #   - ${{ vars.DAS_HCU_MODEL_ROOT }}:${{ vars.DAS_HCU_MODEL_ROOT }}:ro
-        #   - ${{ vars.DAS_HCU_DATA_ROOT }}:${{ vars.DAS_HCU_DATA_ROOT }}:ro
+        - ${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:${{ vars.DAS_HCU_ASSET_ROOT || '/invalid/das-hcu-assets-unconfigured' }}:ro
     env:
-      DAS_HCU_CI_RUN_ID: functional-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_LOG_DIR: ci-logs/functional-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_ARTIFACT_NAME: das-functional-smoke
       DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
-      DAS_SMOKE_TRAIN_ITERS: ${{ needs.configure.outputs.functional_iters }}
+      DAS_HCU_ASSET_ROOT: ${{ vars.DAS_HCU_ASSET_ROOT }}
+      DAS_QWEN3_8B_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
+      DAS_QWEN3_PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
+      DAS_QWEN3_SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+      DAS_QWEN3_TRAIN_ITERS: ${{ needs.configure.outputs.nightly_iters }}
       MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
       DTK_ENV: /opt/dtk/env.sh
     steps:
       - name: Checkout repository
+        id: nightly_checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -550,19 +541,37 @@ jobs:
           submodules: false
           clean: true
 
-      - name: Run functional smoke
+      - name: Run Qwen3-8B pretrain
+        env:
+          NIGHTLY_MODE: pretrain
+          MASTER_PORT: "29500"
+          DAS_HCU_CI_RUN_ID: nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_LOG_DIR: ci-logs/nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-pretrain
         uses: ./.github/actions/run-test
         with:
-          test_script: tests/das/nightly/run_functional_smoke.sh
+          test_script: tests/das/nightly/run_qwen3_8b.sh
 
-  # -------------------------------------------------------- restore-after-smoke
-  restore-after-smoke:
-    name: Restore workspace after functional smoke
-    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.configure.outputs.run_functional == 'true' && needs.functional-smoke.result != 'skipped'
+      - name: Run Qwen3-8B SFT
+        if: always() && steps.nightly_checkout.outcome == 'success'
+        env:
+          NIGHTLY_MODE: sft
+          MASTER_PORT: "29501"
+          DAS_HCU_CI_RUN_ID: nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_LOG_DIR: ci-logs/nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
+          DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-sft
+        uses: ./.github/actions/run-test
+        with:
+          test_script: tests/das/nightly/run_qwen3_8b.sh
+
+  # ------------------------------------------------------ restore-after-nightly
+  restore-after-nightly:
+    name: Restore workspace after nightly tests
+    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.configure.outputs.run_nightly == 'true' && needs.nightly-qwen3-8b.result != 'skipped'
     needs:
       - check-changes
       - configure
-      - functional-smoke
+      - nightly-qwen3-8b
     runs-on:
       - self-hosted
       - hcu
@@ -590,8 +599,8 @@ jobs:
       - restore-before-unit
       - unit-tests
       - restore-after-unit
-      - functional-smoke
-      - restore-after-smoke
+      - nightly-qwen3-8b
+      - restore-after-nightly
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -600,7 +609,7 @@ jobs:
         env:
           RUNTIME_CHANGED: ${{ needs.check-changes.outputs.runtime }}
           RUN_UNIT: ${{ needs.configure.outputs.run_unit }}
-          RUN_FUNCTIONAL: ${{ needs.configure.outputs.run_functional }}
+          RUN_NIGHTLY: ${{ needs.configure.outputs.run_nightly }}
           CADENCE: ${{ needs.configure.outputs.cadence }}
           SCOPE: ${{ needs.configure.outputs.scope }}
           AUTH_RESULT: ${{ needs.authorize.result }}
@@ -611,8 +620,8 @@ jobs:
           RESTORE_BEFORE_UNIT_RESULT: ${{ needs.restore-before-unit.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RESTORE_UNIT_RESULT: ${{ needs.restore-after-unit.result }}
-          SMOKE_RESULT: ${{ needs.functional-smoke.result }}
-          RESTORE_SMOKE_RESULT: ${{ needs.restore-after-smoke.result }}
+          NIGHTLY_RESULT: ${{ needs.nightly-qwen3-8b.result }}
+          RESTORE_NIGHTLY_RESULT: ${{ needs.restore-after-nightly.result }}
         run: |
           set -euo pipefail
 
@@ -632,12 +641,12 @@ jobs:
               [[ "${UNIT_RESULT}" == "skipped" ]]
               [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
             fi
-            if [[ "${RUN_FUNCTIONAL}" == "true" ]]; then
-              [[ "${SMOKE_RESULT}" == "success" ]]
-              [[ "${RESTORE_SMOKE_RESULT}" == "success" ]]
+            if [[ "${RUN_NIGHTLY}" == "true" ]]; then
+              [[ "${NIGHTLY_RESULT}" == "success" ]]
+              [[ "${RESTORE_NIGHTLY_RESULT}" == "success" ]]
             else
-              [[ "${SMOKE_RESULT}" == "skipped" ]]
-              [[ "${RESTORE_SMOKE_RESULT}" == "skipped" ]]
+              [[ "${NIGHTLY_RESULT}" == "skipped" ]]
+              [[ "${RESTORE_NIGHTLY_RESULT}" == "skipped" ]]
             fi
           else
             [[ "${VALIDATE_RESULT}" == "skipped" ]]
@@ -645,8 +654,8 @@ jobs:
             [[ "${RESTORE_BEFORE_UNIT_RESULT}" == "skipped" ]]
             [[ "${UNIT_RESULT}" == "skipped" ]]
             [[ "${RESTORE_UNIT_RESULT}" == "skipped" ]]
-            [[ "${SMOKE_RESULT}" == "skipped" ]]
-            [[ "${RESTORE_SMOKE_RESULT}" == "skipped" ]]
+            [[ "${NIGHTLY_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_NIGHTLY_RESULT}" == "skipped" ]]
           fi
 
           {
@@ -662,6 +671,6 @@ jobs:
             echo "- restore before unit tests: ${RESTORE_BEFORE_UNIT_RESULT}"
             echo "- unit tests: ${UNIT_RESULT}"
             echo "- restore after unit tests: ${RESTORE_UNIT_RESULT}"
-            echo "- functional smoke: ${SMOKE_RESULT}"
-            echo "- restore after smoke: ${RESTORE_SMOKE_RESULT}"
+            echo "- Qwen3-8B nightly: ${NIGHTLY_RESULT}"
+            echo "- restore after nightly: ${RESTORE_NIGHTLY_RESULT}"
           } >> "${GITHUB_STEP_SUMMARY}"

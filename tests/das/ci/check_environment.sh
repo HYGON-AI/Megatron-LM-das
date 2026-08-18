@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026, HYGON-AI. All rights reserved.
-#
 # Environment self-check (runs inside the test container):
 #   - DTK env (DTK_ROOT overridable, default /opt/dtk)
 #   - torch importable, >= 8 GPUs visible
-#   - transformer_engine presence (missing -> warning; functional smoke needs it)
+#   - transformer_engine presence (missing -> warning; nightly training needs it)
 #   - coverage presence (missing -> sets DAS_COVERAGE_DISABLED=1, plain pytest)
 set -euo pipefail
 

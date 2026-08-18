@@ -1,122 +1,112 @@
 # Megatron-LM-das CI 说明
 
-CI 框架对齐 [NVIDIA/Megatron-LM 官方](https://github.com/NVIDIA/Megatron-LM) 的
-GitHub Actions 架构(单主流水线 + 配置决策中心 + 测试矩阵 + 聚合门),运行细节
-遵循 HYGON verl-das 既有惯例(HCU 容器化、精确 PR head 检出、变更分类、
-工作区恢复、聚合总结)。v1 提供 **PR 级测试** 与 **Nightly 测试** 两个基础档次。
+CI 使用单主流水线、配置决策、测试执行和聚合门四层结构，提供 PR 单元测试与
+Nightly Qwen3-8B 真实训练验证。测试环境由固定 digest 的 HCU 容器提供。
 
-## 流水线结构(`.github/workflows/pr-test-hcu.yml`)
+## 触发与测试范围
 
-| 触发 | 行为 |
+| 触发 | 测试范围 |
 |---|---|
-| `pull_request_target`(core_v0.18.2) | 从默认分支加载受控 workflow,精确检出 PR head;同仓库与 fork PR 均执行 L0 单元测试;打 label `Run functional tests` → L1(+功能冒烟) |
-| `schedule`(每天 19:00 UTC) | Nightly: 单元测试 ×2 + 功能冒烟 20 iter(不经过审批门) |
-| `workflow_dispatch` | `test_case`: `pr` / `nightly` / `unit-only` 手动选择 |
+| `pull_request_target`（目标分支 `core_v0.18.2`） | 完整运行仓库 `tests/unit_tests` |
+| `schedule`（每天 19:00 UTC） | 完整单元测试 + Qwen3-8B 真实数据预训练 + Qwen3-8B 真实数据 SFT |
+| `workflow_dispatch` | `pr` / `unit-only` 只运行单元测试；`nightly` 运行完整 Nightly |
 
-Job 链: `authorize`(记录 PR 来源)→ `check-changes`(docs-only 白名单)→ `configure`
-(L0/L1 决策)→ `linting` / `validate-config` →
-`restore-before-unit` → `unit-tests`(矩阵 2 bucket, 8 卡分布式 pytest)→
-`restore-after-unit` →
-`functional-smoke`(合成数据 + 极小模型 pretrain)→ `restore-after-smoke` →
-`finish`(聚合门, 输出总结)。
+Job 链为：`authorize` → `check-changes` → `configure` →
+`linting` / `validate-config` → `restore-before-unit` → `unit-tests` →
+`restore-after-unit` → `nightly-qwen3-8b` → `restore-after-nightly` → `finish`。
 
-- **控制面 job**(authorize/check-changes/configure/lint/validate/finish)
-  全部运行在 GitHub-hosted `ubuntu-latest`,不依赖 self-hosted runner;
-- **GPU 测试 job**(unit-tests/functional-smoke/restore-\*)使用
-  `${{ vars.DAS_HCU_CI_RUNNER_LABEL }}` 注入的 self-hosted HCU runner。
+- PR 不运行训练任务，只运行 `tests/unit_tests`。
+- Nightly 在同一个隔离 runner 上顺序运行预训练和 SFT，两个测试分别上传日志。
+- 模型和数据目录只读挂载；训练不向资产目录写 checkpoint 或日志。
+- Nightly 通过 Megatron Bridge 从 Hugging Face 格式目录加载 Qwen3-8B 权重。
 
-## 安全模型与部署必需项 ⚠
+## 安全模型
 
-1. **默认分支控制面**: PR 使用 `pull_request_target`,授权和调度逻辑始终来自
-   默认分支;每个 checkout 都显式使用
-   `pull_request.head.repo.full_name` + `pull_request.head.sha`,不执行模糊分支引用;
-   变更分类会从目标仓库获取 base 分支并以真实 merge-base 计算 PR 改动。
-2. **fork PR 开放**: 与 verl-das `e1d01629` 一致,同仓库和 fork PR 都可执行
-   HCU 测试。由于 PR 代码会进入带设备和 `--privileged` 的容器,runner 必须是
-   **专用、隔离、无生产凭据**的 CI 机器,不能与通用或生产任务共用。
-3. **权限基线**: 测试 workflow 的 token 仅有 `contents: read` / `issues: read`,
-   不向 PR 测试 job 注入仓库 secrets。
-4. **bootstrap 限制**: `pull_request_target` 只执行默认分支上的 workflow。
-   因此本框架需先经审核合入,后续 PR 才能验证新触发逻辑;当前 PR 不能自证
-   尚未合入的 workflow 修改。
+1. PR 使用 `pull_request_target`，workflow 控制逻辑来自目标分支；checkout 显式使用
+   PR head repository 和 head SHA。
+2. 控制面 job 运行在 GitHub-hosted `ubuntu-latest`；只有测试和属主恢复 job 使用
+   专用 self-hosted HCU runner。
+3. 测试 token 仅有只读权限，不向 PR 测试 job 注入仓库 secrets。
+4. PR 代码会进入带设备和 `--privileged` 的容器，因此 runner 必须专用、隔离且
+   不保存生产凭据。
+5. `pull_request_target` 只执行目标分支已有的 workflow；本 PR 中的新逻辑需要合入
+   后才能通过该事件验证。
 
-## 仓库配置(必须填充)
+## 仓库变量
 
-Settings → Secrets and variables → Actions → **Variables**:
+Settings → Secrets and variables → Actions → **Variables**：
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
-| `DAS_HCU_CI_RUNNER_LABEL` | ✅ | 专用、隔离且当前只匹配一台机器的 self-hosted runner 标签(当前为 `hcu-ci-pr`),未配置时 validate-config 明确失败并给出指引 |
-| `DAS_HCU_CI_IMAGE` | ✅ | `.github/workflows/docker-image.yml` 推送的 Megatron 训练镜像;必须转换为 `镜像仓库@sha256:<64 位十六进制>` 固定 digest(与 verl-das 一致,防镜像漂移);未配置/未固定时 validate-config 明确失败 |
-| `DAS_HCU_MEGATRON_WHEEL` | 可选 | hcu-megatron 预编译 wheel 路径/URL,已注入全部测试 job;prepare_workspace 自动 `pip install` |
-| `DAS_HCU_MODEL_ROOT` | 预留 | 模型根目录;**接入时需取消注释 workflow 中 functional-smoke 的挂载行**(YAML 无法条件化 volume) |
-| `DAS_HCU_DATA_ROOT` | 预留 | 数据根目录,同上 |
+| `DAS_HCU_CI_RUNNER_LABEL` | 是 | 专用 HCU runner 标签 |
+| `DAS_HCU_CI_IMAGE` | 是 | 测试镜像，必须使用 `仓库@sha256:<64 位十六进制>` 固定 digest |
+| `DAS_HCU_ASSET_ROOT` | Nightly 必填 | runner 上同时包含 Qwen3-8B 模型与真实数据集的绝对路径；以只读方式挂载到容器 |
+| `DAS_QWEN3_8B_MODEL_PATH` | 可选 | Qwen3-8B Hugging Face 模型目录；未填时在资产根目录内按 `config.json` 唯一识别 |
+| `DAS_QWEN3_PRETRAIN_DATA_PATH` | 可选 | Megatron indexed dataset 前缀；未填时在资产根目录内按配对 `.bin/.idx` 唯一识别 |
+| `DAS_QWEN3_SFT_DATA_PATH` | 可选 | 同时包含 `train.jsonl` 和 `valid.jsonl` 的目录；未填时在资产根目录内唯一识别 |
+| `DAS_HCU_MEGATRON_WHEEL` | 可选 | hcu-megatron 预编译 wheel 路径或 URL |
 
-**子模块版本 pin**: `tests/das/ci/verify_submodules.py` 固定三个子模块
-(Megatron-LM / Energon / Bridge)的 gitlink SHA, 在每次测试前做 gitlink +
-checkout 双重核对;升级子模块时需同步更新该文件的 `EXPECTED_SUBMODULES`。
+如果自动识别得到零个或多个候选，Nightly 会明确失败并列出候选；管理员应填写对应
+精确路径变量，避免测试静默选择错误的模型或数据集。
 
-## CI 镜像 workflow
+## Nightly 参数
 
-默认分支 `dd8740c4` 已提供 `.github/workflows/docker-image.yml` 与
-`docker/Dockerfile`,workflow 会构建并推送时间戳 tag 到其配置的 Harbor 仓库。
-测试主流水线不直接消费可变 tag:镜像推送成功后应解析 registry 返回的 digest,
-再由管理员把完整的 `仓库@sha256:...` 写入 `DAS_HCU_CI_IMAGE`。
-
-镜像构建与测试流水线目前没有自动跨 workflow 传递 digest;这是有意保留的发布
-边界,可避免 PR 测试静默切换到刚生成、尚未审核的镜像。
-
-## 测试脚本接口(环境变量, 均有默认值)
-
-| 变量 | 默认 | 说明 |
+| 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `DAS_SMOKE_TRAIN_ITERS` | 5(L1)/20(nightly) | 功能冒烟训练迭代数 |
-| `DAS_TRANSFORMER_IMPL` | `transformer_engine` | 功能冒烟 transformer 实现(与生产一致; `local` 分支当前有 gpt_builders.py 参数错位问题) |
-| `DAS_TOY_VOCAB_SIZE` | 256 | 合成数据 vocab 大小(eod = vocab_size - 1) |
-| `DAS_TOY_NUM_DOCS` | 2000 | 合成数据文档数 |
-| `DAS_HCU_CI_TMP_ROOT` | `/tmp/das-hcu-ci` | 运行期临时目录根 |
-| `DAS_COVERAGE_DISABLED` | 0 | 镜像缺 coverage 时自动置 1, 降级纯 pytest |
-| `DAS_HCU_MEGATRON_WHEEL` | 未配置 | wheel 路径/URL,提供 `fused_weight_gradient_mlp_cuda` 等编译算子;未配置时 sitecustomize 注入 import 垫片(调用即报 NotImplementedError) |
-| `MEGATRON_PATH` / `DTK_ENV` / `CONDA_HOME` | 见脚本 | `run_ci_test.sh` 环境变量化占位符 |
+| `DAS_QWEN3_TRAIN_ITERS` | 5 | 预训练和 SFT 各自执行的迭代数 |
+| `DAS_QWEN3_SEQ_LENGTH` | 1024 | 序列长度 |
+| `DAS_QWEN3_TP` | 2 | Tensor Parallel 大小 |
+| `DAS_QWEN3_PP` | 2 | Pipeline Parallel 大小 |
+| `DAS_QWEN3_MICRO_BATCH_SIZE` | 1 | micro batch size |
+| `DAS_QWEN3_GLOBAL_BATCH_SIZE` | 8 | global batch size |
+| `DAS_HCU_CI_TMP_ROOT` | `/tmp/das-hcu-ci` | CI 临时目录根 |
 
-测试依赖版本锁定: `pytest-mock==3.14.0` / `coverage==7.6.1`(Dockerfile 固化 +
-旧镜像运行时兜底安装, 双路径一致;兜底安装后会重新探测 coverage)。覆盖率采集使用 `coverage run --parallel-mode`,
-8 个 worker 各写独立文件, 最后 `coverage combine` 合并。
+## 单元测试与子模块
 
-## 与官方(Megatron-LM)启动方式对齐
+PR 和 Nightly 都将 `BUCKET=tests/unit_tests` 传给现有
+`tests/unit_tests/run_ci_test.sh`，因此目标分支后续新增到该目录的测试也会自动纳入，
+无需维护静态 bucket 列表。
 
-| 维度 | 官方 cicd-main.yml | 本仓库 pr-test-hcu.yml | 说明 |
-|---|---|---|---|
-| 流水线骨架 | pre-flight → configure → lint → 容器构建 → unit/integration 矩阵 → 聚合门 | authorize → check-changes → configure → lint → validate → unit/smoke → finish | 决策中心 + 测试矩阵 + 聚合门三段式一致 |
-| 单元测试启动 | `run_ci_test.sh` 内 `python -m torch.distributed.run`(8 卡) | 同左(原样保留 das 自己的 run_ci_test.sh) | 完全一致 |
-| 训练启动 | recipe 脚本 → pretrain_xxx.py | `LAUNCH_BACKEND=torchrun python3 -m torch.distributed.run pretrain_gpt.py` | das 仓库自身约定(见 run_qwen.sh);torchrun 启动必须带 `LAUNCH_BACKEND=torchrun`,否则 parse_args 会用 `--rank` 默认值 -1 覆写 RANK |
-| PR 触发 | push `pull-request/*` 分支(需镜像 bot)+ merge_group | `pull_request_target` + 精确 head repo/SHA | 触发与 fork 授权对齐 verl-das;隔离 runner 是前提 |
-| Nightly | schedule 0 0 \* \* \* | schedule 0 19 \* \* \* | 时间可改 |
-| 容器 | CI 内动态 build(Dockerfile.ci.dev/lts) | `docker-image.yml` 构建,经 `DAS_HCU_CI_IMAGE` 注入固定 digest | 镜像发布与测试解耦 |
-| runner | 动态矩阵(aws-h100/gb200) | 单标签 `${{ vars.DAS_HCU_CI_RUNNER_LABEL }}` | 多机扩展时可仿官方加 matrix |
-| 测试选择 | recipe parser + scope/cadence | L0/L1 label + workflow_dispatch 选择 | v1 简化,后续可对齐 recipe 体系 |
+`tests/das/ci/verify_submodules.py` 固定 Megatron-LM、Energon 和 Bridge 三个
+submodule 的 gitlink SHA，并在测试前核对 gitlink 与 checkout。升级 submodule 时需
+同步更新 `EXPECTED_SUBMODULES`。
+
+测试依赖固定为 `pytest-mock==3.14.0` 和 `coverage==7.6.1`。覆盖率使用
+`--parallel-mode`，各 worker 独立写文件后再合并。
+
+## 与官方 CI 架构的对应关系
+
+| 官方结构 | 本仓库实现 |
+|---|---|
+| pre-flight / configure | `authorize`、`check-changes`、`configure`、`validate-config` |
+| lint | GitHub-hosted `linting` |
+| unit test matrix / recipe | 完整 `tests/unit_tests` 目录，由现有 `run_ci_test.sh` 启动 |
+| nightly integration | Qwen3-8B 真实权重预训练和 SFT |
+| aggregation gate | `finish` 汇总并校验所有必需 job 结论 |
+
+本仓库将镜像构建与测试解耦，并使用专用 HCU runner；这是运行环境差异，不改变
+“控制面决策 → 测试执行 → 聚合门”的总体结构。
+
+## CI 镜像
+
+`.github/workflows/docker-image.yml` 负责构建并推送训练镜像。测试工作流不直接消费
+可变 tag；镜像构建成功后，应验证新镜像并由管理员将完整 digest 更新到
+`DAS_HCU_CI_IMAGE`。
 
 ## 常见问题
 
-- **缺镜像/缺 runner**: 控制面会先跑完并给出 `validate-config` 错误指引;
-  GPU job 找不到 runner 时排队等待(属正常现象, 注册 runner 后自动续跑)。
-- **新 PR 没有触发新逻辑**: 检查 `pr-test-hcu.yml` 是否已经合入默认分支;
-  `pull_request_target` 不会从 PR head 加载 workflow。
-- **runner 工作区属主**: 容器 job 以 root 写入;第一个 HCU checkout 前先恢复
-  上一次可能遗留的属主,本次测试后再由 `restore-after-*` 做第二次恢复;子模块
-  `Megatron-LM/tests` 改名由 `trap` 保证成功/失败都恢复。
-- **与 verl-das CI 并发**: 与 verl-das 共用机器时通过不同 label 隔离;
-  并发高峰可能排队, 后续可加互斥。
-- **分支**: 仓库默认分支 `core_v0.18.2`, workflow 与 schedule 均挂在该分支。
+- **PR 没有触发新逻辑**：确认 workflow 已进入目标分支。
+- **Nightly 报资产候选不唯一**：填写三个 Qwen3 精确路径变量中的对应项。
+- **GPU job 一直排队**：检查专用 runner 是否在线且标签与变量一致。
+- **runner 工作区属主异常**：前置和后置恢复 job 会在安全路径检查后修复属主。
+- **镜像漂移**：测试变量必须固定 digest，不能使用 `latest` 或普通 tag。
 
-## 注册 runner(一次性, 需仓库 admin)
+## 注册 runner
 
 ```bash
-# 获取注册 token(需 repo admin)
 gh api -X POST repos/HYGON-AI/Megatron-LM-das/actions/runners/registration-token \
   -q .token
 
-# 在专用 HCU runner 上注册(当前 nmz36 / bw1100;自定义标签与 repo var 一致)
 mkdir -p ~/actions-runner-das && cd ~/actions-runner-das
 curl -o actions-runner.tar.gz -L https://github.com/actions/runner/releases/download/v2.327.0/actions-runner-linux-x64-2.327.0.tar.gz
 tar xzf actions-runner.tar.gz

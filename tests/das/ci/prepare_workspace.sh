@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026, HYGON-AI. All rights reserved.
-#
 # Workspace preparation (source this script):
 #   1. register submodule safe.directory entries
 #   2. sync + init top-level submodules (non-recursive; see below)

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026, HYGON-AI. All rights reserved.
-#
 # PR unit test entry (runs inside run-test action, after prepare_workspace):
 #   env: BUCKET / N_REPEAT / DAS_HCU_CI_LOG_DIR / MEGATRON_PATH / DTK_ENV
 #        DAS_COVERAGE_DISABLED (set by check_environment.sh)

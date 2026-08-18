@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026, HYGON-AI. All rights reserved.
-#
 # Clean up processes and temp dirs owned by the current CI run
 # (patterned after verl-das tests/hcu/ci/cleanup.sh):
 #   - only kills processes tagged with DAS_HCU_CI_RUN_ID (verified via

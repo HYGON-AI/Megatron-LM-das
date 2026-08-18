@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026, HYGON-AI. All rights reserved.
-#
 # Restore runner workspace ownership (patterned after verl-das):
 # files written as root inside the job container are chown'ed back to the
 # runner user via a short docker run, so later checkouts do not fail.
