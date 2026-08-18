@@ -13,7 +13,7 @@ class PrimusTopKRouter():
         try:
             import primus_turbo.pytorch as pt
         except ImportError as e:
-            raise ImportError("Failed to import 'primus_turbo'. Please make sure it is installed. ") from e
+            raise ImportError("Failed to import 'primus_turbo'. Please make sure it is installed.") from e
 
         seq_length, bsz = logits.shape[:2]
         logits = logits.view(-1, self.config.num_moe_experts)
