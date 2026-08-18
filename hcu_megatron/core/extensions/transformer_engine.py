@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.

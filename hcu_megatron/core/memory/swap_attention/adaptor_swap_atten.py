@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 from functools import wraps
 import torch
 

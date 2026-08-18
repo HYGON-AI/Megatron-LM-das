@@ -1,4 +1,4 @@
-### 基于[Flux](http://10.6.10.68/dcutoolkit/deeplearing/flux)的tp计算方法
+### 基于 Flux 的tp计算方法
 [Flux](https://github.com/bytedance/flux)是字节提供的一个通算融合库，旨在通过计算掩藏GPU间的通信，提高模型训练/推理性能。  
 本项目提供基于flux的tp并行计算方法，该方法使用flux相关kernel融合下图红框中的计算通信。
 

@@ -1,4 +1,5 @@
 # Copyright (c) 2024, Huawei Technologies Co., Ltd. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import math
