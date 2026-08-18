@@ -26,7 +26,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
 from megatron.core.utils import internal_api
 
-from megatron.training import get_args
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def moe_layer_init_wrapper(moe_layer_init_func):
@@ -59,7 +59,7 @@ def moe_layer_init_wrapper(moe_layer_init_func):
         )
 
         # Initialize token dispatcher
-        if get_args().integrate_recompute_to_ep_comm_overlap:
+        if get_adaptor_args().integrate_recompute_to_ep_comm_overlap:
             if config.moe_token_dispatcher_type == "allgather":
                 self.recompute_token_dispatcher = MoEAllGatherTokenDispatcher(
                     self.num_local_experts,
@@ -155,7 +155,7 @@ class MoELayer():
     """
 
     def get_token_dispatcher(self, is_recompute=False,):
-        if get_args().integrate_recompute_to_ep_comm_overlap and is_recompute:
+        if get_adaptor_args().integrate_recompute_to_ep_comm_overlap and is_recompute:
             return self.recompute_token_dispatcher
 
         return self.token_dispatcher
@@ -173,10 +173,11 @@ class MoELayer():
         # expert on its side stream BEFORE fc1_latent_proj so it sees the full
         # hidden_states. The corresponding join+add runs in postprocess after
         # fc2_latent_proj. Skipped on the training / NCCL paths.
+        token_dispatcher = self.get_token_dispatcher(is_recompute)
         if (
             self.config.moe_latent_size
             and self.shared_expert_overlap
-            and isinstance(self.token_dispatcher, NVLSAllGatherVDispatcher)
+            and isinstance(token_dispatcher, NVLSAllGatherVDispatcher)
         ):
             stream = SharedExpertMLP.stream
             stream.wait_stream(torch.cuda.current_stream())
@@ -197,7 +198,7 @@ class MoELayer():
         # Project the hidden_states from hidden dimension down to latent dimenion.
         if self.config.moe_latent_size:
             hidden_states, _ = self.fc1_latent_proj(hidden_states)
-        hidden_states, probs = self.get_token_dispatcher(is_recompute).dispatch_preprocess(
+        hidden_states, probs = token_dispatcher.dispatch_preprocess(
             hidden_states, routing_map, probs
         )
         return hidden_states, probs

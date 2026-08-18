@@ -5,7 +5,6 @@ from contextlib import nullcontext
 
 import torch
 
-from megatron.training import get_args
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 
@@ -16,6 +15,8 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
 )
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSchedulePlan):
@@ -396,10 +397,10 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         return f_input, b_grad
 
 
-if get_args().integrate_recompute_to_ep_comm_overlap:
+if get_adaptor_args().integrate_recompute_to_ep_comm_overlap:
     from .model_chunk_schedule_plan_with_recompute import TransformerLayerSchedulePlanWithRecompute
     layer_schedule_plan_cls = TransformerLayerSchedulePlanWithRecompute
-elif get_args().overlap_ep_comm_with_split_attn:
+elif get_adaptor_args().overlap_ep_comm_with_split_attn:
     layer_schedule_plan_cls = TransformerLayerSchedulePlanWithSplitAttn
 else:
     layer_schedule_plan_cls = TransformerLayerSchedulePlanWithoutSplitAttn
@@ -449,7 +450,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         post_backward=None,
         block_level_wgrad_compute=False,
     ):
-        args = get_args()
+        args = get_adaptor_args()
         if args.integrate_recompute_to_ep_comm_overlap and args.ep_overlap_early_recompute:
             run_func = TransformerModelChunkSchedulePlan.run_recompute_with_overlap_three_layers
             return run_func(
@@ -545,7 +546,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         # for overlapping with the p2p comm
         if not block_level_wgrad_compute and b_num_layers > 0:
             assert b_layer is not None
-            if get_args().overlap_ep_comm_with_split_attn:
+            if get_adaptor_args().overlap_ep_comm_with_split_attn:
                 b_layer.attn_qkv.backward_dw()
                 b_layer.attn_proj.backward_dw()
             else:
@@ -566,7 +567,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             # Release reference as early as possible, this helps avoid memory leak.
             b_schedule_plan.release_state()
 
-        if get_args().schedule_method != "dualpipev":
+        if get_adaptor_args().schedule_method != "dualpipev":
             assert not block_level_wgrad_compute, "block_level_wgrad_compute should be False when not using dualpipev"
             return f_input
 
@@ -574,7 +575,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             def chunk_backward_dw():
                 for _ in range(b_num_layers):
                     b_layer = b_schedule_plan.pop_layer()
-                    if get_args().overlap_ep_comm_with_split_attn:
+                    if get_adaptor_args().overlap_ep_comm_with_split_attn:
                         b_layer.attn_qkv.backward_dw()
                         b_layer.attn_proj.backward_dw()
                     else:
@@ -624,7 +625,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         Returns:
             The output of the forward pass.
         """
-        args = get_args()
+        args = get_adaptor_args()
 
         f_input = None
         if f_schedule_plan:
@@ -755,7 +756,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         # for overlapping with the p2p comm
         if not block_level_wgrad_compute and b_num_layers > 0:
             assert b_layer is not None
-            if get_args().overlap_ep_comm_with_split_attn:
+            if get_adaptor_args().overlap_ep_comm_with_split_attn:
                 b_layer.attn_qkv.backward_dw()
                 b_layer.attn_proj.backward_dw()
             else:
@@ -776,7 +777,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             # Release reference as early as possible, this helps avoid memory leak.
             b_schedule_plan.release_state()
 
-        if get_args().schedule_method != "dualpipev":
+        if get_adaptor_args().schedule_method != "dualpipev":
             assert not block_level_wgrad_compute, "block_level_wgrad_compute should be False when not using dualpipev"
             return f_input
 
@@ -784,7 +785,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             def chunk_backward_dw():
                 for _ in range(b_num_layers):
                     b_layer = b_schedule_plan.pop_layer()
-                    if get_args().overlap_ep_comm_with_split_attn:
+                    if get_adaptor_args().overlap_ep_comm_with_split_attn:
                         b_layer.attn_qkv.backward_dw()
                         b_layer.attn_proj.backward_dw()
                     else:

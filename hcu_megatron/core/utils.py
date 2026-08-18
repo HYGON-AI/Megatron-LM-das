@@ -3,37 +3,7 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import torch
 
-from importlib.metadata import version
-from packaging.version import Version as PkgVersion
-
-from megatron.training import get_args
-
-
-_flux_version = None
-
-
-def get_flux_version():
-    """Get flux version from __version__; if not available use pip's. Use caching."""
-
-    def get_flux_version_str():
-        import flux
-
-        if hasattr(flux, '__version__'):
-            return str(flux.__version__)
-        else:
-            return version("flux")
-
-    global _flux_version
-    if _flux_version is None:
-        _flux_version = PkgVersion(get_flux_version_str())
-    return _flux_version
-
-
-def is_flux_min_version(version, check_equality=True):
-    """Check if minimum version of `flux` is installed."""
-    if check_equality:
-        return get_flux_version() >= PkgVersion(version)
-    return get_flux_version() > PkgVersion(version)
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def get_batch_on_this_tp_rank(
@@ -99,7 +69,7 @@ def get_batch_on_this_tp_rank(
         'max_seqlen', 'local_cp_size', and 'hybrid_cp_group'.
     """
 
-    args = get_args()
+    args = get_adaptor_args()
 
     def _broadcast(item):
         if item is not None:

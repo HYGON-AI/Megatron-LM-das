@@ -6,13 +6,13 @@
 from functools import wraps
 from typing import Optional
 from megatron.core import mpu
-from megatron.training.global_vars import get_args
 from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.module import fp32_to_float16, float16_to_fp32
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core import parallel_state
 
 from hcu_megatron.core.parallel_state import get_dualpipe_chunk
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def dualpipev_fp16forward(self, *inputs, fp32_output=True, **kwargs):
@@ -41,7 +41,7 @@ def get_num_layers_to_build(
 
     # If we have a custom PP layout, straightforwardly
     # return the number of decoders in the layout array.
-    args = get_args()
+    args = get_adaptor_args()
 
     if config.pipeline_model_parallel_layout is not None:
         if getattr(args, "schedule_method", None) == "dualpipev" and vp_stage is None:
@@ -164,7 +164,7 @@ def get_num_layers_to_build(
 def _allreduce_embedding_grads_wrapper(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        args = get_args()
+        args = get_adaptor_args()
         if args.schedule_method == 'dualpipev':
             # dualpipev no need to do embedding allreduce
             # embedding and lm head are on save rank.

@@ -4,13 +4,13 @@ import warnings
 from functools import wraps
 from dataclasses import make_dataclass, field
 
-from megatron.training import get_args
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 def transformer_config_post_init_wrapper(post_init_func):
     @wraps(post_init_func)
     def wrapper(self):
-        args = get_args()
+        args = get_adaptor_args()
 
         # remover experts from recompute_modules. Otherwise _post_init_ will raise error
         if self.recompute_modules is None:

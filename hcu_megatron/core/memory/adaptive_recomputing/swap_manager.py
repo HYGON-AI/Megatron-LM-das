@@ -102,32 +102,6 @@ class SwapManager(metaclass=SwapManagerMeta):
                 return False
         return True
 
-    def swap_out_by_size(self, size):
-        """
-        swap some tensors to host memory
-        :param size: total size which is requested to release memory
-        :return: true or false
-        """
-        print_rank_0("Need tensor size is : %d" % (size))
-        if not self.device_tensors or not self.is_exist_tensor_allowed_swap():
-            return False
-        swap_size = 0
-        swap_tensor_num = 0
-        only_swap_contiguous_tensor = self.is_exist_tensor_contiguous()
-        if only_swap_contiguous_tensor:
-            cur_swap_size, cur_swap_tensor_num = self.traverse_swap_device_tensors(size, swap_size, False)
-        else:
-            cur_swap_size, cur_swap_tensor_num = self.traverse_swap_device_tensors(size, swap_size, True)
-        swap_size += cur_swap_size
-        swap_tensor_num += cur_swap_tensor_num
-        if swap_size != 0:
-            print_rank_0("swap tensor to CPU, tensor num: %d, release NPU memory size: %s (%d)" % (
-                swap_tensor_num, hum_convert(swap_size), swap_size))
-            print_rank_0("tensor nums wrap manager for [device: %d, CPU: %d]" % (
-                len(self.device_tensors), len(self.host_tensors)))
-        self.total_swap_out_size += swap_size
-        return True
-
     def traverse_swap_device_tensors(self, size, swap_size, is_swap_not_contiguous):
         cur_swap_size = 0
         cur_swap_tensor_num = 0

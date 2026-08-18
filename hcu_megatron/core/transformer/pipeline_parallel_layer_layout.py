@@ -5,10 +5,11 @@ import copy
 from functools import lru_cache
 from typing import Optional
 
-from megatron.training import get_args
 from megatron.core import parallel_state
 from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class PipelineParallelLayerLayoutDualpipeV:
@@ -155,7 +156,7 @@ class PipelineParallelLayerLayoutDualpipeV:
         if pp_rank is None:
             pp_rank = parallel_state.get_pipeline_model_parallel_rank()
         if vp_stage is None:
-            vp_stage = 1 - int(getattr(get_args(), 'dualpipev_first_chunk', True))
+            vp_stage = 1 - int(getattr(get_adaptor_args(), 'dualpipev_first_chunk', True))
 
         # Count layer numbers in this stage.
         num_layers_to_build = self.layout[pp_rank][vp_stage].count(layer_type)
@@ -171,7 +172,7 @@ class PipelineParallelLayerLayoutDualpipeV:
         if pp_rank is None:
             pp_rank = parallel_state.get_pipeline_model_parallel_rank()
         if vp_stage is None:
-            vp_stage = 1 - int(getattr(get_args(), 'dualpipev_first_chunk', True))
+            vp_stage = 1 - int(getattr(get_adaptor_args(), 'dualpipev_first_chunk', True))
 
         # Calculate the offset by summing up the number of
         # layers in all the previous pipeline stages.
@@ -196,7 +197,7 @@ class PipelineParallelLayerLayoutDualpipeV:
         """Get the list of layer_id for each layer in the pipeline stage."""
 
         if vp_stage is None:
-            vp_stage = 1 - int(getattr(get_args(), 'dualpipev_first_chunk', True))
+            vp_stage = 1 - int(getattr(get_adaptor_args(), 'dualpipev_first_chunk', True))
 
         offset = self.get_layer_offset(layer_type=layer_type, vp_stage=vp_stage, pp_rank=pp_rank)
         num_layers_to_build = self.get_num_layers_to_build(

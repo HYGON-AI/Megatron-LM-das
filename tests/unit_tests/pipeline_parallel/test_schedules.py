@@ -14,7 +14,6 @@ from megatron.core.num_microbatches_calculator import destroy_num_microbatches_c
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.global_vars import (
     destroy_global_vars,
-    set_args,
     set_global_variables,
 )
 from tests.unit_tests.test_utilities import Utils
@@ -29,7 +28,8 @@ from hcu_megatron.core.pipeline_parallel.seq1f1b.schedules import (
     seq1f1b_forward_backward_pipelining_with_interleaving
 )
 from hcu_megatron.core.pipeline_parallel.ripipe_schedules import forward_backward_ripipe_pipelining
-from hcu_megatron.megatron_adaptor import destroy_adaptor_args, get_adaptor_args, repatch
+from hcu_megatron.megatron_adaptor import repatch
+from hcu_megatron.training.arguments import destroy_adaptor_args, get_adaptor_args
 
 rank = Utils.rank
 
@@ -69,18 +69,27 @@ def create_test_args():
      ("unsupport_schedule", forward_backward_pipelining_with_cutinhalf, True)]
 )
 def test_get_forward_backward_func(schedule_method, forward_backward_func, should_assert_error):
-    args = create_test_args()
+    adaptor_args = create_test_adaptor_args()
+    adaptor_args.schedule_method = schedule_method
+    megatron_args = create_test_args()
+    megatron_args.schedule_method = schedule_method
+    repatch(vars(adaptor_args), vars(megatron_args))
+
+    Utils.initialize_model_parallel(
+        tensor_model_parallel_size=2,
+        pipeline_model_parallel_size=4,
+    )
 
     context = (
         pytest.raises((AssertionError, ValueError)) if should_assert_error else nullcontext()
     )
     with context:
-        args.schedule_method = schedule_method
-        set_args(args)
         fb_func = schedule.get_forward_backward_func()
 
     if not should_assert_error:
         assert fb_func == forward_backward_func
+
+    Utils.destroy_model_parallel()
 
 
 def test_forward_backward_pipelining_with_cutinhalf(mocker):

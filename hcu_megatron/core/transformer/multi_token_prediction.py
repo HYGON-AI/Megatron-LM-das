@@ -11,7 +11,6 @@ from functools import wraps
 import torch
 from torch import Tensor
 
-from megatron.training import get_args
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.transformer.enums import LayerType
@@ -21,11 +20,13 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.multi_token_prediction import get_mtp_layer_offset
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 
+from hcu_megatron.training.arguments import get_adaptor_args
+
 
 def tie_word_embeddings_state_dict_wrapper(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if get_args().schedule_method == "dualpipev":
+        if get_adaptor_args().schedule_method == "dualpipev":
             return
 
         fn(*args, **kwargs)
@@ -71,7 +72,7 @@ def mtp_on_this_rank(
     else:
         # without custom PP layout, we only support put all of MTP layers on the last pipeline stage
         if mtp_num_layers is not None:
-            if get_args().schedule_method == 'dualpipev':
+            if get_adaptor_args().schedule_method == 'dualpipev':
                 mtp_on_this_rank = parallel_state.is_pipeline_first_stage(
                     ignore_virtual=True
                 )
@@ -89,7 +90,7 @@ def get_mtp_num_layers_to_build(
 ) -> int:
     """Get the number of MTP layers to build."""
 
-    args = get_args()
+    args = get_adaptor_args()
     dualpipev_first_chunk = getattr(model, "dualpipev_first_chunk", False) if model is not None else getattr(args, "dualpipev_first_chunk", False)
     if args.schedule_method == "dualpipev":
         if parallel_state.is_pipeline_first_stage(ignore_virtual=True) and not dualpipev_first_chunk:
@@ -274,8 +275,8 @@ class MultiTokenPredictionLayer:
                 outputs = checkpoint_handler()
 
         elif (
-            get_args().recompute_layer_ids is not None
-            or get_args().recompute_mtp_layer_ids is not None
+            get_adaptor_args().recompute_layer_ids is not None
+            or get_adaptor_args().recompute_mtp_layer_ids is not None
         ):
             # layer id is in recompute_mtp_layer_ids
             if get_recompute_mtp_layer_flag():
@@ -363,7 +364,7 @@ class MultiTokenPredictionBlock:
         """
 
         if (
-            get_args().schedule_method == "dualpipev"
+            get_adaptor_args().schedule_method == "dualpipev"
             and embedding.word_embeddings.weight is None
         ):
             from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
@@ -377,8 +378,8 @@ class MultiTokenPredictionBlock:
             layer_idx = 0 if self.mtp_use_repeated_layer else iteration
             global_iteration = iteration + offset
             with _fork_recompute_mtp_layer_flag():
-                if get_args().recompute_mtp_layer_ids is not None:
-                    set_recompute_mtp_layer_flag(global_iteration in get_args().recompute_mtp_layer_ids)
+                if get_adaptor_args().recompute_mtp_layer_ids is not None:
+                    set_recompute_mtp_layer_flag(global_iteration in get_adaptor_args().recompute_mtp_layer_ids)
                 (hidden_states, input_ids, position_ids, padding_mask) = self.layers[layer_idx](
                     input_ids=input_ids,
                     position_ids=position_ids,

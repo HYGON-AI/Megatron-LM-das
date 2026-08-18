@@ -1,15 +1,29 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # Some of this code was adopted from https://github.com/AMD-AGI/Primus
 
 from typing import List, Optional
 
 import torch
 
-import primus_turbo.pytorch as primus_turbo_torch
+try:
+    import primus_turbo.pytorch as primus_turbo_torch
+except ImportError:
+    primus_turbo_torch = None
 
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
+from megatron.core.transformer.moe.token_dispatcher import (
+    _HybridEPManager,
+    logger,
+    MoETokenDispatcher,
+)
+from megatron.core.transformer.moe.token_dispatcher import _DeepepManager as MegatronCoreDeepepManager
+from megatron.core.transformer.moe.token_dispatcher import MoEFlexTokenDispatcher as MegatronCoreMoEFlexTokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
+
+from hcu_megatron.core.transformer.moe.fused_a2a import fused_dispatch
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
@@ -37,9 +51,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
 
         if self.tp_size * self.ep_size <= 1:
             raise ValueError("DeepEP token dispatcher requires TPxEP > 1")
-        assert (
-            self.config.moe_enable_deepep
-        ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        if self.config.moe_token_dispatcher_type != "flex":
+            raise ValueError("DeepEP backend is only supported with flex token dispatcher.")
         assert (
             self.config.moe_pad_expert_input_to_capacity is False
         ), "DeepEP token dispatcher does not support --moe-pad-expert-input-to-capacity"
@@ -60,6 +73,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
         use_turbo_grouped_gemm = args.use_primus_grouped_gemm
+        assert primus_turbo_torch is not None, "Failed to import 'primus_turbo'. Please make sure it is installed."
         self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
@@ -201,3 +215,153 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         """
         hidden_states = self.deepep_dispatcher._post_combine(hidden_states)
         return hidden_states.view(self.hidden_shape)
+
+
+class _DeepepManager(MegatronCoreDeepepManager):
+    """
+    A manager class to handle fused all-to-all communication processes for MoE models using
+    DeepEP backend. See https://github.com/deepseek-ai/deepep for more details.
+
+    The workflow of the DeepEP dispatcher is:
+    (1) setup_metadata(): Process routing map and probabilities to prepare dispatch metadata
+    (2) dispatch():
+        - Use fused kernel to permute tokens and perform all-to-all communication in single step
+    (3) get_permuted_hidden_states_by_instances():
+        - Convert routing map and probabilities to multihot format
+        - Permute tokens using fused kernel
+    (4) get_restored_hidden_states_by_instances():
+        - Reverse permutation using fused kernel
+    (5) combine():
+        - Reverse process using fused kernel to unpermute and perform all-to-all in single step
+
+    This implementation uses fused communication kernels (fused_dispatch/fused_combine) that
+    combine permutation and communication operations for improved efficiency compared to
+    separate permute+alltoall steps.
+    """
+
+    def __init__(
+        self,
+        group: torch.distributed.ProcessGroup,
+        num_local_experts: int,
+        router_topk: int,
+        num_experts: int,
+        config: TransformerConfig,
+        num_worst_tokens: int = 0,
+    ):
+        """
+        Initialize the DeepEP dispatcher.
+
+        Args:
+            group (torch.distributed.ProcessGroup): The process group to use for communication.
+                This should be the ETPxEP group.
+            num_local_experts (int): The number of local experts.
+            router_topk (int): The number of experts for each token to select.
+            num_experts (int): The total number of experts in the group.
+            config (TransformerConfig): The configuration for the transformer model.
+            num_worst_tokens (int): the worst number of tokens to receive.
+        """
+        super().__init__(
+            group,
+            num_local_experts,
+            router_topk,
+            num_experts,
+            config,
+        )
+        self.num_worst_tokens = num_worst_tokens
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
+    ) -> torch.Tensor:
+        # DeepEP only supports float32 probs
+        if self.token_probs.dtype != torch.float32:
+            if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
+                logger.warning(
+                    "DeepEP only supports float32 probs, please set --moe-router-dtype=fp32"
+                )
+            self.token_probs = self.token_probs.float()  # downcast or upcast
+        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, handle = (
+            fused_dispatch(
+                hidden_states,
+                self.token_indices,
+                self.token_probs,
+                self.num_experts,
+                self.group,
+                async_finish=async_finish,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+                num_worst_tokens=self.num_worst_tokens,
+            )
+        )
+        self.handle = handle
+        self.tokens_per_expert = num_tokens_per_expert
+        self.dispatched_indices = dispatched_indices
+        self.dispatched_probs = dispatched_probs
+
+        return hidden_states
+
+
+class MoEFlexTokenDispatcher(MegatronCoreMoEFlexTokenDispatcher):
+    """A flexible token dispatcher that abstracts the underlying tensor and expert
+    parallelism. It uses a single communication group over all TP and EP ranks,
+    making the dispatch logic independent of the specific parallelism strategy.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        """
+        Initialize the Flex token dispatcher.
+
+        Args:
+            num_local_experts (int): Number of local experts on the current device.
+            local_expert_indices (List[int]): Indices of local experts on the current device.
+            config (TransformerConfig): Configuration for the transformer model.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
+        """
+        super(MegatronCoreMoEFlexTokenDispatcher, self).__init__(config=config, pg_collection=pg_collection)
+
+        self.num_local_experts = num_local_experts
+        self.local_expert_indices = local_expert_indices
+        if self.config.moe_flex_dispatcher_backend == "deepep":
+            assert self.tp_size * self.ep_size > 1, "DeepEP dispatcher requires TPxEP > 1"
+
+            args = get_args()
+            # enable sync-free moe to elimiate deepep cpu busy-wait
+            num_worst_tokens = 0
+            if get_adaptor_args().sync_free_moe and get_adaptor_args().sync_free_moe_backend == "deepep":
+                if args.sequence_parallel:
+                    seq_length = args.seq_length // self.tp_size
+                else:
+                    seq_length = args.seq_length
+                num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size
+                num_worst_tokens = num_tokens * self.tp_ep_group.size()
+
+            self._comm_manager = _DeepepManager(
+                group=self.tp_ep_group,
+                num_local_experts=self.num_local_experts,
+                router_topk=self.tp_size * self.config.moe_router_topk,
+                num_experts=self.tp_size * self.config.num_moe_experts,
+                config=self.config,
+                num_worst_tokens=num_worst_tokens,
+            )
+            self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.token_indices']
+        elif self.config.moe_flex_dispatcher_backend == "hybridep":
+            self._comm_manager = _HybridEPManager(
+                group=self.tp_ep_group,
+                num_local_experts=self.num_local_experts,
+                num_experts=self.tp_size * self.config.num_moe_experts,
+                config=self.config,
+            )
+            self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.routing_map']
+        else:
+            raise ValueError(
+                f"Invalid backend: {self.config.moe_flex_dispatcher_backend}"
+                "Please set --moe-flex-dispatcher-backend=deepep or "
+                "--moe-flex-dispatcher-backend=hybridep"
+            )

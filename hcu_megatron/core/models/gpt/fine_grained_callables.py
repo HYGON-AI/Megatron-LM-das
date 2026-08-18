@@ -8,8 +8,8 @@ from typing import Callable, Optional
 import torch
 from torch import Tensor
 
-from megatron.training import get_args
 from megatron.core import parallel_state, tensor_parallel
+from megatron.core.inference.utils import InferenceMode
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
@@ -38,6 +38,8 @@ try:
     HAVE_TE = True
 except ImportError:
     HAVE_TE = False
+
+from hcu_megatron.training.arguments import get_adaptor_args
 
 
 class TransformerLayerNode(MegatronCoreTransformerLayerNode):
@@ -83,7 +85,7 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
             else:
                 data = tuple([make_viewless(e) if isinstance(e, torch.Tensor) else e for e in data])
 
-            if not get_args().integrate_recompute_to_ep_comm_overlap or is_recompute:
+            if not get_adaptor_args().integrate_recompute_to_ep_comm_overlap or is_recompute:
                 self.outputs = data
 
             if stream_record_event is not None:
@@ -116,11 +118,11 @@ class TransformerLayerNode(MegatronCoreTransformerLayerNode):
 
     def detach(self, t):
         """Detaches a tensor and stores it for backward computation."""
-        if get_args().integrate_recompute_to_ep_comm_overlap and not self.is_recompute:
+        if get_adaptor_args().integrate_recompute_to_ep_comm_overlap and not self.is_recompute:
             return t
         detached = make_viewless(t).detach()
         detached.requires_grad = t.requires_grad
-        if not get_args().integrate_recompute_to_ep_comm_overlap or self.is_recompute:
+        if not get_adaptor_args().integrate_recompute_to_ep_comm_overlap or self.is_recompute:
             self.before_detached = self.before_detached + (t,)
             self.detached = self.detached + (detached,)
         return detached
@@ -351,6 +353,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
     @copy_signature(layer._forward_mlp, handle_first_dst_param='preserve')
     def mlp_wrapper(node: ScheduleNode, *args, **kwargs):
         """Wrapper for Dense forward."""
+        kwargs.pop("is_recompute", None)
         return layer._forward_mlp(*args, **kwargs)
 
     def raise_not_implemented(*args):
@@ -389,7 +392,7 @@ def build_mtp_layer_callables_without_split_attn(layer):
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
             if (
-                get_args().schedule_method == "dualpipev"
+                get_adaptor_args().schedule_method == "dualpipev"
                 and node.chunk_state.model.embedding.word_embeddings.weight is None
             ):
                 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
@@ -524,19 +527,39 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         hidden_states: torch.Tensor,
         is_recompute=False,
     ):
-        # Residual connection.
-        residual = hidden_states
-
         # Optional Input Layer norm
         if layer.recompute_input_layernorm:
             layer.input_layernorm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(layer.offload_attn_norm, hidden_states, "attn_norm") as hidden_states:
                 input_layernorm_output = layer.input_layernorm_checkpoint.checkpoint(
-                    layer.input_layernorm, hidden_states
+                    apply_module(layer.input_layernorm), hidden_states
                 )
         else:
             with off_interface(layer.offload_attn_norm, hidden_states, "attn_norm") as hidden_states:
-                input_layernorm_output = layer.input_layernorm(hidden_states)
+                input_layernorm_output = apply_module(layer.input_layernorm)(hidden_states)
+
+        if isinstance(input_layernorm_output, tuple):
+            if len(input_layernorm_output) != 2:
+                raise ValueError(
+                    f"When the output of input_layernorm is a tuple, it is "
+                    f"expected to have 2 elements (output, residual), but "
+                    f"got {len(input_layernorm_output)}"
+                )
+            input_layernorm_output, residual = input_layernorm_output
+        else:
+            residual = hidden_states
+
+        if layer.config.fp32_residual_connection:
+            residual = residual.float()
+
+        using_fused_tp_inference_kernel = (
+            InferenceMode.is_active() and layer.config.inference_fuse_tp_communication
+        )
+
+        if using_fused_tp_inference_kernel:
+            # Set the residual for fused reduce-scatter + add + layer-norm + all-gather
+            # operation in attention's out_proj (linear_proj)
+            layer._set_proj_residual(residual)
 
         # Self attention.
         qkv_output = layer.self_attention.compute_qkv(
@@ -608,7 +631,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
 
         return hidden_states
 
-    def _submodule_attention_proj_router_compound_forward(
+    def submodule_attention_proj_router_shared_expert_compound_forward(
         node: ScheduleNode,
         core_attn_out,
         is_recompute=False,
@@ -617,21 +640,18 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         Performs a combined forward pass that includes self-attention and MLP routing logic.
         """
 
-        hidden_states = submodule_attention_proj_forward(
-            node,
-            core_attn_out,
-        )
+        hidden_states = submodule_attention_proj_forward(node, core_attn_out,)
 
         # Optional Layer norm post the cross-attention.
         if layer.recompute_pre_mlp_layernorm:
             layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm") as hidden_states:
                 pre_mlp_layernorm_output = layer.pre_mlp_norm_checkpoint.checkpoint(
-                    layer.pre_mlp_layernorm, hidden_states
+                    apply_module(layer.pre_mlp_layernorm), hidden_states
                 )
         else:
             with off_interface(layer.offload_mlp_norm, hidden_states, "mlp_norm") as hidden_states:
-                pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states)
+                pre_mlp_layernorm_output = apply_module(layer.pre_mlp_layernorm)(hidden_states)
 
         # When using fused residual norm (e.g. TEFusedResidualRMSNorm),
         # the layernorm returns (normalized_output, residual). Unpack
@@ -645,69 +665,11 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
                 )
             pre_mlp_layernorm_output, hidden_states = pre_mlp_layernorm_output
 
+        shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
         probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
         local_tokens, probs = layer.mlp.preprocess(
             pre_mlp_layernorm_output, probs, routing_map, is_recompute=is_recompute
         )
-
-        outputs = [
-            hidden_states,
-            local_tokens,
-            probs,
-            pre_mlp_layernorm_output,
-        ]
-        return tuple(outputs)
-
-    def _submodule_shared_expert_forward(node: ScheduleNode, pre_mlp_layernorm_output, is_recompute=False,):
-        """
-        Performs a forward pass for shared experts.
-        """
-        def custom_forward(pre_mlp_layernorm_output):
-            return layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-
-        args = [
-            pre_mlp_layernorm_output,
-        ]
-        if layer.mlp.moe_layer_recompute:
-            if layer.config.fp8 or layer.config.fp4:
-                shared_expert_output = te_checkpoint(
-                    custom_forward,
-                    False,
-                    tensor_parallel.random.get_cuda_rng_tracker,
-                    parallel_state.get_tensor_model_parallel_group(),
-                    *args,
-                )
-            else:
-                shared_expert_output = tensor_parallel.checkpoint(
-                    custom_forward, False, *args
-                )
-        else:
-            shared_expert_output = custom_forward(*args)
-        del args
-
-        return shared_expert_output
-
-    def submodule_attention_proj_router_shared_expert_compound_forward(
-        node: ScheduleNode,
-        core_attn_out,
-        is_recompute=False,
-    ):
-        """
-        Performs a combined forward pass that includes self-attention, MLP routing and shared-experts logic.
-        """
-
-        (
-            hidden_states,
-            local_tokens,
-            probs,
-            pre_mlp_layernorm_output,
-        ) = _submodule_attention_proj_router_compound_forward(
-            node,
-            core_attn_out,
-            is_recompute=is_recompute,
-        )
-
-        shared_expert_output = _submodule_shared_expert_forward(node, pre_mlp_layernorm_output)
 
         # Detach here for mlp_bda residual connection
         node.layer_state.residual = node.detach(hidden_states)
@@ -833,6 +795,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
 
     def mlp_wrapper(node: ScheduleNode, *args, **kwargs):
         """Wrapper for Dense forward."""
+        kwargs.pop("is_recompute", None)
         output = layer._forward_mlp(*args, **kwargs)
         return output
 
@@ -893,14 +856,14 @@ def build_mtp_layer_callables_with_split_attn(layer):
     is_moe = isinstance(layer.mtp_model_layer.mlp, MoELayer)
     assert is_moe, "MTP layer in a2a overlap only supports MoE layer for now."
 
-    def submodule_mtp_attn_qkv_forward(node, hidden_states):
+    def submodule_mtp_attn_qkv_forward(node, hidden_states, is_recompute=False):
         # MTP Block Preprocess
         if node.is_first_layer:
             offset = get_mtp_layer_offset(layer.config, node.chunk_state.model.vp_stage)
             node.chunk_state.mtp_hidden_states = list(torch.chunk(hidden_states, 1 + offset, dim=0))
             hidden_states = node.chunk_state.mtp_hidden_states[offset]
             if (
-                get_args().schedule_method == "dualpipev"
+                get_adaptor_args().schedule_method == "dualpipev"
                 and node.chunk_state.model.embedding.word_embeddings.weight is None
             ):
                 from hcu_megatron.core.models.common.language_module.language_module import get_shared_embedding_from_dual_chunk
@@ -935,9 +898,9 @@ def build_mtp_layer_callables_with_split_attn(layer):
         # fp8 context is added in 1f1b schedule, so we don't need to add it here
         with rng_context:
             hidden_states = layer._concat_embeddings(hidden_states, decoder_input)
-            return attn_qkv_forward(node, hidden_states)
+            return attn_qkv_forward(node, hidden_states, is_recompute=is_recompute)
 
-    def submodule_mtp_postprocess_forward(node, hidden_states):
+    def submodule_mtp_postprocess_forward(node, hidden_states, is_recompute=False):
         hidden_states = layer._postprocess(hidden_states)
         node.chunk_state.mtp_hidden_states.append(hidden_states)
         if node.is_last_layer:
@@ -976,32 +939,32 @@ def build_mtp_layer_callables_with_split_attn(layer):
         mtp_post_process_func,
     ]
 
-    attn_proj_dw_funcs = [layer.transformer_layer.self_attention.linear_proj]
-    if is_moe and layer.transformer_layer.mlp.use_shared_expert and not layer.transformer_layer.mlp.shared_expert_overlap:
-        attn_proj_dw_funcs.append(layer.transformer_layer.mlp.shared_experts)
+    attn_proj_dw_funcs = [layer.mtp_model_layer.self_attention.linear_proj]
+    if is_moe and layer.mtp_model_layer.mlp.use_shared_expert and not layer.mtp_model_layer.mlp.shared_expert_overlap:
+        attn_proj_dw_funcs.append(layer.mtp_model_layer.mlp.shared_experts)
 
-    if isinstance(layer.transformer_layer.self_attention, MLASelfAttention):
+    if isinstance(layer.mtp_model_layer.self_attention, MLASelfAttention):
         attn_qkv_dw_funcs = [
-            layer.transformer_layer.self_attention.linear_kv_up_proj,
-            layer.transformer_layer.self_attention.linear_kv_down_proj,
+            layer.mtp_model_layer.self_attention.linear_kv_up_proj,
+            layer.mtp_model_layer.self_attention.linear_kv_down_proj,
             layer.eh_proj,
         ]
         if layer.config.q_lora_rank is None:
             attn_qkv_dw_funcs.append(
-                layer.transformer_layer.self_attention.linear_q_proj
+                layer.mtp_model_layer.self_attention.linear_q_proj
             )
         else:
             attn_qkv_dw_funcs.extend([
-                layer.transformer_layer.self_attention.linear_q_down_proj,
-                layer.transformer_layer.self_attention.linear_q_up_proj
+                layer.mtp_model_layer.self_attention.linear_q_down_proj,
+                layer.mtp_model_layer.self_attention.linear_q_up_proj
             ])
     else:
-        attn_qkv_dw_funcs = [layer.transformer_layer.self_attention.linear_qkv, layer.eh_proj]
+        attn_qkv_dw_funcs = [layer.mtp_model_layer.self_attention.linear_qkv, layer.eh_proj]
 
     backward_dw = {
         "attn_qkv": attn_qkv_dw_funcs,
         "attn_proj": attn_proj_dw_funcs,
-        "mlp": layer.transformer_layer.mlp.experts if is_moe else None
+        "mlp": layer.mtp_model_layer.mlp.experts if is_moe else None
     }
     return forward_funcs, backward_dw
 

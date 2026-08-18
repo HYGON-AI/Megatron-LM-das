@@ -712,6 +712,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: str | None = None,
     ):
         args = get_args()
         self.offload = False # args.offload and "column_parallel_gemm" in args.offload_ops
@@ -729,6 +730,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            name=name,
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -934,6 +936,7 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: str | None = None,
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -947,10 +950,11 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            name=name,
         )
 
         tp_size = get_pg_size(self._tp_group)
-        assert tp_size == 1, "PrimusTurboColumnParallelGroupedLinear only supports tensor parallel size = 1"
+        assert tp_size == 1, "PrimusTurboColumnParallelGroupedLinear only supports expert tensor parallel size = 1"
 
 
 class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
@@ -972,6 +976,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: str | None = None,
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -985,7 +990,8 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            name=name,
         )
 
         tp_size = get_pg_size(self._tp_group)
-        assert tp_size == 1, "PrimusTurboRowParallelGroupedLinear only supports tensor parallel size = 1"
+        assert tp_size == 1, "PrimusTurboRowParallelGroupedLinear only supports expert tensor parallel size = 1"
