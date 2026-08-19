@@ -36,6 +36,8 @@ RUN wget -q "${AICC_URL}" -O /tmp/aicc.run && \
 RUN TORCH_VERSION=2.10.0 \
     && TORCH_TAG="torch${TORCH_VERSION//./}" \
     && pip install --no-cache-dir torch==${TORCH_VERSION} torchvision \
+    && das-install flash_attn ${TORCH_TAG} \
+    && das-install triton ${TORCH_TAG} \
     && das-install apex ${TORCH_TAG} \
     && das-install deepspeed ${TORCH_TAG} \
     && das-install transformer-engine ${TORCH_TAG} \
