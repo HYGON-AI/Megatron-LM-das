@@ -1,7 +1,9 @@
 name: docker-image
 
 on:
-  pull_request:
+  schedule:
+    # 每天晚上 12 点（北京时间），GitHub cron 使用 UTC 时间
+    - cron: "0 16 * * *"
 
 env:
   HARBOR_SITE: 10.16.1.152:5000
@@ -28,6 +30,7 @@ jobs:
         run: |
           BUILD_TIME=$(date +"%Y%m%d-%H%M")
           echo "IMAGE_TAG=megatron:0.18.2-ubuntu22.04-dtk2604-py3.10-${BUILD_TIME}" >> "$GITHUB_ENV"
+          echo "LATEST_TAG=megatron:0.18.2-latest" >> "$GITHUB_ENV"
 
       - name: Build
         run: |
@@ -37,6 +40,10 @@ jobs:
             -t "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" \
             -f docker/Dockerfile .
 
+      - name: 打两个 tag
+        run: |
+          docker tag "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}"
+
       - name: Login to Harbor
         run: |
           echo "${{ secrets.HARBOR_PASSWORD }}" | docker login "${HARBOR_SITE}" -u "${{ secrets.HARBOR_USERNAME }}" --password-stdin
@@ -44,8 +51,9 @@ jobs:
       - name: Push
         run: |
           docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
+          docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}"
 
       - name: 删除本地镜像
         if: always()
         run: |
-          docker rmi "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
+          docker rmi "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}"
