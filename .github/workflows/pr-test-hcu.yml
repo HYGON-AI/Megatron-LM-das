@@ -259,7 +259,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: python3 -m pip install -r requirements/requirements.txt
+        run: python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
 
       - name: Run unit tests
         uses: ./.github/actions/run-test

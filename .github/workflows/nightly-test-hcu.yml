@@ -214,7 +214,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: python3 -m pip install -r requirements/requirements.txt
+        run: python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
 
       - name: Run Qwen3-8B pretrain example
         uses: ./.github/actions/run-test
@@ -301,7 +301,7 @@ jobs:
 
       - name: Install requirements
         shell: bash
-        run: python3 -m pip install -r requirements/requirements.txt
+        run: python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
 
       - name: Run Qwen3-8B SFT example
         uses: ./.github/actions/run-test
