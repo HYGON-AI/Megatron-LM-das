@@ -44,3 +44,8 @@ jobs:
       - name: Push
         run: |
           docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
+
+      - name: 删除本地镜像
+        if: always()
+        run: |
+          docker rmi "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
