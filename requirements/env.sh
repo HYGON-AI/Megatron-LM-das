@@ -9,16 +9,11 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export NCCL_ALGO=Ring
-export NCCL_MAX_NCHANNELS=32
-export NCCL_MIN_NCHANNELS=32
-export NCCL_NCHANNELS_PER_PEER=2
-export NCCL_MIN_P2P_NCHANNELS=32
-export NCCL_MAX_P2P_NCHANNELS=32
 export NCCL_NET_GDR_LEVEL=4
 export NCCL_NET_GDR_READ=1
 export RCCL_SDMA_COPY_ENABLE=0
 
-export PYTHONPATH=${MEGATRON_PATH}/3rparty/Megatron-LM:${MEGATRON_PATH}/3rparty/Megatron-Bridge/src:$PYTHONPATH
+export PYTHONPATH=${MEGATRON_PATH}/3rdparty/Megatron-LM:${MEGATRON_PATH}/3rdparty/Megatron-Bridge/src:$PYTHONPATH
 export TRITON_HOME=/tmp
 
 # These variables should be modified according to the environment of the machine you are using.
