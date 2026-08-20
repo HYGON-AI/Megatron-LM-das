@@ -201,7 +201,6 @@ jobs:
       GPUS_PER_NODE: "8"
       DAS_HCU_CI_RUN_ID: nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
       DAS_HCU_CI_LOG_DIR: ci-logs/nightly-pretrain-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-pretrain
       MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
       DTK_ENV: /opt/dtk/env.sh
     steps:
@@ -288,7 +287,6 @@ jobs:
       GPUS_PER_NODE: "8"
       DAS_HCU_CI_RUN_ID: nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
       DAS_HCU_CI_LOG_DIR: ci-logs/nightly-sft-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_ARTIFACT_NAME: das-nightly-qwen3-8b-sft
       MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
       DTK_ENV: /opt/dtk/env.sh
     steps:
