@@ -37,7 +37,7 @@ dataset prefix，SFT 使用目录下的 `train.jsonl` 和 `valid.jsonl`。
 | 变量 | PR | Nightly | 说明 |
 |---|---|---|---|
 | `DAS_HCU_CI_RUNNER_LABEL` | 必填 | 必填 | 专用 HCU runner 标签 |
-| `DAS_HCU_CI_IMAGE` | 必填 | 必填 | 必须固定为 `仓库@sha256:<digest>` |
+| `DAS_HCU_CI_IMAGE` | 必填 | 必填 | 训练镜像滚动 tag，形如 `<harbor>/megatron:0.18.2-latest` |
 | `DAS_HCU_ASSET_ROOT` | - | 必填 | 模型和数据共同根目录，只读挂载 |
 | `DAS_QWEN3_8B_MODEL_PATH` | - | 必填 | Qwen3-8B Hugging Face 模型绝对路径 |
 | `DAS_QWEN3_PRETRAIN_DATA_PATH` | - | pretrain 必填 | Megatron indexed dataset 绝对前缀 |
@@ -71,5 +71,14 @@ Bridge 子模块，再设置 `PYTHONPATH`。PR 将 `BUCKET=tests/unit_tests` 传
 
 ## 镜像
 
-`.github/workflows/docker-image.yml` 负责构建并推送训练镜像。测试 workflow 不消费
-可变 tag；镜像验证后由管理员将完整 digest 更新到 `DAS_HCU_CI_IMAGE`。
+`.github/workflows/docker-image.yml` 负责构建并推送训练镜像，每次构建同时推送带时间戳
+的 tag 和滚动 tag `0.18.2-latest`。
+
+测试 workflow 通过仓库变量 `DAS_HCU_CI_IMAGE` 消费该滚动 tag，不再需要在每次构建后手工
+更新 digest。
+
+HCU runner 主机上有一个每天 01:30 触发的 systemd user timer
+(`docker-pull-megatron.timer`)，负责把滚动 tag 拉到本地，并只保留最近 3 个构建以控制磁盘
+占用。构建 workflow 在 00:40 前后完成推送，因此拉取时取到的即为当日镜像。
+
+若需临时回退到某个历史构建，把 `DAS_HCU_CI_IMAGE` 改成对应的时间戳 tag 即可。

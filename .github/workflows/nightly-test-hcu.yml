@@ -93,8 +93,8 @@ jobs:
           set -euo pipefail
 
           [[ -n "${RUNNER_LABEL}" ]] || { echo "ERROR: DAS_HCU_CI_RUNNER_LABEL is not configured" >&2; exit 1; }
-          [[ "${IMAGE}" =~ @sha256:[0-9a-fA-F]{64}$ ]] || {
-            echo "ERROR: DAS_HCU_CI_IMAGE must use an immutable sha256 digest" >&2
+          [[ "${IMAGE}" == *:* ]] || {
+            echo "ERROR: DAS_HCU_CI_IMAGE must include an explicit tag" >&2
             exit 1
           }
 
