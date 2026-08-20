@@ -1,7 +1,9 @@
 # Copyright (c) 2026, HYGON-AI. All rights reserved.
 #
 # Reusable test-execution action (mirrors upstream .github/actions):
-# env-check -> workspace prepare -> run test script -> cleanup -> upload logs.
+# env-check -> workspace prepare -> run test script -> cleanup.
+# Artifact upload is intentionally omitted: the shared org storage quota
+# would otherwise fail every run once full (see #13).
 name: Run DAS test
 description: Run a DAS test script inside the configured HCU container
 
@@ -31,25 +33,8 @@ runs:
         bash "${TEST_SCRIPT}" 2>&1 | tee -a "${DAS_HCU_CI_LOG_DIR}/test.log"
         exit "${PIPESTATUS[0]}"
 
-    - name: Compute artifact name
-      if: always()
-      shell: bash
-      run: |
-        name="${DAS_HCU_CI_ARTIFACT_NAME:-das-logs}"
-        name="${name//\//-}"
-        echo "DAS_HCU_CI_ARTIFACT_NAME=${name}" >> "${GITHUB_ENV}"
-
     - name: Cleanup
       if: always()
       shell: bash
       run: |
         bash tests/das/ci/cleanup.sh || true
-
-    - name: Upload logs
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-      with:
-        name: ${{ env.DAS_HCU_CI_ARTIFACT_NAME }}-${{ github.run_id }}-${{ github.run_attempt }}
-        path: ${{ env.DAS_HCU_CI_LOG_DIR }}
-        if-no-files-found: warn
-        retention-days: 14

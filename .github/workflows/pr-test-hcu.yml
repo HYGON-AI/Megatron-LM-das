@@ -242,7 +242,6 @@ jobs:
     env:
       DAS_HCU_CI_RUN_ID: unit-${{ github.run_id }}-${{ github.run_attempt }}
       DAS_HCU_CI_LOG_DIR: ci-logs/unit-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_ARTIFACT_NAME: das-unit-tests
       BUCKET: tests/unit_tests
       N_REPEAT: "1"
       MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
