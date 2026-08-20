@@ -26,3 +26,5 @@ tensorboard
 tensorboardX
 scipy
 psutil
+setuptools == 80.8.0
+setuptools-scm == 9.2.2
