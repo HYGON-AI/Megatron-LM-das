@@ -69,7 +69,7 @@ GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 # Respect an externally provided MEGATRON_PATH (CI runs this copy from
-# tests/das/nightly, where the default computation resolves too shallow).
+# tests/bw1100/nightly, where the default computation resolves too shallow).
 MEGATRON_PATH=${MEGATRON_PATH:-$( dirname $( dirname ${CURRENT_DIR}))}
 
 # default env

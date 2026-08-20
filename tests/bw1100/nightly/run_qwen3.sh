@@ -23,7 +23,7 @@ TRAINING_MODE="${TRAINING_MODE:-pretrain}"
 # requirements/env.sh is the example's own env (NCCL_ALGO, GLOO/NCCL ifnames,
 # HSA_FORCE_FINE_GRAIN_PCIE, CUDA_DEVICE_MAX_CONNECTIONS=1, ...). It derives
 # MEGATRON_PATH from $0, which resolves to "/" when env.sh is sourced from
-# another script, so restore it afterwards. MEGATRON_PATH is the das repo root
+# another script, so restore it afterwards. MEGATRON_PATH is this repo root
 # (that is where the entry scripts live); 3rdparty/* is only on PYTHONPATH,
 # which prepare_workspace.sh owns.
 source "${repo_root}/requirements/env.sh"
@@ -68,7 +68,7 @@ mpirun -np 8 --hostfile "${HOSTFILE}" --allow-run-as-root --bind-to none \
         source ${DTK_ENV}
         export MEGATRON_PATH=${repo_root}
         export GLOO_SOCKET_IFNAME=eth0 NCCL_SOCKET_IFNAME=eth0
-        cd ${repo_root}/tests/das/nightly
+        cd ${repo_root}/tests/bw1100/nightly
         bash train_qwen3_8B.sh ${DIST_URL} ${DIST_PORT} \
             --data_path=${DATA_PATH} \
             --launch_backend=mpirun \

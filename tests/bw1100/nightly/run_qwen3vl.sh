@@ -20,8 +20,8 @@ done
 # requirements/env.sh is the example's own env (NCCL_ALGO, GLOO/NCCL ifnames,
 # HSA_FORCE_FINE_GRAIN_PCIE, CUDA_DEVICE_MAX_CONNECTIONS=1, ...). It derives
 # MEGATRON_PATH from $0, which resolves to "/" when env.sh is sourced from
-# another script, so restore it afterwards. MEGATRON_PATH is the das repo root:
-# the VL entry ${MEGATRON_PATH}/pretrain_vlm.py must be the das one (it
+# another script, so restore it afterwards. MEGATRON_PATH is this repo root:
+# the VL entry ${MEGATRON_PATH}/pretrain_vlm.py must be this repo one (it
 # registers --vlm-data-config-path / --model-arch / --processor-path via
 # hcu_megatron), not the upstream copy under 3rdparty/. PYTHONPATH is owned by
 # prepare_workspace.sh; env.sh only prepends to it, so it is left alone.
@@ -51,7 +51,7 @@ echo "=== nightly VL launch ==="
 echo "backend=torchrun nodes=${NNODES} gpus=${GPUS_PER_NODE} iters=${TRAIN_ITERS}"
 echo "data_config=${DATA_PATH}"
 
-cd "${repo_root}/tests/das/nightly"
+cd "${repo_root}/tests/bw1100/nightly"
 bash train_qwen3vl_8B.sh \
     "${MASTER_ADDR}" "${MASTER_PORT}" \
     --data_path=${DATA_PATH} \

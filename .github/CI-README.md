@@ -16,9 +16,9 @@ job，分别显示结果并在每个阶段后恢复 runner 工作区属主。即
 
 ## Qwen3-8B 训练入口
 
-Nightly 维护 CI 专用副本 `tests/das/nightly/train_qwen3_8B.sh`（复制自
+Nightly 维护 CI 专用副本 `tests/bw1100/nightly/train_qwen3_8B.sh`（复制自
 `examples/qwen3/train_qwen3_8B.sh`，便于追加 nightly 专属参数而不改动共享
-example），通过 `tests/das/nightly/run_qwen3.sh` 启动：以 **mpirun**（example
+example），通过 `tests/bw1100/nightly/run_qwen3.sh` 启动：以 **mpirun**（example
 的默认后端）拉起 8 个 rank，source `requirements/env.sh` 提供
 `CUDA_DEVICE_MAX_CONNECTIONS=1` 等训练必需环境，并把数据集索引缓存重定向到
 容器可写目录（资产挂载只读）。
@@ -36,16 +36,16 @@ dataset prefix，SFT 使用目录下的 `train.jsonl` 和 `valid.jsonl`。资产
 位于 `DAS_HCU_ASSET_ROOT` 之下（workflow 校验）。
 
 两个 run 脚本都在 source `requirements/env.sh` 之后重新导出 `MEGATRON_PATH`：
-env.sh 用 `$0` 推算该变量，被别的脚本 source 时会算成 `/`。它应当指向 **das 仓库
-根**——训练入口 `pretrain_gpt.py` / `pretrain_vlm.py` 的仓库版本才注册了 das 扩展
+env.sh 用 `$0` 推算该变量，被别的脚本 source 时会算成 `/`。它应当指向 **本仓库
+根**——训练入口 `pretrain_gpt.py` / `pretrain_vlm.py` 的仓库版本才注册了本仓库的扩展
 参数（`--vlm-data-config-path`、`--model-arch` 等），`3rdparty/Megatron-LM` 下的
 上游同名文件没有。
 
 ## Qwen3-VL-8B SFT 入口
 
-`tests/das/nightly/train_qwen3vl_8B.sh` 同样是 `examples/qwen3/train_qwen3vl_8B.sh`
+`tests/bw1100/nightly/train_qwen3vl_8B.sh` 同样是 `examples/qwen3/train_qwen3vl_8B.sh`
 的 CI 副本（把写死的 `TRAIN_ITERS` 改为可由环境注入），由
-`tests/das/nightly/run_qwen3vl.sh` 以 **torchrun** 拉起 8 个 rank。torchrun 不提供
+`tests/bw1100/nightly/run_qwen3vl.sh` 以 **torchrun** 拉起 8 个 rank。torchrun 不提供
 `OMPI_COMM_WORLD_*`，因此包装脚本显式导出 `NODE_RANK`/`NNODES`/`GPUS_PER_NODE`。
 
 `DATA_PATH` 指向 `vlm-config.json`（VL 数据集描述文件，其中的 `path` 必须是可读的
@@ -78,7 +78,7 @@ PR 单测、Nightly pretrain、Nightly SFT 各自在容器中执行：
 python3 -m pip install -r requirements/requirements.txt
 ```
 
-随后 `tests/das/ci/prepare_workspace.sh` 初始化并核对固定的 Megatron-LM、Energon、
+随后 `tests/bw1100/ci/prepare_workspace.sh` 初始化并核对固定的 Megatron-LM、Energon、
 Bridge 子模块，再设置 `PYTHONPATH`。PR 将 `BUCKET=tests/unit_tests` 传给现有
 `tests/unit_tests/run_ci_test.sh`，因此该目录新增的测试会自动纳入。
 

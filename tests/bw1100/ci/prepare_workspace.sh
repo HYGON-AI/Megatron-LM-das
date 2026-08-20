@@ -26,7 +26,7 @@ prepare_das_workspace() {
 
     # Top-level submodules only (non-recursive): Megatron-Bridge contains the
     # nested 3rdparty/Megatron-LM submodule whose gitlink cannot be resolved,
-    # and das code does not use Bridge. Switch to --recursive only if needed.
+    # and repo code does not use Bridge. Switch to --recursive only if needed.
     git -C "${repo_root}" submodule sync
     git -C "${repo_root}" submodule update --init
 
@@ -54,7 +54,7 @@ prepare_das_workspace() {
     joined_python_path="$(IFS=:; printf '%s' "${python_paths[*]}")"
     export PYTHONPATH="${joined_python_path}${PYTHONPATH:+:${PYTHONPATH}}"
 
-    echo "DAS workspace prepared at ${repo_root}"
+    echo "HCU CI workspace prepared at ${repo_root}"
 }
 
 prepare_das_workspace

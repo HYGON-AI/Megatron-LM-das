@@ -243,7 +243,7 @@ jobs:
       - name: Run Qwen3-8B pretrain example
         uses: ./.github/actions/run-test
         with:
-          test_script: tests/das/nightly/run_qwen3.sh
+          test_script: tests/bw1100/nightly/run_qwen3.sh
 
   restore-after-pretrain:
     name: Restore workspace after pretrain
@@ -261,7 +261,7 @@ jobs:
     steps:
       - name: Restore runner workspace ownership
         shell: bash
-        run: bash tests/das/ci/restore_runner_permissions.sh
+        run: bash tests/bw1100/ci/restore_runner_permissions.sh
 
   sft:
     name: Qwen3-8B SFT (10 steps)
@@ -326,7 +326,7 @@ jobs:
       - name: Run Qwen3-8B SFT example
         uses: ./.github/actions/run-test
         with:
-          test_script: tests/das/nightly/run_qwen3.sh
+          test_script: tests/bw1100/nightly/run_qwen3.sh
 
   restore-after-sft:
     name: Restore workspace after SFT
@@ -344,7 +344,7 @@ jobs:
     steps:
       - name: Restore runner workspace ownership
         shell: bash
-        run: bash tests/das/ci/restore_runner_permissions.sh
+        run: bash tests/bw1100/ci/restore_runner_permissions.sh
 
   vl-sft:
     name: Qwen3-VL-8B SFT (10 steps)
@@ -401,7 +401,7 @@ jobs:
       - name: Run Qwen3-VL-8B SFT example
         uses: ./.github/actions/run-test
         with:
-          test_script: tests/das/nightly/run_qwen3vl.sh
+          test_script: tests/bw1100/nightly/run_qwen3vl.sh
 
   restore-after-vl-sft:
     name: Restore workspace after VL SFT
@@ -419,7 +419,7 @@ jobs:
     steps:
       - name: Restore runner workspace ownership
         shell: bash
-        run: bash tests/das/ci/restore_runner_permissions.sh
+        run: bash tests/bw1100/ci/restore_runner_permissions.sh
 
   finish:
     name: Finish
