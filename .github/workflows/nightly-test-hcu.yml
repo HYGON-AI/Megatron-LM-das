@@ -191,11 +191,8 @@ jobs:
       TRAINING_MODE: pretrain
       TRAIN_ITERS: "10"
       LOAD_HF_WEIGHTS: "true"
-      LAUNCH_BACKEND: torchrun
       DIST_URL: localhost
       DIST_PORT: "29500"
-      MASTER_ADDR: localhost
-      MASTER_PORT: "29500"
       NNODES: "1"
       NODE_RANK: "0"
       GPUS_PER_NODE: "8"
@@ -218,7 +215,7 @@ jobs:
       - name: Run Qwen3-8B pretrain example
         uses: ./.github/actions/run-test
         with:
-          test_script: examples/qwen3/train_qwen3_8B.sh
+          test_script: tests/das/nightly/run_qwen3.sh
 
   restore-after-pretrain:
     name: Restore workspace after pretrain
@@ -277,11 +274,8 @@ jobs:
       TRAINING_MODE: sft
       TRAIN_ITERS: "10"
       LOAD_HF_WEIGHTS: "true"
-      LAUNCH_BACKEND: torchrun
       DIST_URL: localhost
       DIST_PORT: "29501"
-      MASTER_ADDR: localhost
-      MASTER_PORT: "29501"
       NNODES: "1"
       NODE_RANK: "0"
       GPUS_PER_NODE: "8"
@@ -304,7 +298,7 @@ jobs:
       - name: Run Qwen3-8B SFT example
         uses: ./.github/actions/run-test
         with:
-          test_script: examples/qwen3/train_qwen3_8B.sh
+          test_script: tests/das/nightly/run_qwen3.sh
 
   restore-after-sft:
     name: Restore workspace after SFT

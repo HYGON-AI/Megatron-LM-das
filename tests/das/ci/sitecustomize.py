@@ -6,12 +6,12 @@
 #
 # 1) typing.override is a 3.12+ API used by the pinned Megatron-LM submodule;
 #    the CI image runs Python 3.10, so a no-op decorator provides it.
-# 2) fused_weight_gradient_mlp_cuda is a compiled op shipped in the prebuilt
-#    hcu-megatron wheel (not in this repo). Unit tests only import it (call
-#    sites are on the TE + gradient_accumulation_fusion path, unused by tests).
-#    - wheel installed (e.g. via DAS_HCU_MEGATRON_WHEEL): real module wins;
-#    - not installed: stub injected, calls raise NotImplementedError honestly.
-import importlib
+# 2) fused_weight_gradient_mlp_cuda is a compiled op shipped in the CI image
+#    (apex package). It is intentionally NOT probed here: probing at startup
+#    runs before torch is loaded, the import fails on libc10.so, and a stub
+#    would then shadow the real module for the whole process. Call sites in
+#    upstream Megatron-LM guard the import with try/except and degrade
+#    gracefully when the op is unavailable.
 import sys
 
 # --- 1) typing.override (Python 3.12+) ---
@@ -25,22 +25,3 @@ if sys.version_info < (3, 12):
             return method
 
         typing.override = override
-
-# --- 2) fused_weight_gradient_mlp_cuda (provided by the wheel) ---
-if "fused_weight_gradient_mlp_cuda" not in sys.modules:
-    try:
-        importlib.import_module("fused_weight_gradient_mlp_cuda")
-    except ImportError:
-        import types
-
-        def _not_implemented(*args, **kwargs):
-            raise NotImplementedError(
-                "fused_weight_gradient_mlp_cuda is a compiled op provided by the "
-                "hcu-megatron wheel (install it via the DAS_HCU_MEGATRON_WHEEL CI "
-                "interface); this stub only satisfies the module-level import."
-            )
-
-        _stub = types.ModuleType("fused_weight_gradient_mlp_cuda")
-        _stub.wgrad_gemm_accum_fp32 = _not_implemented
-        _stub.wgrad_gemm_accum_fp16 = _not_implemented
-        sys.modules["fused_weight_gradient_mlp_cuda"] = _stub

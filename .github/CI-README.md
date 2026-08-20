@@ -16,8 +16,13 @@ Nightly 的手动入口支持 `all`、`pretrain`、`sft`。pretrain 与 SFT 是�
 
 ## Qwen3-8B 训练入口
 
-Nightly 不维护另一套模型参数脚本，直接运行仓库已有的
-`examples/qwen3/train_qwen3_8B.sh`。该 example 接受以下环境变量：
+Nightly 维护 CI 专用副本 `tests/das/nightly/train_qwen3_8B.sh`（复制自
+`examples/qwen3/train_qwen3_8B.sh`，便于追加 nightly 专属参数而不改动共享
+example），通过 `tests/das/nightly/run_qwen3.sh` 启动：以 **mpirun**（example
+的默认后端）拉起 8 个 rank，source `requirements/env.sh` 提供
+`CUDA_DEVICE_MAX_CONNECTIONS=1` 等训练必需环境，并把数据集索引缓存重定向到
+容器可写目录（资产挂载只读）。
+该脚本接受以下环境变量：
 
 | 变量 | Nightly 值 | 说明 |
 |---|---|---|
@@ -25,10 +30,10 @@ Nightly 不维护另一套模型参数脚本，直接运行仓库已有的
 | `TRAIN_ITERS` | `10` | 训练步数 |
 | `DATA_PATH` | 仓库变量注入 | pretrain dataset prefix 或 SFT 目录 |
 | `TOKENIZER_MODEL_PATH` | 仓库变量注入 | Qwen3-8B Hugging Face 模型目录 |
-| `LAUNCH_BACKEND` | `torchrun` | 单节点 8 卡启动方式 |
 
 example 通过 Megatron Bridge 加载 Hugging Face 权重；pretrain 使用 `.bin/.idx`
-dataset prefix，SFT 使用目录下的 `train.jsonl` 和 `valid.jsonl`。
+dataset prefix，SFT 使用目录下的 `train.jsonl` 和 `valid.jsonl`。资产路径必须
+位于 `DAS_HCU_ASSET_ROOT` 之下（workflow 校验）。
 
 ## 仓库变量
 
