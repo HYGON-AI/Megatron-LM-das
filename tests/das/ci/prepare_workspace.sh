@@ -42,11 +42,13 @@ prepare_das_workspace() {
         pip install "${DAS_HCU_MEGATRON_WHEEL}"
     fi
 
+    # Energon and Bridge are src-layout: the megatron.* packages live under
+    # src/, so the repo root alone does not make megatron.bridge importable.
     python_paths=(
         "${repo_root}"
         "${repo_root}/3rdparty/Megatron-LM"
-        "${repo_root}/3rdparty/Megatron-Energon"
-        "${repo_root}/3rdparty/Megatron-Bridge"
+        "${repo_root}/3rdparty/Megatron-Energon/src"
+        "${repo_root}/3rdparty/Megatron-Bridge/src"
         "${script_dir}"  # sitecustomize.py: python3.10 typing.override shim
     )
     joined_python_path="$(IFS=:; printf '%s' "${python_paths[*]}")"
