@@ -20,10 +20,7 @@ from megatron.core.transformer.multi_latent_attention import (
 from megatron.core.models.backends import LocalSpecProvider
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.torch_norm import L2Norm
-from megatron.core.transformer.transformer_layer import (
-    TransformerLayer,
-    TransformerLayerSubmodules,
-)
+from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_inference_spec,
     get_mlp_module_spec_for_backend,
@@ -61,7 +58,7 @@ from hcu_megatron.core.tensor_parallel.layers import (
     FluxRowParallelLinear
 )
 from hcu_megatron.core.transformer.hyper_connection import HyperConnectionModule
-from hcu_megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
+from hcu_megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer, TransformerLayerSubmodules
 from hcu_megatron.training.arguments import get_adaptor_args
 
 
