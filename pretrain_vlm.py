@@ -143,7 +143,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     args = get_args()
     arch = args.model_arch
 
-    data = next(data_iterator)
+    data = dict(next(data_iterator))
     for k, v in data.items():
         if isinstance(v, torch.Tensor) and v.is_cpu:
             data[k] = v.cuda(non_blocking=True)
