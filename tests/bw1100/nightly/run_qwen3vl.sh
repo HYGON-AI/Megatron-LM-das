@@ -36,6 +36,9 @@ export GLOO_SOCKET_IFNAME=eth0
 export NCCL_SOCKET_IFNAME=eth0
 
 LOG_DIR="${DAS_HCU_CI_LOG_DIR:-ci-logs}"
+if [[ "${LOG_DIR}" != /* ]]; then
+    LOG_DIR="${repo_root}/${LOG_DIR}"
+fi
 mkdir -p "${LOG_DIR}"
 
 # The example resolves the rank from the launcher's env (OMPI_* under mpirun).
