@@ -1,3 +1,6 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 import copy
 import math
 from dataclasses import dataclass
