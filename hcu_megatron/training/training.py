@@ -218,7 +218,14 @@ def _bridge_select_runtime_field_names(provider, transformer_config, args):
     specified stay provider-owned.
     """
     provider_names = {f.name for f in dataclasses.fields(provider)}
-    tc_names = {f.name for f in dataclasses.fields(transformer_config)}
+    # Only native TransformerConfig fields are eligible. hcu_megatron extends the config
+    # at runtime (transformer_config_post_init_wrapper) via make_dataclass with
+    # field(init=False) for every adaptor-args attribute, and args unknown to the adaptor
+    # parser keep their raw CLI string value. Overlaying those onto the provider would
+    # replace correctly typed HF values with strings (e.g. rotary_base='1000000', which
+    # breaks RotaryEmbedding), and they are exactly the params documented below as
+    # intentionally HF-owned.
+    tc_names = {f.name for f in dataclasses.fields(transformer_config) if f.init}
     common = provider_names & tc_names
 
     explicit_fields = set()
