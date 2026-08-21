@@ -47,7 +47,7 @@ def add_vlm_extra_args(parser):
         "--model-arch",
         type=str,
         default="qwen2vl",
-        choices=["qwen2vl", "qwen2.5vl", "qwen3vl", "gemma3vl"],
+        choices=["qwen2vl", "qwen2.5vl", "qwen3vl", "gemma3vl", "glm4vl"],
         help="model architecture; drives processor / tokenizer defaults",
     )
     model_group.add_argument("--processor-path", type=str, default=None)

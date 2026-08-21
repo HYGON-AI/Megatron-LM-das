@@ -1,0 +1,9 @@
+{
+    "train_data_infos": {
+        "coco_caption": {
+            "path": "/path/to/train.jsonl",
+            "probability": 1.0,
+            "sample_rate": 1.0
+        }
+    }
+}
