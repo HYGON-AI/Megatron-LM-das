@@ -156,7 +156,6 @@ TRAINING_ARGS=(
     --disable-bias-linear
     --attention-dropout 0
     --hidden-dropout 0
-    --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
     --min-lr 3.0e-6
