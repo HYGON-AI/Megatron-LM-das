@@ -59,7 +59,10 @@ stimer = StragglerDetector()
 # mRoPE position_ids inside forward on every PP stage — the dataset must not
 # ship position_ids for them (would be redundant, or in the Qwen3 branch simply
 # discarded by qwen3_vl_step which forces position_ids=None).
+# GLM 4.1V / 4.5V bridge models follow the same mRoPE pattern.
 _QWEN_VL_ARCHS = {"qwen2vl", "qwen2.5vl", "qwen3vl"}
+_GLM_VL_ARCHS = {"glm4vl"}
+_MROPE_VL_ARCHS = _QWEN_VL_ARCHS | _GLM_VL_ARCHS
 # Model families whose Bridge forward performs its own CP split on the
 # combined vision+language embeddings. Other Qwen VL variants do NOT split
 # inside forward — running them with CP > 1 would be silently incorrect.
@@ -86,7 +89,7 @@ def _validate_cp_preconditions(args) -> None:
         return
 
     arch = args.model_arch
-    if arch in _QWEN_VL_ARCHS and arch not in _ARCHS_WITH_INTERNAL_CP_SPLIT:
+    if arch in _MROPE_VL_ARCHS and arch not in _ARCHS_WITH_INTERNAL_CP_SPLIT:
         raise ValueError(
             f"model_arch={arch!r} with context_parallel_size={cp} is not "
             f"supported: Bridge's forward for this family does not split "
@@ -161,7 +164,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
 
     # ── int64 fields ──
     int_keys = ["input_ids", "labels"]
-    if has_image and arch in _QWEN_VL_ARCHS:
+    if has_image and arch in _MROPE_VL_ARCHS:
         int_keys.append("image_grid_thw")
         if arch in _ARCHS_WITH_CP_IMG_META:
             int_keys.extend(["images_padded", "cp_img_num"])
@@ -188,9 +191,9 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     imgs = None
     if has_image:
         imgs = data_b["pixel_values"].float()
-        # QwenVL packs pixel_values as (total_pixels, C) with an extra batch dim
-        # from default_collate. Gemma3VL keeps standard (B, C, H, W).
-        if arch in _QWEN_VL_ARCHS:
+        # QwenVL / GlmVL pack pixel_values as (total_pixels, C) with an extra
+        # batch dim from default_collate. Gemma3VL keeps standard (B, C, H, W).
+        if arch in _MROPE_VL_ARCHS:
             imgs = imgs.squeeze(0).contiguous()
         imgs = imgs.type(torch.bfloat16)
 
@@ -339,8 +342,8 @@ def forward_step(data_iterator, model, return_schedule_plan: bool = False):
                 images_padded=images_padded,
                 cp_img_num=cp_img_num,
             )
-        elif arch in _QWEN_VL_ARCHS:
-            # Qwen2VL / Qwen2.5VL: mRoPE, but no image_input_mask.
+        elif arch in _MROPE_VL_ARCHS:
+            # Qwen2VL / Qwen2.5VL / GLM4VL: mRoPE, but no image_input_mask.
             model_kwargs["image_grid_thw"] = image_grid_thw
         else:
             raise ValueError(f"unknown model_arch {arch!r}")

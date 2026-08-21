@@ -344,8 +344,8 @@ def get_adaptor_args():
     global _ADAPTOR_ARGS
     if _ADAPTOR_ARGS is None:
         parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
-        _ADAPTOR_ARGS, unknown = process_adaptor_args(parser).parse_known_args()
-        parser_unknown_args(_ADAPTOR_ARGS, unknown)
+        _ADAPTOR_ARGS, _ = process_adaptor_args(parser).parse_known_args()
+        
     return _ADAPTOR_ARGS
 
 

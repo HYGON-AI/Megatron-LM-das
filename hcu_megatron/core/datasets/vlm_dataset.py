@@ -16,11 +16,27 @@ VLM family means declaring a new entry, not touching this factory.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Type
 
 import torch
 from transformers import AutoProcessor
+
+
+# HF logs a per-call warning when apply_chat_template sees kwargs the chat
+# template's Jinja source doesn't mention. GLM 4.1V's template only references
+# `add_generation_prompt`, so every dataset call trips the warning for
+# tokenize/tools/etc. The rest of the codebase is written against Qwen-style
+# templates that DO reference those vars, so the warning is noise here.
+class _DropChatTemplateKwargsWarning(logging.Filter):
+    _NEEDLE = "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` dict"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return self._NEEDLE not in record.getMessage()
+
+
+logging.getLogger("transformers.processing_utils").addFilter(_DropChatTemplateKwargsWarning())
 
 from hcu_megatron.core.datasets.utils import get_iterator
 from hcu_megatron.core.datasets.mm_dataset import (
@@ -33,6 +49,7 @@ from hcu_megatron.core.datasets.vlm_collator import (
     DataCollatorForQwenVL,
 )
 from hcu_megatron.core.datasets.vlm_gemma import GemmaVLDataset
+from hcu_megatron.core.datasets.vlm_glm import GlmVLDataset
 from hcu_megatron.core.datasets.vlm_images import (
     IMAGE_FACTOR,
     MAX_PIXELS,
@@ -46,6 +63,7 @@ from hcu_megatron.core.datasets.vlm_images import (
 from hcu_megatron.core.datasets.vlm_qwen import QwenVLDataset
 from hcu_megatron.core.datasets.vlm_tokenizer import (
     setup_gemma_tokenizer,
+    setup_glm_tokenizer,
     setup_qwen_tokenizer,
 )
 
@@ -66,6 +84,7 @@ __all__ = [
     "MultiModalDataset",
     "QwenVLDataset",
     "GemmaVLDataset",
+    "GlmVLDataset",
     "DataCollatorForQwenVL",
     "DataCollatorForGemmaVL",
     "get_processor",
@@ -129,6 +148,22 @@ def _build_gemma_processor(args):
     return AutoProcessor.from_pretrained(args.processor_path, **init_kwargs)
 
 
+def _build_glm_processor(args):
+    """GLM 4.1V/4.5V AutoProcessor kwargs — Glm4vProcessor resizes internally
+    per its own ``size`` config, so we don't pipe min/max pixels through here.
+    """
+    init_kwargs = {
+        "trust_remote_code": True,
+        "cache_dir": None,
+        "token": None,
+        "use_fast": True,
+    }
+    processor = AutoProcessor.from_pretrained(args.processor_path, **init_kwargs)
+    if processor is not None and "Processor" not in processor.__class__.__name__:
+        processor = None
+    return processor
+
+
 def _build_qwen_collator(args, tokenizer):
     hw_factor = args.context_parallel_size
     if args.sequence_parallel:
@@ -156,11 +191,54 @@ def _build_gemma_collator(args, tokenizer):
     return DataCollatorForGemmaVL(tokenizer=tokenizer)
 
 
+def _build_glm_collator(args, tokenizer):
+    """GLM 4.1V/4.5V uses the Qwen collator (same pixel_values layout) but
+    without Qwen3VL's CP image-split path (see ``_ARCHS_WITH_CP_IMG_SPLIT`` in
+    vlm_collator.py). Config verification uses ``Glm4vConfig``.
+    """
+    hw_factor = args.context_parallel_size
+    if args.sequence_parallel:
+        hw_factor *= args.tensor_model_parallel_size
+
+    from transformers import Glm4vConfig
+    hf_config = Glm4vConfig.from_pretrained(args.processor_path)
+    _verify_glm4v_config(tokenizer, hf_config)
+
+    return DataCollatorForQwenVL(
+        hw_factor=hw_factor,
+        model_arch=args.model_arch,
+        tokenizer=tokenizer,
+        cp_size=args.context_parallel_size,
+    )
+
+
 def _verify_qwen3vl_config(tokenizer, hf_config):
     assert hf_config.image_token_id == tokenizer.image_token_id
     assert hf_config.video_token_id == tokenizer.video_token_id
     assert hf_config.vision_start_token_id == tokenizer.vision_start_token_id
     assert hf_config.vision_end_token_id == tokenizer.vision_end_token_id
+
+
+def _verify_glm4v_config(tokenizer, hf_config):
+    """GLM 4.1V/4.5V exposes image_token_id / video_token_id at the top level
+    and uses image_start/end_token_id (not vision_*) for the wrappers.
+    """
+    assert hf_config.image_token_id == tokenizer.image_token_id, (
+        f"image_token_id mismatch: hf={hf_config.image_token_id}, "
+        f"tok={tokenizer.image_token_id}"
+    )
+    assert hf_config.video_token_id == tokenizer.video_token_id, (
+        f"video_token_id mismatch: hf={hf_config.video_token_id}, "
+        f"tok={tokenizer.video_token_id}"
+    )
+    assert hf_config.image_start_token_id == tokenizer.vision_start_token_id, (
+        f"image_start_token_id mismatch: hf={hf_config.image_start_token_id}, "
+        f"tok={tokenizer.vision_start_token_id}"
+    )
+    assert hf_config.image_end_token_id == tokenizer.vision_end_token_id, (
+        f"image_end_token_id mismatch: hf={hf_config.image_end_token_id}, "
+        f"tok={tokenizer.vision_end_token_id}"
+    )
 
 
 VLM_REGISTRY: dict[str, VLMFamily] = {
@@ -187,6 +265,12 @@ VLM_REGISTRY: dict[str, VLMFamily] = {
         tokenizer_setup=setup_gemma_tokenizer,
         build_collator=_build_gemma_collator,
         build_processor=_build_gemma_processor,
+    ),
+    "glm4vl": VLMFamily(
+        dataset_cls=GlmVLDataset,
+        tokenizer_setup=setup_glm_tokenizer,
+        build_collator=_build_glm_collator,
+        build_processor=_build_glm_processor,
     ),
 }
 
