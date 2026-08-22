@@ -1,18 +1,19 @@
 # Megatron-LM-das CI 说明
 
-CI 按 verl-das 的边界拆为两条独立流水线：PR 只执行单元测试，Nightly 只执行
-定时或手动发起的真实训练验证。两条流水线都使用固定 digest 的 HCU 容器。
+CI 划分为两条独立流水线：PR 只执行单元测试，Nightly 只执行定时或手动发起的真实
+训练验证。两条流水线都使用由仓库变量指定的 HCU 训练镜像。
 
 ## 流水线
 
 | Workflow | 触发 | 测试范围 |
 |---|---|---|
 | `PR Test (HCU)` | `pull_request_target`、手动触发 | 完整 `tests/unit_tests` |
-| `Nightly Test (HCU)` | 每天 19:00 UTC、手动触发 | Qwen3-8B pretrain 10 steps、Qwen3-8B SFT 10 steps、Qwen3-VL-8B SFT 10 steps |
+| `Nightly Test (HCU)` | 每天 19:00 UTC（北京时间次日 03:00）、手动触发 | Qwen3-8B pretrain 10 steps、Qwen3-8B SFT 10 steps、Qwen3-VL-8B SFT 10 steps |
 
-Nightly 的手动入口支持 `all`、`pretrain`、`sft`、`vl_sft`。三个训练用例是彼此独立的
-job，分别显示结果并在每个阶段后恢复 runner 工作区属主。即使前一阶段失败，属主恢复
-成功后仍会继续运行后续阶段，最终由 `Finish` 汇总三项结论。
+Nightly 的手动入口支持 `all`、`pretrain`、`sft`、`vl_sft`。选择 `all` 时，三个训练
+用例在同一台 8 卡 runner 上按 pretrain、SFT、VL SFT 的顺序串行运行，并在每个阶段后
+恢复 runner 工作区属主。即使前一阶段失败，属主恢复成功后仍会继续运行后续阶段，最终由
+`Finish` 汇总三项结论。
 
 ## Qwen3-8B 训练入口
 
