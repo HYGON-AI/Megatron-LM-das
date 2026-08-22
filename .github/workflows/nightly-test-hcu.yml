@@ -351,7 +351,15 @@ jobs:
     needs:
       - plan
       - restore-before-nightly
-    if: needs.plan.outputs.run_vl_sft == 'true'
+      # All Nightly training jobs use the complete 8-card runner. Wait for
+      # the preceding SFT job and its workspace cleanup before allocating it.
+      - restore-after-sft
+    if: >-
+      always()
+      && needs.plan.result == 'success'
+      && needs.plan.outputs.run_vl_sft == 'true'
+      && needs.restore-before-nightly.result == 'success'
+      && (needs.restore-after-sft.result == 'success' || needs.restore-after-sft.result == 'skipped')
     runs-on:
       - self-hosted
       - hcu
