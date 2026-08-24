@@ -4,8 +4,8 @@
 # env-check -> workspace prepare -> run test script -> cleanup.
 # Artifact upload is intentionally omitted: the shared org storage quota
 # would otherwise fail every run once full (see #13).
-name: Run DAS test
-description: Run a DAS test script inside the configured HCU container
+name: Run HCU test
+description: Run a repo test script inside the configured HCU container
 
 inputs:
   test_script:
@@ -19,7 +19,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        bash tests/das/ci/check_environment.sh
+        bash tests/bw1100/ci/check_environment.sh
 
     - name: Prepare workspace and run test
       shell: bash
@@ -29,7 +29,7 @@ runs:
         set -euo pipefail
         export DAS_HCU_CI_LOG_DIR="${DAS_HCU_CI_LOG_DIR:-ci-logs/run}"
         mkdir -p "${DAS_HCU_CI_LOG_DIR}"
-        source tests/das/ci/prepare_workspace.sh
+        source tests/bw1100/ci/prepare_workspace.sh
         bash "${TEST_SCRIPT}" 2>&1 | tee -a "${DAS_HCU_CI_LOG_DIR}/test.log"
         exit "${PIPESTATUS[0]}"
 
@@ -37,4 +37,4 @@ runs:
       if: always()
       shell: bash
       run: |
-        bash tests/das/ci/cleanup.sh || true
+        bash tests/bw1100/ci/cleanup.sh || true

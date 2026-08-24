@@ -27,7 +27,7 @@ run_dir="${tmp_root}/${run_id}"
 case "${run_dir}" in
     "${tmp_root}"/*) ;;
     *)
-        echo "ERROR: refusing to clean path outside DAS HCU CI temporary root: ${run_dir}" >&2
+        echo "ERROR: refusing to clean path outside the HCU CI temporary root: ${run_dir}" >&2
         exit 1
         ;;
 esac
@@ -47,7 +47,7 @@ if [[ -d "${run_dir}/pids" ]]; then
             continue
         fi
         if ! owns_pid "${pid}"; then
-            echo "Skipping PID ${pid}: process is not owned by DAS CI run ${run_id}."
+            echo "Skipping PID ${pid}: process is not owned by HCU CI run ${run_id}."
             continue
         fi
         kill -TERM "${pid}" 2>/dev/null || true
@@ -66,4 +66,4 @@ if [[ -d "${run_dir}" ]]; then
     rm -rf -- "${run_dir}"
 fi
 
-echo "Cleaned resources owned by DAS CI run ${run_id}."
+echo "Cleaned resources owned by HCU CI run ${run_id}."

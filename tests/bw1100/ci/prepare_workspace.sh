@@ -26,7 +26,7 @@ prepare_das_workspace() {
 
     # Top-level submodules only (non-recursive): Megatron-Bridge contains the
     # nested 3rdparty/Megatron-LM submodule whose gitlink cannot be resolved,
-    # and das code does not use Bridge. Switch to --recursive only if needed.
+    # and repo code does not use Bridge. Switch to --recursive only if needed.
     git -C "${repo_root}" submodule sync
     git -C "${repo_root}" submodule update --init
 
@@ -42,17 +42,19 @@ prepare_das_workspace() {
         pip install "${DAS_HCU_MEGATRON_WHEEL}"
     fi
 
+    # Energon and Bridge are src-layout: the megatron.* packages live under
+    # src/, so the repo root alone does not make megatron.bridge importable.
     python_paths=(
         "${repo_root}"
         "${repo_root}/3rdparty/Megatron-LM"
-        "${repo_root}/3rdparty/Megatron-Energon"
-        "${repo_root}/3rdparty/Megatron-Bridge"
+        "${repo_root}/3rdparty/Megatron-Energon/src"
+        "${repo_root}/3rdparty/Megatron-Bridge/src"
         "${script_dir}"  # sitecustomize.py: python3.10 typing.override shim
     )
     joined_python_path="$(IFS=:; printf '%s' "${python_paths[*]}")"
     export PYTHONPATH="${joined_python_path}${PYTHONPATH:+:${PYTHONPATH}}"
 
-    echo "DAS workspace prepared at ${repo_root}"
+    echo "HCU CI workspace prepared at ${repo_root}"
 }
 
 prepare_das_workspace

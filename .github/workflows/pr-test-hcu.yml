@@ -145,13 +145,13 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s globstar nullglob
-          for script in tests/das/**/*.sh tests/unit_tests/run_ci_test.sh; do
+          for script in tests/bw1100/**/*.sh tests/unit_tests/run_ci_test.sh; do
             [[ -f "${script}" ]] && bash -n "${script}"
           done
 
       - name: Python compile check
         shell: bash
-        run: python3 -m compileall -q hcu_megatron tests/das
+        run: python3 -m compileall -q hcu_megatron tests/bw1100
 
   validate-config:
     name: Validate HCU config
@@ -263,7 +263,7 @@ jobs:
       - name: Run unit tests
         uses: ./.github/actions/run-test
         with:
-          test_script: tests/das/pr/run_unit_tests.sh
+          test_script: tests/bw1100/pr/run_unit_tests.sh
 
   restore-after-unit:
     name: Restore workspace after unit tests
@@ -281,7 +281,7 @@ jobs:
     steps:
       - name: Restore runner workspace ownership
         shell: bash
-        run: bash tests/das/ci/restore_runner_permissions.sh
+        run: bash tests/bw1100/ci/restore_runner_permissions.sh
 
   finish:
     name: Finish

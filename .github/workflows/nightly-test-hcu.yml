@@ -16,6 +16,7 @@ on:
           - all
           - pretrain
           - sft
+          - vl_sft
 
 concurrency:
   group: nightly-test-hcu
@@ -31,6 +32,8 @@ env:
   DAS_QWEN3_8B_MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
   DAS_QWEN3_PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
   DAS_QWEN3_SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+  DAS_QWEN3VL_8B_MODEL_PATH: ${{ vars.DAS_QWEN3VL_8B_MODEL_PATH }}
+  DAS_QWEN3VL_SFT_DATA_PATH: ${{ vars.DAS_QWEN3VL_SFT_DATA_PATH }}
   DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
   DAS_HCU_CI_TMP_ROOT: /tmp/das-hcu-ci
   HF_HUB_OFFLINE: "1"
@@ -46,6 +49,7 @@ jobs:
       selected: ${{ steps.select.outputs.selected }}
       run_pretrain: ${{ steps.select.outputs.run_pretrain }}
       run_sft: ${{ steps.select.outputs.run_sft }}
+      run_vl_sft: ${{ steps.select.outputs.run_vl_sft }}
     steps:
       - name: Select cases
         id: select
@@ -59,14 +63,22 @@ jobs:
             all)
               run_pretrain=true
               run_sft=true
+              run_vl_sft=true
               ;;
             pretrain)
               run_pretrain=true
               run_sft=false
+              run_vl_sft=false
               ;;
             sft)
               run_pretrain=false
               run_sft=true
+              run_vl_sft=false
+              ;;
+            vl_sft)
+              run_pretrain=false
+              run_sft=false
+              run_vl_sft=true
               ;;
             *)
               echo "ERROR: unsupported nightly case: ${SELECTED_CASE}" >&2
@@ -77,6 +89,7 @@ jobs:
           echo "selected=${SELECTED_CASE}" | tee -a "${GITHUB_OUTPUT}"
           echo "run_pretrain=${run_pretrain}" | tee -a "${GITHUB_OUTPUT}"
           echo "run_sft=${run_sft}" | tee -a "${GITHUB_OUTPUT}"
+          echo "run_vl_sft=${run_vl_sft}" | tee -a "${GITHUB_OUTPUT}"
 
       - name: Validate nightly configuration
         shell: bash
@@ -87,8 +100,11 @@ jobs:
           MODEL_PATH: ${{ vars.DAS_QWEN3_8B_MODEL_PATH }}
           PRETRAIN_DATA_PATH: ${{ vars.DAS_QWEN3_PRETRAIN_DATA_PATH }}
           SFT_DATA_PATH: ${{ vars.DAS_QWEN3_SFT_DATA_PATH }}
+          VL_MODEL_PATH: ${{ vars.DAS_QWEN3VL_8B_MODEL_PATH }}
+          VL_SFT_DATA_PATH: ${{ vars.DAS_QWEN3VL_SFT_DATA_PATH }}
           RUN_PRETRAIN: ${{ steps.select.outputs.run_pretrain }}
           RUN_SFT: ${{ steps.select.outputs.run_sft }}
+          RUN_VL_SFT: ${{ steps.select.outputs.run_vl_sft }}
         run: |
           set -euo pipefail
 
@@ -118,6 +134,18 @@ jobs:
             case "${SFT_DATA_PATH}" in
               "${ASSET_ROOT}"/*) ;;
               *) echo "ERROR: DAS_QWEN3_SFT_DATA_PATH must be under DAS_HCU_ASSET_ROOT" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "${RUN_VL_SFT}" == "true" ]]; then
+            [[ "${VL_MODEL_PATH}" == /* ]] || { echo "ERROR: DAS_QWEN3VL_8B_MODEL_PATH must be an absolute directory" >&2; exit 1; }
+            [[ "${VL_SFT_DATA_PATH}" == /* ]] || { echo "ERROR: DAS_QWEN3VL_SFT_DATA_PATH must be an absolute directory" >&2; exit 1; }
+            case "${VL_MODEL_PATH}" in
+              "${ASSET_ROOT}"/*) ;;
+              *) echo "ERROR: DAS_QWEN3VL_8B_MODEL_PATH must be under DAS_HCU_ASSET_ROOT" >&2; exit 1 ;;
+            esac
+            case "${VL_SFT_DATA_PATH}" in
+              "${ASSET_ROOT}"/*) ;;
+              *) echo "ERROR: DAS_QWEN3VL_SFT_DATA_PATH must be under DAS_HCU_ASSET_ROOT" >&2; exit 1 ;;
             esac
           fi
 
@@ -191,11 +219,8 @@ jobs:
       TRAINING_MODE: pretrain
       TRAIN_ITERS: "10"
       LOAD_HF_WEIGHTS: "true"
-      LAUNCH_BACKEND: torchrun
       DIST_URL: localhost
       DIST_PORT: "29500"
-      MASTER_ADDR: localhost
-      MASTER_PORT: "29500"
       NNODES: "1"
       NODE_RANK: "0"
       GPUS_PER_NODE: "8"
@@ -218,7 +243,7 @@ jobs:
       - name: Run Qwen3-8B pretrain example
         uses: ./.github/actions/run-test
         with:
-          test_script: examples/qwen3/train_qwen3_8B.sh
+          test_script: tests/bw1100/nightly/run_qwen3.sh
 
   restore-after-pretrain:
     name: Restore workspace after pretrain
@@ -236,7 +261,7 @@ jobs:
     steps:
       - name: Restore runner workspace ownership
         shell: bash
-        run: bash tests/das/ci/restore_runner_permissions.sh
+        run: bash tests/bw1100/ci/restore_runner_permissions.sh
 
   sft:
     name: Qwen3-8B SFT (10 steps)
@@ -277,11 +302,8 @@ jobs:
       TRAINING_MODE: sft
       TRAIN_ITERS: "10"
       LOAD_HF_WEIGHTS: "true"
-      LAUNCH_BACKEND: torchrun
       DIST_URL: localhost
       DIST_PORT: "29501"
-      MASTER_ADDR: localhost
-      MASTER_PORT: "29501"
       NNODES: "1"
       NODE_RANK: "0"
       GPUS_PER_NODE: "8"
@@ -304,7 +326,7 @@ jobs:
       - name: Run Qwen3-8B SFT example
         uses: ./.github/actions/run-test
         with:
-          test_script: examples/qwen3/train_qwen3_8B.sh
+          test_script: tests/bw1100/nightly/run_qwen3.sh
 
   restore-after-sft:
     name: Restore workspace after SFT
@@ -417,6 +439,8 @@ jobs:
       - restore-after-pretrain
       - sft
       - restore-after-sft
+      - vl-sft
+      - restore-after-vl-sft
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -426,12 +450,15 @@ jobs:
           SELECTED_CASE: ${{ needs.plan.outputs.selected }}
           RUN_PRETRAIN: ${{ needs.plan.outputs.run_pretrain }}
           RUN_SFT: ${{ needs.plan.outputs.run_sft }}
+          RUN_VL_SFT: ${{ needs.plan.outputs.run_vl_sft }}
           PLAN_RESULT: ${{ needs.plan.result }}
           RESTORE_BEFORE_RESULT: ${{ needs.restore-before-nightly.result }}
           PRETRAIN_RESULT: ${{ needs.pretrain.result }}
           RESTORE_PRETRAIN_RESULT: ${{ needs.restore-after-pretrain.result }}
           SFT_RESULT: ${{ needs.sft.result }}
           RESTORE_SFT_RESULT: ${{ needs.restore-after-sft.result }}
+          VL_SFT_RESULT: ${{ needs.vl-sft.result }}
+          RESTORE_VL_SFT_RESULT: ${{ needs.restore-after-vl-sft.result }}
         run: |
           set -euo pipefail
           [[ "${PLAN_RESULT}" == "success" ]]
@@ -453,10 +480,19 @@ jobs:
             [[ "${RESTORE_SFT_RESULT}" == "skipped" ]]
           fi
 
+          if [[ "${RUN_VL_SFT}" == "true" ]]; then
+            [[ "${VL_SFT_RESULT}" == "success" ]]
+            [[ "${RESTORE_VL_SFT_RESULT}" == "success" ]]
+          else
+            [[ "${VL_SFT_RESULT}" == "skipped" ]]
+            [[ "${RESTORE_VL_SFT_RESULT}" == "skipped" ]]
+          fi
+
           {
             echo "## HCU Nightly"
             echo
             echo "- selected cases: ${SELECTED_CASE}"
             echo "- Qwen3-8B pretrain: ${PRETRAIN_RESULT}"
             echo "- Qwen3-8B SFT: ${SFT_RESULT}"
+            echo "- Qwen3-VL-8B SFT: ${VL_SFT_RESULT}"
           } >> "${GITHUB_STEP_SUMMARY}"
