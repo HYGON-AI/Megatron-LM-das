@@ -262,6 +262,7 @@ class MegatronBasicFeature(AbstractFeature):
         from hcu_megatron.training.training import train_step
         from hcu_megatron.training.training import setup_model_and_optimizer
         from hcu_megatron.training.argument_utils import core_transformer_config_from_args_wrapper
+        from hcu_megatron.training.training import save_checkpoint_and_time_wrapper
 
         # Add a fixed seed.
         patch_manager.register_patch('megatron.training.initialize._set_random_seed',
@@ -279,6 +280,10 @@ class MegatronBasicFeature(AbstractFeature):
         # prevent re-initialization of config
         patch_manager.register_patch('megatron.training.argument_utils.core_transformer_config_from_args',
                                     core_transformer_config_from_args_wrapper)
+        # support edgc, ckpt add save/load iter info to ckpt
+        patch_manager.register_patch('megatron.training.training.save_checkpoint_and_time',
+                                    save_checkpoint_and_time_wrapper,
+                                    apply_wrapper=True)
 
     def register_miscellaneous_patches(self, patch_manager, args):
         from hcu_megatron.core.full_cuda_graph import clone_tensors_in_struct
