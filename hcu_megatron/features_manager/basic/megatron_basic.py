@@ -285,6 +285,18 @@ class MegatronBasicFeature(AbstractFeature):
                                     save_checkpoint_and_time_wrapper,
                                     apply_wrapper=True)
 
+        # 保存ckpt时同步导出一份HF格式权重(bridge)。
+        # save_checkpoint_and_time_wrapper 内部对 edgc 和 HF 导出各自判断开关,
+        # 不开 save_hf_weights 时其行为与原函数一致。
+        # edgc 开启时该 wrapper 已由 gradient_compress_feature 注册, 重复注册
+        # 会触发 patch_utils 的 "wrapper has already been applied", 故此处排除。
+        if getattr(args, 'save_hf_weights', False) and not args.enable_dynamic_grad_comp:
+            from hcu_megatron.training.training import save_checkpoint_and_time_wrapper
+
+            patch_manager.register_patch('megatron.training.training.save_checkpoint_and_time',
+                                        save_checkpoint_and_time_wrapper,
+                                        apply_wrapper=True)
+
     def register_miscellaneous_patches(self, patch_manager, args):
         from hcu_megatron.core.full_cuda_graph import clone_tensors_in_struct
         from hcu_megatron.core.parallel_state import create_group, initialize_model_parallel_wrapper

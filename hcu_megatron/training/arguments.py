@@ -206,6 +206,16 @@ def _add_extra_mbridge_args(parser):
                        help='The HuggingFace model path for initializing the bridge module')
     group.add_argument('--load-weights', action='store_true',
                        help='Whether to load weights for the bridge module when initializing the model')
+    group.add_argument('--save-hf-weights', action='store_true',
+                       help='Also export the model in HuggingFace format next to each Megatron '
+                            'checkpoint, under ${save}/iter_XXXXXXX/hf/. Requires --use-bridge and '
+                            '--save. The exported directory contains config.json, tokenizer files '
+                            'and safetensors weights, and can be loaded with from_pretrained().')
+    group.add_argument('--save-hf-weights-distributed', action='store_true',
+                       help='Export HuggingFace weights in distributed mode, where each rank writes '
+                            'part of the safetensors shards instead of rank 0 writing all of them. '
+                            'Reduces export time and rank-0 memory for large models. '
+                            'Only takes effect together with --save-hf-weights.')
     group.add_argument('--bridge-language-model-only', action='store_true',
                        help='For VLM bridge providers, build only the language model (MCoreGPTModel) '
                             'via provider.provide_language_model, skipping ViT / vision projector. '
@@ -252,6 +262,21 @@ def validate_args_func_decorator(validate_args_func):
             )
 
         args = validate_args_func(args, defaults)
+
+        # HF-format export piggybacks on the bridge (it needs the HF config /
+        # tokenizer / weight mapping) and on the regular checkpoint schedule
+        # (it writes into ${save}/iter_XXXXXXX/hf).
+        if getattr(args, "save_hf_weights", False):
+            if not args.use_bridge:
+                raise ValueError("--save-hf-weights requires --use-bridge.")
+            if args.save is None:
+                raise ValueError("--save-hf-weights requires --save to be set.")
+        if getattr(args, "save_hf_weights_distributed", False) and not getattr(
+            args, "save_hf_weights", False
+        ):
+            raise ValueError(
+                "--save-hf-weights-distributed requires --save-hf-weights."
+            )
 
         # print env vars
         _print_env_vars("env vars", exclude_vars=["BASH_FUNC", "OMPI"])
