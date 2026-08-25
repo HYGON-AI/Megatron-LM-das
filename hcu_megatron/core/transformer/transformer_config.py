@@ -1,10 +1,91 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
+import sys
 import warnings
 from functools import wraps
 from dataclasses import make_dataclass, field
 
 from hcu_megatron.training.arguments import get_adaptor_args
+
+
+# 动态生成的 config 子类缓存, 以其基类为 key。
+# 同一种 config 只生成一次, 避免每个实例都造一个一次性的类。
+_DYNAMIC_CONFIG_CLASSES = {}
+
+
+def _rebuild_dynamic_config(base_cls, field_names, state):
+    """unpickle 时在接收端重建动态 config 实例。
+
+    接收端按需重新生成(或复用缓存的)动态子类, 再把属性状态灌回去, 因此不要求
+    接收端事先创建过同名的动态类。base_cls 是真实模块里可导入的类, 本身能正常
+    pickle。
+    """
+    fields = [(name, object, field(init=False)) for name in field_names]
+    cls = _make_picklable_dataclass(base_cls, fields)
+    obj = cls.__new__(cls)
+    obj.__dict__.update(state)
+    return obj
+
+
+def _dynamic_config_reduce(self):
+    """让动态 config 以"基类 + 字段名 + 状态"的形式序列化。
+
+    默认的 pickle 协议只记录"模块名 + 类名", 依赖接收端存在同名类; 各 rank 的
+    模型结构不同, 该假设不成立(见 _make_picklable_dataclass 的说明)。
+    """
+    cls = type(self)
+    return (
+        _rebuild_dynamic_config,
+        (cls.__dynamic_base__, cls.__dynamic_fields__, self.__dict__),
+    )
+
+
+def _make_picklable_dataclass(base_cls, fields):
+    """生成 base_cls 的动态子类, 并保证它可以被 pickle。
+
+    直接用 make_dataclass() 造出来的类无法被 pickle: pickle 序列化实例时只记录
+    "模块名 + 类名", 反序列化时靠 getattr(模块, 类名) 找回类定义。而动态类
+    (1) 从未被赋值到任何模块上, (2) 不传 module= 时 __module__ 取自调用方栈帧,
+    经由 ABCMeta 的 model provider 调用时会落到 'abc'。于是报错:
+        Can't pickle <class 'abc.GPTModelProvider'>
+
+    这会影响 Megatron-Bridge 导出 HF 格式权重: 它在导出 QKV 时需要跨流水线并行
+    (PP) 广播模型 config, 而 broadcast_object_list() 内部使用 pickle。PP=1 时
+    不发生广播, 所以只在 PP>1 时暴露。
+
+    仅把类注册到模块上还不够: 各 rank 持有的子模块不同, 动态类的创建顺序和数量
+    也不同, 若用创建序号命名, 同一个名字在不同 rank 上会指向不同的类, 甚至在
+    接收端根本不存在, 于是 unpickle 报:
+        Can't get attribute '_Dynamic_Qwen3VLTransformerConfig_2'
+
+    因此这里做两件事:
+      1) 用基类的模块名+类名生成确定性名字, 与创建顺序无关, 各 rank 一致;
+      2) 通过 __reduce__ 让实例以"基类 + 字段名 + 状态"序列化, 接收端按需重建,
+         不要求接收端预先存在该动态类。
+    动态类仍是 base_cls 的子类, isinstance 判断不受影响。
+    """
+    cached = _DYNAMIC_CONFIG_CLASSES.get(base_cls)
+    if cached is not None:
+        return cached
+
+    cls = make_dataclass(base_cls.__name__, fields=fields, bases=(base_cls,))
+
+    holder = sys.modules[__name__]
+    # 确定性命名: 同一基类在任何 rank 上都得到同样的名字。
+    unique_name = "_Dynamic_{}_{}".format(
+        base_cls.__module__.replace(".", "_"), base_cls.__name__
+    )
+    cls.__module__ = holder.__name__
+    cls.__qualname__ = unique_name
+    cls.__name__ = unique_name
+    # 供 _dynamic_config_reduce 序列化时还原用。
+    cls.__dynamic_base__ = base_cls
+    cls.__dynamic_fields__ = tuple(f[0] for f in fields)
+    cls.__reduce__ = _dynamic_config_reduce
+    setattr(holder, unique_name, cls)
+
+    _DYNAMIC_CONFIG_CLASSES[base_cls] = cls
+    return cls
 
 
 def transformer_config_post_init_wrapper(post_init_func):
@@ -100,7 +181,9 @@ def transformer_config_post_init_wrapper(post_init_func):
             if not hasattr(self, key):
                 field_def = (field_name, field_type, field(init=False))
                 fields.append(field_def)
-        self.__class__ = make_dataclass(self.__class__.__name__, fields=fields, bases=(self.__class__,))
+        # self.__class__ = make_dataclass(self.__class__.__name__, fields=fields, bases=(self.__class__,))
+        # 改用可被 pickle 的动态类, 否则 PP>1 导出 HF 权重时广播 config 会失败
+        self.__class__ = _make_picklable_dataclass(self.__class__, fields)
 
         for key, value in vars(args).items():
             if not hasattr(self, key):
