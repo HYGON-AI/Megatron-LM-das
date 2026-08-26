@@ -40,7 +40,7 @@ DIST_PORT=${2}
 RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
-export LAUNCH_BACKEND=${launch_backend:-"mpirun"}
+export MEGATRON_LAUNCH_BACKEND=${launch_backend:-"mpirun"}
 
 MASTER_ADDR=${MASTER_ADDR:-loadlhost}
 MASTER_PORT=${MASTER_PORT:-6000}
@@ -174,7 +174,7 @@ HIP_PROFIE_ARGS=(
     --use-hip-profiler
 )
 
-if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+if [[ "$MEGATRON_LAUNCH_BACKEND" == "mpirun" ]]; then
     APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
         ${GPT_MODEL_ARGS[@]} \
         ${TRAINING_ARGS[@]} \
@@ -184,7 +184,7 @@ if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
         ${MPI_DISTRIBUTED_ARGS[@]} \
         ${INITIALIZATION_ARGS[@]} \
         "
-elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+elif [[ "$MEGATRON_LAUNCH_BACKEND" == "torchrun" ]]; then
     APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
         ${MEGATRON_PATH}/pretrain_vlm.py \
         ${GPT_MODEL_ARGS[@]} \
@@ -207,9 +207,9 @@ elif [[ $profiling == "hip" ]]; then
 fi
 
 #for hygon cpu
-if [[ "$LAUNCH_BACKEND" == "mpirun" ]]; then
+if [[ "$MEGATRON_LAUNCH_BACKEND" == "mpirun" ]]; then
     ${launch_with_binding} ${LOCAL_RANK} ${APP}
-elif [[ "$LAUNCH_BACKEND" == "torchrun" ]]; then
+elif [[ "$MEGATRON_LAUNCH_BACKEND" == "torchrun" ]]; then
     echo ${APP}
     ${APP}
 else
