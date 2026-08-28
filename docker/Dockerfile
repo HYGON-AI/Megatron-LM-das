@@ -56,12 +56,14 @@ COPY . /workspace/Megatron-LM
 #   2. 基础镜像里 /opt/dtk/lib/libhsa-runtime64.so 是指向 /opt/hyhal 的悬空软链
 #      (/opt/hyhal 是宿主机驱动目录, 只在 run 时挂载)，链接期找不到该库。
 #      因此先造一个同名 SONAME 的空 stub 供链接, 运行时由真实的 /opt/hyhal 提供。
+ARG RCCL_TEST
 ARG RCCL_TESTS_COMMIT=155f4748e6de7ce3ab54a0bf09931d9316262260
 ARG RCCL_GPU_TARGETS="gfx936 gfx938"
-RUN mkdir -p /tmp/hsastub && cd /tmp/hsastub && : > empty.c && \
+RUN : "${RCCL_TEST:?RCCL_TEST build argument is required}" && \
+    mkdir -p /tmp/hsastub && cd /tmp/hsastub && : > empty.c && \
     gcc -shared -fPIC -Wl,-soname,libhsa-runtime64.so.1 -o libhsa-runtime64.so.1 empty.c && \
     ln -sf libhsa-runtime64.so.1 libhsa-runtime64.so && \
-    git clone ${{RCCL_TEST}} /opt/rccl-test && \
+    git clone "${RCCL_TEST}" /opt/rccl-test && \
     cd /opt/rccl-test && git checkout ${RCCL_TESTS_COMMIT} && \
     LIBRARY_PATH=/tmp/hsastub:${LIBRARY_PATH} \
     make HIP_HOME=/opt/dtk \

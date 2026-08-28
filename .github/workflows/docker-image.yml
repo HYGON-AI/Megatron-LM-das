@@ -33,14 +33,17 @@ jobs:
           echo "LATEST_TAG=megatron:0.18.2-latest" >> "$GITHUB_ENV"
 
       - name: Build
+        id: build_image
         run: |
           docker build --no-cache --network=host \
             --build-arg AICC_URL="${{ env.AICC_URL }}" \
             --build-arg AICC_VERSION="${{ env.AICC_VERSION }}" \
+            --build-arg RCCL_TEST="${{ vars.RCCL_TEST }}" \
             -t "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" \
             -f docker/Dockerfile .
 
       - name: 打两个 tag
+        id: tag_image
         run: |
           docker tag "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}"
 
@@ -53,7 +56,12 @@ jobs:
           docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}"
           docker push "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}"
 
-      - name: 删除本地镜像
-        if: always()
+      - name: 删除本次构建镜像
+        if: always() && steps.build_image.outcome == 'success'
         run: |
-          docker rmi "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}"
+          docker rmi "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${IMAGE_TAG}" || true
+
+      - name: 删除本次滚动 tag
+        if: always() && steps.tag_image.outcome == 'success'
+        run: |
+          docker rmi "${HARBOR_SITE}/${HARBOR_NAMESPACE}/${LATEST_TAG}" || true
