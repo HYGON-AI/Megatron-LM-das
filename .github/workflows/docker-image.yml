@@ -1,6 +1,7 @@
 name: docker-image
 
 on:
+  workflow_dispatch:
   schedule:
     # 每天晚上 12 点（北京时间），GitHub cron 使用 UTC 时间
     - cron: "0 16 * * *"
@@ -12,7 +13,11 @@ env:
 jobs:
   build:
     # 需要能访问内网 pip 源 / AICC 下载地址的自托管 runner
-    runs-on: self-hosted
+    runs-on:
+      - self-hosted
+      - hcu
+      - hcu-ci-pr
+      - nmz36
     steps:
       - name: Checkout
         uses: actions/checkout@v4
