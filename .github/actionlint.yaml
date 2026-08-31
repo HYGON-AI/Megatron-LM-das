@@ -1,0 +1,9 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+
+self-hosted-runner:
+  labels:
+    - bw1100
+    - ci
+    - hcu
+    - hcu-ci-pr
+    - nmz36

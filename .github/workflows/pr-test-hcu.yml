@@ -21,7 +21,6 @@ permissions:
   contents: read
 
 env:
-  DAS_HCU_CI_RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
   DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
   DAS_HCU_MEGATRON_WHEEL: ${{ vars.DAS_HCU_MEGATRON_WHEEL }}
 
@@ -166,10 +165,8 @@ jobs:
         shell: bash
         env:
           IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
-          RUNNER_LABEL: ${{ vars.DAS_HCU_CI_RUNNER_LABEL }}
         run: |
           set -euo pipefail
-          [[ -n "${RUNNER_LABEL}" ]] || { echo "ERROR: DAS_HCU_CI_RUNNER_LABEL is not configured" >&2; exit 1; }
           [[ "${IMAGE}" == *:* ]] || {
             echo "ERROR: DAS_HCU_CI_IMAGE must include an explicit tag" >&2
             exit 1
@@ -182,9 +179,8 @@ jobs:
       - validate-config
     if: needs.check-changes.outputs.runtime == 'true' && needs.validate-config.result == 'success'
     runs-on:
-      - self-hosted
-      - hcu
-      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+      group: ci-general
+      labels: [self-hosted, ci, bw1100]
     timeout-minutes: 10
     env:
       DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
@@ -221,9 +217,8 @@ jobs:
       - restore-before-unit
     if: needs.check-changes.outputs.runtime == 'true'
     runs-on:
-      - self-hosted
-      - hcu
-      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+      group: ci-general
+      labels: [self-hosted, ci, bw1100]
     timeout-minutes: 60
     container:
       image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
@@ -272,9 +267,8 @@ jobs:
       - check-changes
       - unit-tests
     runs-on:
-      - self-hosted
-      - hcu
-      - ${{ vars.DAS_HCU_CI_RUNNER_LABEL || 'hcu-ci-unconfigured' }}
+      group: ci-general
+      labels: [self-hosted, ci, bw1100]
     timeout-minutes: 5
     env:
       DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}

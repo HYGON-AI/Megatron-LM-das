@@ -58,7 +58,6 @@ env.sh 用 `$0` 推算该变量，被别的脚本 source 时会算成 `/`。它�
 
 | 变量 | PR | Nightly | 说明 |
 |---|---|---|---|
-| `DAS_HCU_CI_RUNNER_LABEL` | 必填 | 必填 | 专用 HCU runner 标签 |
 | `DAS_HCU_CI_IMAGE` | 必填 | 必填 | 训练镜像滚动 tag，形如 `<harbor>/megatron:0.18.2-latest` |
 | `DAS_HCU_ASSET_ROOT` | - | 必填 | 模型和数据共同根目录，只读挂载 |
 | `DAS_QWEN3_8B_MODEL_PATH` | - | 必填 | Qwen3-8B Hugging Face 模型绝对路径 |
@@ -67,6 +66,9 @@ env.sh 用 `$0` 推算该变量，被别的脚本 source 时会算成 `/`。它�
 | `DAS_QWEN3VL_8B_MODEL_PATH` | - | VL SFT 必填 | Qwen3-VL-8B Hugging Face 模型绝对路径 |
 | `DAS_QWEN3VL_SFT_DATA_PATH` | - | VL SFT 必填 | 含 `vlm-config.json` 的绝对目录 |
 | `DAS_HCU_MEGATRON_WHEEL` | 可选 | 可选 | hcu-megatron wheel 路径或 URL |
+
+PR 和 Nightly 的 HCU 任务固定使用组织级 runner group `ci-general`，并要求
+`self-hosted`、`ci`、`bw1100` 标签。镜像构建 workflow 继续使用专用 nmz36 runner。
 
 模型与数据路径必须位于 `DAS_HCU_ASSET_ROOT` 下。资产根以只读 volume 挂载，训练
 日志、TensorBoard 与临时文件写入 CI 自有目录，不写回模型或数据目录。
