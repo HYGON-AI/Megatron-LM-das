@@ -24,6 +24,76 @@ from hcu_megatron.training import get_args
 logger = logging.getLogger(__name__)
 
 
+def _param_and_grad_buffer_init_wrapper(_param_and_grad_buffer_init_func):
+    @wraps(_param_and_grad_buffer_init_func)
+    def wrapper(self, *args, **kwargs):
+        # Filter out replica expert params so they are not assigned to DDP gradient buckets.
+        # Replica params are managed by UltraEP's shared buffer instead.
+        if args:
+            # params_with_names is the 4th positional arg (index 3): ddp_config, param_dtype,
+            # grad_dtype, params_with_names, ...
+            params_with_names = args[3]
+            filtered = [
+                (p, n) for p, n in params_with_names
+                if not getattr(p, 'is_eplb_replica', False)
+            ]
+            args = args[:3] + (filtered,) + args[4:]
+        elif 'params_with_names' in kwargs:
+            kwargs['params_with_names'] = [
+                (p, n) for p, n in kwargs['params_with_names']
+                if not getattr(p, 'is_eplb_replica', False)
+            ]
+        _param_and_grad_buffer_init_func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def _distributed_data_parallel_init_wrapper(_ddp_init_func):
+    """Hide UltraEP replica params from DDP so they don't reach compute_full_param_layout()
+    or the buffer-grouping / param_index_map paths introduced in newer Megatron-LM.
+
+    We temporarily flip ``requires_grad`` off on replica params for the duration of DDP
+    init; upstream DDP skips params with ``requires_grad=False`` at its named_parameters
+    loop, so replicas never enter ``all_params`` / ``buffer_groups`` / ``full_param_layout``.
+    The flag is restored in ``finally`` so autograd still runs on replicas afterwards.
+    """
+    @wraps(_ddp_init_func)
+    def wrapper(self, *args, **kwargs):
+        module = kwargs.get('module') if 'module' in kwargs else (args[2] if len(args) > 2 else None)
+        toggled = []
+        if module is not None:
+            for param in module.parameters():
+                if getattr(param, 'is_eplb_replica', False) and param.requires_grad:
+                    param.requires_grad_(False)
+                    toggled.append(param)
+        try:
+            _ddp_init_func(self, *args, **kwargs)
+        finally:
+            for param in toggled:
+                param.requires_grad_(True)
+
+    return wrapper
+
+
+def _compute_full_param_layout_ultraep_wrapper(_compute_layout_func):
+    """Also filter UltraEP replicas from compute_full_param_layout's input.
+
+    ``wrap_model_chunks_with_ddp`` pre-computes the layout via
+    ``DistributedOptimizer.compute_full_param_layout(all_params, ...)`` before
+    invoking DDP.__init__ and then passes it in as ``full_param_layout``.
+    If the layout still contains replica params but DDP's own named_parameters
+    loop skips them (because our DDP wrapper toggles requires_grad off), DDP's
+    consistency check ``set(params) == set(layout.param_index_map.keys())``
+    fails.  Filter here so the layout matches DDP's grouping.
+    """
+    @wraps(_compute_layout_func)
+    def wrapper(all_params, *args, **kwargs):
+        filtered = [p for p in all_params if not getattr(p, 'is_eplb_replica', False)]
+        return _compute_layout_func(filtered, *args, **kwargs)
+
+    return wrapper
+
+
 def _param_and_grad_bucket_init_wrapper(_param_and_grad_bucket_init_func):
     @wraps(_param_and_grad_bucket_init_func)
     def wrapper(

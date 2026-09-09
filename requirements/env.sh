@@ -20,8 +20,8 @@ export TRITON_HOME=/tmp
 # Auto-detect the IB HCA family and pick the matching profile. Force a specific
 # profile by exporting IB_TYPE=mlnx or IB_TYPE=shca before sourcing this file.
 
-export GLOO_SOCKET_IFNAME=eth2 
-export NCCL_SOCKET_IFNAME=eth2 
+export GLOO_SOCKET_IFNAME=eth0 
+export NCCL_SOCKET_IFNAME=eth0 
 export ROCSHMEM_MAX_NUM_CONTEXTS=48
 export ROCSHMEM_HEAP_SIZE=10737418240
 
