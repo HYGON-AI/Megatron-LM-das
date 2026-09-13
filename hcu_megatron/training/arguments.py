@@ -301,8 +301,13 @@ def validate_args_func_decorator(validate_args_func):
             if key in args_dict:
                 setattr(args, key, value)
 
+        adaptor_args = get_adaptor_args()
         for feature in ADAPTOR_FEATURES:
-            args = feature.validate_args(args)
+            if (
+                (getattr(adaptor_args, feature.feature_name, None) and feature.optimization_level == 2)
+                or feature.default_patches
+            ):
+                args = feature.validate_args(args)
 
         return args
 
