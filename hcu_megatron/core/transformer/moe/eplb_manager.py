@@ -53,11 +53,26 @@ class EPLBManager:
         else:
             max_inflight_mbs = pp_size * (vpp_size + 1)
 
-        # Activation checkpointing can double the virtual-layer counter,
-        # so allocate 3x slots to avoid slot reuse conflicts.
-        self.max_microbatches = max(1, max_inflight_mbs) * 3
+        # Slot budget for the per-microbatch virtual layer allocator.
+        #
+        # Each in-flight micro-batch on this PP stage needs one slot per real
+        # MoE layer.  Full activation recompute (`moe_layer_recompute=True`)
+        # replays the forward for a slot a second time within the same
+        # micro-batch window, and selective recompute can, in principle, do the
+        # same, so we multiply by 3 to leave headroom for one forward + one
+        # recompute + one margin.
+        #
+        # This factor is empirical.  Configurations that stack multiple
+        # independent recompute passes (e.g. custom pipeline schedules that
+        # replay a forward more than twice while an earlier slot is still
+        # live) may still exhaust the pool.  `allocate_microbatch_slot` below
+        # asserts the runtime never returns a negative / out-of-range id so
+        # over-subscription surfaces loudly instead of silently reusing a slot
+        # whose placement state is still being read by a prior micro-batch.
+        self._recompute_slot_multiplier = 3
+        self.max_microbatches = max(1, max_inflight_mbs) * self._recompute_slot_multiplier
 
-        # DCU BLOCKER: ultra_ep.Manager instantiates the compiled C++ extension
+        # HCU BLOCKER: ultra_ep.Manager instantiates the compiled C++ extension
         # (ultra_ep._C). Only reachable when HAVE_EPLB=True.
         #
         self.runtime = ultra_ep.Manager(
@@ -108,7 +123,13 @@ class EPLBManager:
         return self.runtime.reroute(layer_id, probs, routing_map, backend)
 
     def allocate_microbatch_slot(self, real_layer_id: int) -> int:
-        """Allocate a virtual layer ID for the next micro-batch on this layer."""
+        """Allocate a virtual layer ID for the next micro-batch on this layer.
+
+        The returned id is an opaque, monotonically-increasing handle produced
+        by the ultra_ep runtime; the runtime maps it to a physical slot
+        internally (modulo the pool sized by ``max_microbatches``).  Do not
+        interpret the returned integer as a slot index.
+        """
         return self.runtime.allocate_microbatch_slot(real_layer_id)
 
 

@@ -56,6 +56,14 @@ def _distributed_data_parallel_init_wrapper(_ddp_init_func):
     init; upstream DDP skips params with ``requires_grad=False`` at its named_parameters
     loop, so replicas never enter ``all_params`` / ``buffer_groups`` / ``full_param_layout``.
     The flag is restored in ``finally`` so autograd still runs on replicas afterwards.
+
+    ``module`` is looked up first by keyword and then by positional index 2
+    (matching upstream DDP.__init__ signature ``self, config, ddp_config,
+    module, ...``).  If the upstream signature ever changes, replicas would
+    leak into DDP's layout and trigger a downstream assertion — that is a
+    loud failure that will be caught in CI, so we deliberately don't add
+    an extra bind() step here (which itself has been observed to interact
+    badly with stacked wrappers).
     """
     @wraps(_ddp_init_func)
     def wrapper(self, *args, **kwargs):

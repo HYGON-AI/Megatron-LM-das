@@ -1,6 +1,6 @@
-"""UltraEP (EPLB) wrappers and autograd functions for the DCU MoE layer.
+"""UltraEP (EPLB) wrappers and autograd functions for the HCU MoE layer.
 
-These wrappers stack on top of the existing DCU moe_layer wrappers via
+These wrappers stack on top of the existing HCU moe_layer wrappers via
 apply_wrapper=True. They are only active when moe_enable_ultraep=True.
 """
 from functools import wraps
@@ -73,7 +73,7 @@ class _EPLBWeightSyncFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         if ctx.moe_layer.eplb_manager is not None:
-            # DCU BLOCKER: calls ultra_ep._C weight_sync
+            # HCU BLOCKER: calls ultra_ep._C weight_sync
             ctx.moe_layer.eplb_manager.runtime.weight_sync(
                 layer_id=ctx.virtual_layer_id,
                 async_finish=False,
@@ -242,7 +242,7 @@ def _eplb_register_master_experts(self):
                 master_fc2_weights.append(master_weight.data)
                 master_fc2_grads.append(master_weight.main_grad)
 
-    # DCU BLOCKER: calls ultra_ep._C construct_local_master_ptr_pool
+    # HCU BLOCKER: calls ultra_ep._C construct_local_master_ptr_pool
     self.eplb_manager.runtime.construct_local_master_ptr_pool(
         layer_id=self.layer_number,
         fc1_weights=master_fc1_weights,
@@ -254,7 +254,7 @@ def _eplb_register_master_experts(self):
 
 
 def _eplb_start_grad_reduce(self, virtual_layer_id: int, async_finish: bool = True):
-    # DCU BLOCKER: calls ultra_ep._C grad_reduce
+    # HCU BLOCKER: calls ultra_ep._C grad_reduce
     self._eplb_grad_reduce_event_handle = self.eplb_manager.runtime.grad_reduce(
         layer_id=virtual_layer_id,
         async_finish=async_finish,
@@ -308,7 +308,7 @@ def moe_layer_ultraep_init_wrapper(moe_layer_init_func):
             ep_group = parallel_state.get_expert_model_parallel_group()
             eplb_manager = get_or_create_eplb_manager(config=config, ep_group=ep_group)
 
-        # Run the already-stacked init (DCU basic wrapper + upstream).
+        # Run the already-stacked init (HCU basic wrapper + upstream).
         # config.num_moe_experts is NOT inflated here; the router must see the
         # logical expert count.  Replica weight slots are added post-init by
         # _eplb_register_redundant_experts which also patches num_gemms.
@@ -417,7 +417,7 @@ def moe_layer_ultraep_forward_wrapper(moe_layer_forward_func):
 
             # Update replica placement and kick off async weight sync.
             self.eplb_manager.update_placement(virtual_layer_id, routing_map)
-            # DCU BLOCKER: calls ultra_ep._C weight_sync
+            # HCU BLOCKER: calls ultra_ep._C weight_sync
             self._eplb_weight_sync_event_handle = (
                 self.eplb_manager.runtime.weight_sync(
                     layer_id=virtual_layer_id, async_finish=True
@@ -431,7 +431,7 @@ def moe_layer_ultraep_forward_wrapper(moe_layer_forward_func):
             )
             probs = probs_fp32.to(probs.dtype)
 
-            # DCU preprocess returns 2-tuple (no residual).
+            # HCU preprocess returns 2-tuple (no residual).
             # NOTE: weight_sync wait is deferred to AFTER preprocess.
             # dtoh_stream.wait_stream(main_stream) fires inside dispatch_preprocess;
             # if weight_sync wait is on main_stream at that point, dtoh also blocks
@@ -451,9 +451,9 @@ def moe_layer_ultraep_forward_wrapper(moe_layer_forward_func):
             )
 
             dispatched_input, probs = self.dispatch(hidden_states, probs)
-            # DCU routed_experts_compute takes 2 args (no residual).
+            # HCU routed_experts_compute takes 2 args (no residual).
             output, mlp_bias = self.routed_experts_compute(dispatched_input, probs)
-            # DCU combine has no shared_expert_output arg.
+            # HCU combine has no shared_expert_output arg.
             output = self.combine(output)
             output = self.postprocess(output, shared_expert_output)
 

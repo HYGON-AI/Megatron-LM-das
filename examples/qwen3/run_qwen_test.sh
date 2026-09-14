@@ -20,7 +20,7 @@ DATA_PATH="/workspace/data/qwen3/mmap_qwen3_datasets_text_document"             
 TOKENIZER_MODEL_PATH="/workspace/data/qwen3-config/qwen3-30b-a3b"                                                # HuggingFace path to model. example Qwen/Qwen3-32B
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
-TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_qwen3_30B_A3B.sh}                        # script under examples/qwen3 to run
+TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_qwen3_30B_A3B_ultraep.sh}                        # script under examples/qwen3 to run
 NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
@@ -69,7 +69,7 @@ CMD="mpirun -np ${MPIRUN_NP} --hostfile ${HOSTFILE} \
     --allow-run-as-root \
     --bind-to none \
     --mca plm_rsh_no_tree_spawn 1 \
-    --mca plm_rsh_args '-p 11451' \
+    --mca plm_rsh_args '-p 11459' \
     ${torchrun_args} \
     bash -c '
     source ${DTK_ENV} && \
