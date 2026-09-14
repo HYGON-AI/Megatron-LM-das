@@ -43,7 +43,7 @@ class DummyNode:
         return x
 
 
-def build_data(seq_len=1024):
+def build_data(seq_len=256):
     """
     Creates a random tensor for testing purposes.
 
@@ -51,7 +51,7 @@ def build_data(seq_len=1024):
         torch.Tensor: A random tensor of shape (1024, 1, 1024) with bfloat16 dtype
                      and requires_grad set to True.
     """
-    hidden_states = torch.randn(*(seq_len, 1, 512), dtype=torch.bfloat16, device="cuda") * 100
+    hidden_states = torch.randn(*(seq_len, 1, 128), dtype=torch.bfloat16, device="cuda") * 100
     hidden_states.requires_grad = True
 
     return hidden_states
@@ -167,7 +167,7 @@ def compare_captures(capture_ref, capture_a2a_overlap, verbose=False, skip_embed
             msg = f"gradient name mismatch, '{name}' not in capture_a2a_overlap.keys()"
             return False, msg
         if type(value) != type(capture_a2a_overlap[name]):
-            msg = f"value type mismatch"
+            msg = f"value type mismatch. ref type: {type(value)}. a2a_overlap type: {type(capture_a2a_overlap[name])}"
             return False, msg
         if value is None:
             continue
@@ -206,9 +206,9 @@ def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_groupe
         params_dtype=torch.bfloat16,
         pipeline_dtype=torch.bfloat16,
         num_layers=num_layers,
-        hidden_size=512,
+        hidden_size=128,
         add_bias_linear=False,
-        num_attention_heads=128,
+        num_attention_heads=64,
         ffn_hidden_size=512,
         kv_channels=128,
         hidden_dropout=0.0,

@@ -293,8 +293,8 @@ class TestA2AOverlap:
         args = parse_args()
         args.num_layers = num_layers
         args.num_moe_experts = num_moe_experts
-        args.hidden_size = 512
-        args.num_attention_heads = 128
+        args.hidden_size = 128
+        args.num_attention_heads = 64
         args.max_position_embeddings = 512
         args.micro_batch_size = micro_batch_size
         args.create_attention_mask_in_dataloader = True

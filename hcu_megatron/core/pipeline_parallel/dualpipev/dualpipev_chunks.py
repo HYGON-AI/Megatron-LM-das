@@ -141,7 +141,7 @@ def get_num_layers_to_build(
     # embedding (or loss) layer is included in the pipeline parallelism partition and placement.
     if getattr(args, "schedule_method", None) == "dualpipev":
         if is_first_pp_stage:
-            if  args.dualpipev_first_chunk and config.account_for_embedding_in_pipeline_split:
+            if args.dualpipev_first_chunk and config.account_for_embedding_in_pipeline_split:
                 num_layers_to_build -= 1
                 assert num_layers_to_build >= 0, "Not enough layers in the first virtual pipeline stage"
             elif  not args.dualpipev_first_chunk and config.account_for_loss_in_pipeline_split:

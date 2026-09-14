@@ -6,9 +6,10 @@ from contextlib import nullcontext
 
 import torch
 
-from megatron.core.tensor_parallel.random import _get_all_rng_states, _set_all_rng_states
-from megatron.core.pipeline_parallel.utils import NoopScheduleNode
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan as MegatronTransformerLayerSchedulePlan
+from megatron.core.pipeline_parallel.utils import NoopScheduleNode
+from megatron.core.tensor_parallel.random import _get_all_rng_states, _set_all_rng_states
+from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 
 from .model_chunk_schedule_plan import TransformerLayerSchedulePlanWithSplitAttn as _TransformerLayerSchedulePlanWithSplitAttn
 from hcu_megatron.training.arguments import get_adaptor_args
@@ -80,7 +81,6 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         """
         from megatron.core.models.gpt.fine_grained_callables import build_layer_callables
         from megatron.core.transformer.moe.moe_layer import MoELayer
-        from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
 
         from hcu_megatron.core.models.gpt.fine_grained_callables import TransformerLayerNode
 
@@ -166,11 +166,22 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         """
 
         if f_layer is not None:
-            f_layer.saved_tensors = (f_input,)
             f_layer.rng_states = _get_all_rng_states()
+            if isinstance(f_layer.layer, MultiTokenPredictionLayer):
+                chunk_state = f_layer.chunk_state
+                f_layer.saved_tensors = (f_input, chunk_state.input_ids, chunk_state.position_ids, chunk_state.padding_mask,)
+            else:
+                f_layer.saved_tensors = (f_input,)
 
         if b_layer is not None:
-            b_input_recompute = b_layer.saved_tensors
+            if isinstance(b_layer.layer, MultiTokenPredictionLayer):
+                b_input_recompute, input_ids, position_ids, padding_mask = b_layer.saved_tensors
+                b_layer.chunk_state.input_ids = input_ids
+                b_layer.chunk_state.position_ids = position_ids
+                b_layer.chunk_state.padding_mask = padding_mask
+                b_input_recompute.requires_grad = True   # If not set, grad for the input tensor of attn is none
+            else:
+                b_input_recompute, = b_layer.saved_tensors
             b_layer_rng_states = b_layer.rng_states
 
         if b_layer is not None:
@@ -215,10 +226,13 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         if f_layer is not None:
             with torch.no_grad(), f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(f_input)
-                f_input = f_layer.mtp_post_process.forward(f_input)
 
         if b_layer is not None and not b_layer.config.ep_overlap_early_attn_memory_release:
             b_grad = b_layer.attn.backward(b_grad)
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.mtp_post_process.forward(f_input)
 
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
@@ -270,11 +284,22 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
             Functions or values for next iteration's computation
         """
         if f_layer is not None:
-            f_layer.saved_tensors = (f_input,)
             f_layer.rng_states = _get_all_rng_states()
+            if isinstance(f_layer.layer, MultiTokenPredictionLayer):
+                chunk_state = f_layer.chunk_state
+                f_layer.saved_tensors = (f_input, chunk_state.input_ids, chunk_state.position_ids, chunk_state.padding_mask,)
+            else:
+                f_layer.saved_tensors = (f_input,)
 
         if r_layer is not None:
-            r_input = r_layer.saved_tensors
+            if isinstance(r_layer.layer, MultiTokenPredictionLayer):
+                r_input, input_ids, position_ids, padding_mask = r_layer.saved_tensors
+                r_layer.chunk_state.input_ids = input_ids
+                r_layer.chunk_state.position_ids = position_ids
+                r_layer.chunk_state.padding_mask = padding_mask
+                r_input.requires_grad = True   # If not set, grad for the input tensor of attn is none
+            else:
+                r_input, = r_layer.saved_tensors
             r_layer_rng_states = r_layer.rng_states
 
         if b_layer is not None:
@@ -375,13 +400,24 @@ class TransformerLayerSchedulePlanWithoutSplitAttn(MegatronTransformerLayerSched
         assert f_layer is None or r_layer is None, "Either f_layer or r_layer (or both) is None"
 
         if f_layer is not None:
-            f_layer.saved_tensors = (f_input,)
             f_layer.rng_states = _get_all_rng_states()
+            if isinstance(f_layer.layer, MultiTokenPredictionLayer):
+                chunk_state = f_layer.chunk_state
+                f_layer.saved_tensors = (f_input, chunk_state.input_ids, chunk_state.position_ids, chunk_state.padding_mask,)
+            else:
+                f_layer.saved_tensors = (f_input,)
 
         r_input = None
         r_layer_rng_states = None
         if r_layer is not None:
-            r_input = r_layer.saved_tensors
+            if isinstance(r_layer.layer, MultiTokenPredictionLayer):
+                r_input, input_ids, position_ids, padding_mask = r_layer.saved_tensors
+                r_layer.chunk_state.input_ids = input_ids
+                r_layer.chunk_state.position_ids = position_ids
+                r_layer.chunk_state.padding_mask = padding_mask
+                r_input.requires_grad = True   # If not set, grad for the input tensor of attn is none
+            else:
+                r_input, = r_layer.saved_tensors
             r_layer_rng_states = r_layer.rng_states
 
         r_or_f_layer = f_layer if f_layer is not None else r_layer
@@ -565,6 +601,144 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
     def run(
         f_layer,
         b_layer,
+        f_input=None,
+        b_grad=None,
+        is_last_layer_in_bwd=False,
+        block_level_wgrad_compute=False,
+    ):
+        """Schedule one-forward-one-backward operations for a single transformer layer.
+
+        This function interleaves forward and backward operations, overlapping the communications
+        (dispatch or combine) of one with the computations (att or mlp) of the other
+        to maximize parallelism and efficiency.
+
+        When f_layer and b_layer are not None, forward and backward pass are overlapped as follows:
+        comm_stream: combine_bwd            | dispatch_fwd->dispatch_bwd  | combine_fwd
+        comp_stream: attn_fwd->post_attn_fwd| mlp_bwd->mlp_bwd_dw->mlp_fwd| post_attn_bwd->attn_bwd
+        For MTP, mtp_post_process_fwd is executed after the combine_fwd in the comp_stream,
+        and mtp_post_process_bwd is executed before the combine_bwd in the comp_stream.
+
+        Args:
+            f_layer (TransformerLayerSchedulePlan): Forward layer (for current microbatch)
+            b_layer (TransformerLayerSchedulePlan): Backward layer (for previous microbatch)
+            f_input (Tensor): Input for forward computation
+            b_grad (Tensor): Gradient for backward computation
+            is_last_layer_in_bwd (bool):
+                Whether the current layer is the last layer in the backward pass.
+
+        Returns:
+            Functions or values for next iteration's computation
+        """
+        is_sync_1f1b = f_layer is not None and b_layer is not None
+
+        if f_layer is not None:
+            f_layer.rng_states = _get_all_rng_states()
+            if isinstance(f_layer.layer, MultiTokenPredictionLayer):
+                chunk_state = f_layer.chunk_state
+                f_layer.saved_tensors = (f_input, chunk_state.input_ids, chunk_state.position_ids, chunk_state.padding_mask,)
+            else:
+                f_layer.saved_tensors = (f_input,)
+
+        if b_layer is not None:
+            if isinstance(b_layer.layer, MultiTokenPredictionLayer):
+                b_input_recompute, input_ids, position_ids, padding_mask = b_layer.saved_tensors
+                b_layer.chunk_state.input_ids = input_ids
+                b_layer.chunk_state.position_ids = position_ids
+                b_layer.chunk_state.padding_mask = padding_mask
+                b_input_recompute.requires_grad = True   # If not set, grad for the input tensor of attn is none
+            else:
+                b_input_recompute, = b_layer.saved_tensors
+            b_layer_rng_states = b_layer.rng_states
+
+        if b_layer is not None:
+            with _fork_recompute_rng(b_layer_rng_states):
+                with torch.enable_grad(), b_layer.get_fp8_context():
+                    b_input_recompute = b_layer.attn_qkv.forward(b_input_recompute, is_recompute=True)
+                    b_input_recompute = b_layer.core_attn.forward(b_input_recompute, is_recompute=True)
+                    b_input_recompute = b_layer.attn_proj.forward(b_input_recompute, is_recompute=True)
+                    b_input_recompute = b_layer.moe_dispatch.forward(b_input_recompute, is_recompute=True)
+                    b_input_recompute = b_layer.mlp.forward(b_input_recompute, is_recompute=True)
+                    b_input_recompute = b_layer.moe_combine.forward(b_input_recompute, is_recompute=True)
+                    b_input_recompute = b_layer.mtp_post_process.forward(b_input_recompute, is_recompute=True)
+
+            b_layer.saved_tensors = None
+            b_layer.rng_states = None
+
+        if b_layer is not None:
+            b_grad = b_layer.mtp_post_process.backward(b_grad)
+
+        f_attn_pre_b_combine_sync_event = F_ATTN_PRE_B_COMBINE_SYNC_EVENT if is_sync_1f1b else None
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.attn_qkv.forward(
+                    f_input,
+                    stream_record_event=f_attn_pre_b_combine_sync_event,
+                )
+
+        if b_layer is not None:
+            b_grad = b_layer.moe_combine.backward(
+                b_grad,
+                stream_wait_event=f_attn_pre_b_combine_sync_event,
+            )
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.core_attn.forward(f_input)
+                f_input = f_layer.attn_proj.forward(
+                    f_input,
+                )
+
+        if b_layer is not None:
+            b_grad = b_layer.mlp.backward(b_grad)
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.moe_dispatch.forward(f_input,)
+
+        if b_layer is not None:
+            if not block_level_wgrad_compute:
+                b_layer.mlp.backward_dw()
+            b_grad = b_layer.moe_dispatch.backward(b_grad)
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.mlp.forward(f_input)
+
+        b_attn_post_f_combine_sync_event = B_ATTN_POST_F_COMBINE_SYNC_EVENT if is_sync_1f1b else None
+        if b_layer is not None:
+            b_grad = b_layer.attn_proj.backward(
+                b_grad,
+                stream_record_event=b_attn_post_f_combine_sync_event,
+            )
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.moe_combine.forward(
+                    f_input,
+                    stream_wait_event=b_attn_post_f_combine_sync_event,
+                )
+
+        if b_layer is not None:
+            b_grad = b_layer.core_attn.backward(b_grad)
+            b_grad = b_layer.attn_qkv.backward(b_grad)
+
+        if f_layer is not None:
+            with torch.no_grad(), f_layer.get_fp8_context():
+                f_input = f_layer.mtp_post_process.forward(f_input)
+
+        # Delay the last attn_dw in backward pass (attn_dw of the first layer)
+        # for overlapping with the p2p comm
+        if not block_level_wgrad_compute:
+            if b_layer is not None and not is_last_layer_in_bwd:
+                b_layer.attn_qkv.backward_dw()
+                b_layer.attn_proj.backward_dw()
+
+        return f_input, b_grad
+
+    @staticmethod
+    def run_early_recompute(
+        f_layer,
+        b_layer,
         r_layer,
         f_input=None,
         b_grad=None,
@@ -611,11 +785,22 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
             Functions or values for next iteration's computation
         """
         if f_layer is not None:
-            f_layer.saved_tensors = (f_input,)
             f_layer.rng_states = _get_all_rng_states()
+            if isinstance(f_layer.layer, MultiTokenPredictionLayer):
+                chunk_state = f_layer.chunk_state
+                f_layer.saved_tensors = (f_input, chunk_state.input_ids, chunk_state.position_ids, chunk_state.padding_mask,)
+            else:
+                f_layer.saved_tensors = (f_input,)
 
         if r_layer is not None:
-            r_input = r_layer.saved_tensors
+            if isinstance(r_layer.layer, MultiTokenPredictionLayer):
+                r_input, input_ids, position_ids, padding_mask = r_layer.saved_tensors
+                r_layer.chunk_state.input_ids = input_ids
+                r_layer.chunk_state.position_ids = position_ids
+                r_layer.chunk_state.padding_mask = padding_mask
+                r_input.requires_grad = True   # If not set, grad for the input tensor of attn is none
+            else:
+                r_input, = r_layer.saved_tensors
             r_layer_rng_states = r_layer.rng_states
 
         is_sync_1f1b = f_layer is not None and b_layer is not None
@@ -752,17 +937,29 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
         assert f_layer is None or r_layer is None, "Either f_layer or r_layer (or both) is None"
 
         if f_layer is not None:
-            f_layer.saved_tensors = (f_input,)
             f_layer.rng_states = _get_all_rng_states()
+            if isinstance(f_layer.layer, MultiTokenPredictionLayer):
+                chunk_state = f_layer.chunk_state
+                f_layer.saved_tensors = (f_input, chunk_state.input_ids, chunk_state.position_ids, chunk_state.padding_mask,)
+            else:
+                f_layer.saved_tensors = (f_input,)
 
         r_input = None
         r_layer_rng_states = None
         if r_layer is not None:
-            r_input = r_layer.saved_tensors
+            if isinstance(r_layer.layer, MultiTokenPredictionLayer):
+                r_input, input_ids, position_ids, padding_mask = r_layer.saved_tensors
+                r_layer.chunk_state.input_ids = input_ids
+                r_layer.chunk_state.position_ids = position_ids
+                r_layer.chunk_state.padding_mask = padding_mask
+                r_input.requires_grad = True   # If not set, grad for the input tensor of attn is none
+            else:
+                r_input, = r_layer.saved_tensors
             r_layer_rng_states = r_layer.rng_states
 
-        r_or_f_layer = f_layer or r_layer
-        r_or_f_input = f_input or r_input
+        r_or_f_layer = f_layer if f_layer is not None else r_layer
+        r_or_f_input = f_input if f_layer is not None else r_input
+
         is_sync_1f1b = r_or_f_layer is not None and b_layer is not None
 
         if b_layer is not None:
@@ -842,126 +1039,9 @@ class TransformerLayerSchedulePlanWithSplitAttn(_TransformerLayerSchedulePlanWit
 
         return r_or_f_input if f_layer is not None else None, b_grad
 
-    @staticmethod
-    def run_overlap_three_layers_bak(f_layer, b_layer, r_layer, f_input=None, b_grad=None, is_last_layer_in_bwd=False, block_level_wgrad_compute=False):
-        """Schedule one-forward-one-backward-one-recomputation operations for a single transformer layer.
 
-        Args:
-            f_layer (TransformerLayerSchedulePlan): Forward layer (for current microbatch)
-            b_layer (TransformerLayerSchedulePlan): Backward layer (for previous microbatch)
-            r_layer (TransformerLayerSchedulePlan): Recomputation layer (for previous microbatch)
-            f_input (Tensor): Input for forward computation
-            b_grad (Tensor): Gradient for backward computation
-            is_last_layer_in_bwd (bool):
-                Whether the current layer is the last layer in the backward pass.
+def get_transformer_layer_schedule_plan_with_recompute():
+    if get_adaptor_args().overlap_ep_comm_with_split_attn:
+        return TransformerLayerSchedulePlanWithSplitAttn
 
-        Returns:
-            Functions or values for next iteration's computation
-        """
-        if f_layer is not None:
-            f_layer.saved_tensors = (f_input,)
-            f_layer.rng_states = _get_all_rng_states()
-
-        if r_layer is not None:
-            r_input = r_layer.saved_tensors
-            r_layer_rng_states = r_layer.rng_states
-
-        is_sync_1f1b = f_layer is not None and b_layer is not None
-
-        if b_layer is not None:
-            with _fork_recompute_rng(r_layer_rng_states):
-                with torch.enable_grad(), r_layer.get_fp8_context():
-                    r_input = r_layer.attn_qkv.forward(r_input, is_recompute=True)
-                    r_input = r_layer.core_attn.forward(r_input, is_recompute=True)
-                    r_input = r_layer.attn_proj.forward(r_input, is_recompute=True)
-
-        f_attn_pre_r_dipatch_sync_event = F_ATTN_PRE_R_DISPATCH_SYNC_EVENT if is_sync_1f1b else None
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.attn_qkv.forward(
-                    f_input,
-                    stream_record_event=f_attn_pre_r_dipatch_sync_event,
-                )
-
-        if r_layer is not None:
-            with _fork_recompute_rng(r_layer_rng_states):
-                with torch.enable_grad(), r_layer.get_fp8_context():
-                    r_input = r_layer.moe_dispatch.forward(
-                        r_input,
-                        stream_wait_event=f_attn_pre_r_dipatch_sync_event,
-                        is_recompute=True,
-                    )
-
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.core_attn.forward(f_input)
-                f_input = f_layer.attn_proj.forward(f_input)
-                f_input = f_layer.moe_dispatch.forward(f_input)
-
-        if r_layer is not None:
-            with _fork_recompute_rng(r_layer_rng_states):
-                with torch.enable_grad(), r_layer.get_fp8_context():
-                    r_input = r_layer.mlp.forward(r_input, is_recompute=True)
-
-        if r_layer is not None:
-            with _fork_recompute_rng(r_layer_rng_states):
-                with torch.enable_grad(), r_layer.get_fp8_context():
-                    r_input = r_layer.moe_combine.forward(r_input, is_recompute=True)
-
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.mlp.forward(f_input)
-
-        if r_layer is not None:
-            with _fork_recompute_rng(r_layer_rng_states):
-                with torch.enable_grad(), r_layer.get_fp8_context():
-                    r_input = b_layer.mtp_post_process.forward(r_input, is_recompute=True)
-
-        if b_layer is not None:
-            b_grad = b_layer.mtp_post_process.backward(b_grad)
-            b_grad = b_layer.moe_combine.backward(b_grad)
-            b_grad = b_layer.mlp.backward(b_grad)
-
-        b_attn_post_f_combine_sync_event = B_ATTN_POST_F_COMBINE_SYNC_EVENT if is_sync_1f1b else None
-        if b_layer is not None:
-            if not block_level_wgrad_compute:
-                b_layer.mlp.backward_dw()
-            b_grad = b_layer.moe_dispatch.backward(b_grad)
-            b_grad = b_layer.attn_proj.backward(
-                b_grad,
-                stream_record_event=b_attn_post_f_combine_sync_event,
-            )
-
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.moe_combine.forward(
-                    f_input,
-                    stream_wait_event=b_attn_post_f_combine_sync_event
-                )
-
-        if b_layer is not None:
-            b_grad = b_layer.core_attn.backward(b_grad)
-            b_grad = b_layer.attn_qkv.backward(b_grad)
-
-        if f_layer is not None:
-            with torch.no_grad(), f_layer.get_fp8_context():
-                f_input = f_layer.mtp_post_process.forward(f_input)
-
-        # Delay the last attn_dw in backward pass (attn_dw of the first layer)
-        # for overlapping with the p2p comm
-        if not block_level_wgrad_compute:
-            if b_layer is not None and not is_last_layer_in_bwd:
-                b_layer.attn_qkv.backward_dw()
-                b_layer.attn_proj.backward_dw()
-
-        if b_layer is not None:
-            b_layer.saved_tensors = None
-            b_layer.rng_states = None
-
-        return f_input, b_grad
-
-
-if get_adaptor_args().overlap_ep_comm_with_split_attn:
-    TransformerLayerSchedulePlanWithRecompute = TransformerLayerSchedulePlanWithSplitAttn
-else:
-    TransformerLayerSchedulePlanWithRecompute = TransformerLayerSchedulePlanWithoutSplitAttn
+    return TransformerLayerSchedulePlanWithoutSplitAttn

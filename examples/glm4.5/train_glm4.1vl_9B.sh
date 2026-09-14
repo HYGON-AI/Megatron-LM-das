@@ -91,7 +91,7 @@ GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
     --num-layers 40
     --hidden-size 4096
-    --ffn-hidden-size 13696 
+    --ffn-hidden-size 13696
     --num-attention-heads 32
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --normalization RMSNorm
@@ -104,22 +104,22 @@ GPT_MODEL_ARGS=(
 
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
-    --use-mcore-models 
+    --use-mcore-models
     --micro-batch-size ${MBS}
     --global-batch-size ${GBS}
     --train-iters ${TRAIN_ITERS}
-    --weight-decay 0.1 
-    --adam-beta1 0.9 
-    --adam-beta2 0.95 
-    --init-method-std 0.006 
-    --clip-grad 1.0 
+    --weight-decay 0.1
+    --adam-beta1 0.9
+    --adam-beta2 0.95
+    --init-method-std 0.006
+    --clip-grad 1.0
     --bf16
     --disable-bias-linear
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --lr 3.0e-5 
-    --lr-decay-style cosine 
+    --lr 3.0e-5
+    --lr-decay-style cosine
     --min-lr 3.0e-6
     --lr-warmup-iters ${LR_WARMUP_ITERS}
     --ckpt-format torch
@@ -132,7 +132,7 @@ MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
     --context-parallel-size ${CP}
-    --use-distributed-optimizer 
+    --use-distributed-optimizer
     --sequence-parallel
 )
 
@@ -150,11 +150,11 @@ EVAL_AND_LOGGING_ARGS=(
     --log-throughput
     --eval-iters 5
     --log-interval 1
-    --save-interval 1000 
-    --eval-interval 1000 
+    --save-interval 1000
+    --eval-interval 1000
     # --save $CHECKPOINT_PATH
     # --load $CHECKPOINT_PATH
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
+    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard"
 )
 
 TORCH_PROFIE_ARGS=(

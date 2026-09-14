@@ -108,15 +108,6 @@ class SyncFreeMoeFeature(AbstractFeature):
         elif args.use_primus_topk_router or args.use_primus_moe_permute_fusion:
             args.turbo_sync_free_moe_stage = 1
 
-        if args.sync_free_moe_backend == "deepep":
-            assert args.moe_token_dispatcher_type == "flex", "DeepEP backend is only supported with flex token dispatcher."
-            assert args.moe_flex_dispatcher_backend == "deepep"
-            assert args.use_primus_grouped_gemm, "--use-primus-grouped-gemm should be set when enabling sync free moe with deepep."
-            assert not args.use_primus_deepep, "--use-primus-deepep should NOT be set when enabling sync free moe with deepep."
-
-        if args.use_primus_deepep:
-            assert args.moe_token_dispatcher_type == "flex", "Primus DeepEP backend is only supported with flex token dispatcher."
-
         return args
 
     def register_patches(self, patch_manager, args):
