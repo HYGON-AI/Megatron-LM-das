@@ -9,7 +9,7 @@ export ROCSHMEM_BACKEND=gda
 export ROCSHMEM_GDA_PROVIDER=shca
 export ROCSHMEM_HEAP_SIZE=2147483648
 
-# 单节点 DCU 的已验证性能配置
+# 单节点的已验证性能配置
 export ULTRA_EP_WEIGHT_SYNC_PLAN_MODE=direct
 export ULTRA_EP_WEIGHT_SYNC_HIP_COPY_MODE=thread        #default
 # export ULTRA_EP_WEIGHT_SYNC_HIP_COPY_MODE=lds           #调优

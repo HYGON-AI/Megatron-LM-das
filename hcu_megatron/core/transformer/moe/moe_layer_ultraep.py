@@ -1,3 +1,6 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 """UltraEP (EPLB) wrappers and autograd functions for the HCU MoE layer.
 
 These wrappers stack on top of the existing HCU moe_layer wrappers via

@@ -98,7 +98,7 @@ backward（forward 逆序触发）:
 
 ## 快速回归
 
-单节点 8×DCU 跑通 `examples/qwen3/train_qwen3_30B_A3B.sh` 50 iter，loss 曲线与 baseline（不开 UltraEP）一致：
+单节点 8卡 跑通 `examples/qwen3/train_qwen3_30B_A3B.sh` 50 iter，loss 曲线与 baseline（不开 UltraEP）一致：
 
 | 配置 | iter50 lm loss | throughput (TFLOP/s/GPU) |
 |------|----------------|--------------------------|
