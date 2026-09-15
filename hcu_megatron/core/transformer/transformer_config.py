@@ -6,7 +6,7 @@ import warnings
 from functools import wraps
 from dataclasses import field, make_dataclass, MISSING
 
-from hcu_megatron.training.arguments import add_adaptor_args
+from hcu_megatron.training.arguments import add_adaptor_args, get_adaptor_args
 
 
 # 动态生成的 config 子类缓存, 以其基类为 key。
@@ -279,6 +279,11 @@ def transformer_config_init_wrapper(init_func, extra_field_specs):
         # pop the new fields out of kwargs
         extras = {k: kwargs.pop(k) for k in list(kwargs) if k in known_extra}
 
+        try:
+            adaptor_args = get_adaptor_args()
+        except AssertionError:
+            adaptor_args = None
+
         # construct a dataclass with new fields
         new_fields = []
         for name, (typ, default) in extra_field_specs.items():
@@ -292,6 +297,8 @@ def transformer_config_init_wrapper(init_func, extra_field_specs):
         for name, (typ, default) in extra_field_specs.items():
             if name in extras:
                 setattr(self, name, extras[name])
+            elif adaptor_args is not None and hasattr(adaptor_args, name):
+                setattr(self, name, getattr(adaptor_args, name))
             elif isinstance(default, type(field())):
                 factory = default.default_factory
                 setattr(self, name, factory() if factory is not MISSING else default.default)

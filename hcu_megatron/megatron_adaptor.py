@@ -1,6 +1,7 @@
 # This code was adopted from https://gitcode.com/Ascend/MindSpeed
-from megatron.training.global_vars import get_args, set_args
-from megatron.training.arguments import parse_and_validate_args
+from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
+from megatron.training.global_vars import destroy_global_vars, set_global_variables
+from megatron.training.arguments import parse_args, validate_args
 
 from .features_manager import ADAPTOR_FEATURES
 from .patch_utils import MegatronPatchesManager
@@ -24,14 +25,14 @@ def patch_features(adaptor_args):
     MegatronPatchesManager.apply_patches()
 
 
-def repatch(patch_adaptor_args=None, patch_megatron_args=None):
-    destroy_adaptor_args()
+def repatch(patch_adaptor_args=None, patch_megatron_args=None, skip_validate=True):
     MegatronPatchesManager.remove_patches()
 
-    set_args(None)
-    parse_and_validate_args()
-    megatron_args = get_args()
+    destroy_global_vars()
+    destroy_num_microbatches_calculator()
+    megatron_args = parse_args()
 
+    destroy_adaptor_args()
     adaptor_args = parse_adaptor_args()
     if patch_adaptor_args is not None:
         for k, v in patch_adaptor_args.items():
@@ -39,10 +40,13 @@ def repatch(patch_adaptor_args=None, patch_megatron_args=None):
             setattr(megatron_args, k, v)
     set_adaptor_args(adaptor_args)
 
-    if patch_adaptor_args is not None:
+    if patch_megatron_args is not None:
         for k, v in patch_megatron_args.items():
             setattr(megatron_args, k, v)
 
+    if not skip_validate:
+        validate_args(megatron_args)
+    set_global_variables(megatron_args, False)
     patch_features(get_adaptor_args())
 
 
