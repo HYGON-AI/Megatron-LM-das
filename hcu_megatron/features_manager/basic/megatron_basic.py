@@ -27,7 +27,6 @@ class MegatronBasicFeature(AbstractFeature):
         self.register_core_transformers_patches(patch_manager, args)
         self.register_core_ssm_patches(patch_manager, args)
         self.register_core_tokenizers_patches(patch_manager, args)
-        self.register_core_extentions_patches(patch_manager, args)
         self.register_tensor_parallel_patches(patch_manager, args)
         self.register_pipeline_parallel_patches(patch_manager, args)
         self.register_training_patches(patch_manager, args)
@@ -94,14 +93,22 @@ class MegatronBasicFeature(AbstractFeature):
                                     create_dummy=True)
 
     def register_core_transformers_patches(self, patch_manager, args):
-        from hcu_megatron.core.transformer.transformer_config import transformer_config_post_init_wrapper
-        from hcu_megatron.core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
         from hcu_megatron.core.transformer.attention import attention_init_wrapper
         from hcu_megatron.core.transformer.moe.experts import TEGroupedMLP
+        from hcu_megatron.core.transformer.moe.moe_layer import moe_layer_init_wrapper, moe_layer_forward_wrapper
+        from hcu_megatron.core.transformer.transformer_config import (
+            mla_transformer_config_init_func,
+            transformer_config_init_func,
+            transformer_config_post_init_wrapper,
+        )
 
         # Transformer config, add new params
         patch_manager.register_patch('megatron.core.transformer.transformer_config.TransformerConfig.__post_init__',
                                     transformer_config_post_init_wrapper)
+        patch_manager.register_patch('megatron.core.transformer.transformer_config.TransformerConfig.__init__',
+                                    transformer_config_init_func)
+        patch_manager.register_patch('megatron.core.transformer.transformer_config.MLATransformerConfig.__init__',
+                                    mla_transformer_config_init_func)
         # support experts_recompute
         patch_manager.register_patch('megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
                                     moe_layer_init_wrapper)
@@ -161,14 +168,6 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.tokenizers.utils.build_tokenizer.build_tokenizer',
                                     build_tokenizer_wrapper,
                                     apply_wrapper=True)
-
-    def register_core_extentions_patches(self, patch_manager, args):
-        import transformer_engine as te
-
-        from megatron.core.extensions.transformer_engine import TEGroupedLinear
-
-        if int(os.getenv("GROUPED_GEMM_BatchLinear", '0')):
-            TEGroupedLinear.__bases__ = (te.pytorch.BatchedLinear,)
 
     def register_tensor_parallel_patches(self, patch_manager, args):
         from hcu_megatron.core.parallel_state import log_timing_wrapper

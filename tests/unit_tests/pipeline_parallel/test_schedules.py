@@ -29,7 +29,11 @@ from hcu_megatron.core.pipeline_parallel.seq1f1b.schedules import (
 )
 from hcu_megatron.core.pipeline_parallel.ripipe_schedules import forward_backward_ripipe_pipelining
 from hcu_megatron.megatron_adaptor import repatch
-from hcu_megatron.training.arguments import destroy_adaptor_args, get_adaptor_args
+from hcu_megatron.training.arguments import (
+    parse_adaptor_args,
+    set_adaptor_args,
+    destroy_adaptor_args,
+)
 
 rank = Utils.rank
 
@@ -37,7 +41,8 @@ rank = Utils.rank
 def create_test_adaptor_args():
     sys.argv = ['test_schedules.py']
     destroy_adaptor_args()
-    args = get_adaptor_args()
+    args = parse_adaptor_args()
+    set_adaptor_args(args)
     return args
 
 

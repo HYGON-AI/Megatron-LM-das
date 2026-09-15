@@ -147,10 +147,13 @@ class SyncFreeMoeFeature(AbstractFeature):
 
             if args.use_primus_grouped_gemm:
                 from hcu_megatron.core.extensions.transformer_engine_spec_provider import te_spec_provider_grouped_mlp_modules_wrapper
+                from hcu_megatron.core.full_cuda_graph import FullCudaGraphWrapper
 
                 patch_manager.register_patch("megatron.core.extensions.transformer_engine_spec_provider.TESpecProvider.grouped_mlp_modules",
                                              te_spec_provider_grouped_mlp_modules_wrapper,
                                              apply_wrapper=True)
+                patch_manager.register_patch('megatron.core.full_cuda_graph.FullCudaGraphWrapper.__call__',
+                                            FullCudaGraphWrapper.__call__)
 
             if args.sync_free_moe_backend == "deepep":
                 from hcu_megatron.core.transformer.moe.token_dispatcher import MoEFlexTokenDispatcher

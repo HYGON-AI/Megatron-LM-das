@@ -1,11 +1,12 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # SPDX-License-Identifier: Apache-2.0
+import argparse
 import sys
 import warnings
 from functools import wraps
-from dataclasses import make_dataclass, field
+from dataclasses import field, make_dataclass, MISSING
 
-from hcu_megatron.training.arguments import get_adaptor_args
+from hcu_megatron.training.arguments import add_adaptor_args, get_adaptor_args
 
 
 # 动态生成的 config 子类缓存, 以其基类为 key。
@@ -71,14 +72,14 @@ def _make_picklable_dataclass(base_cls, fields):
     cls = make_dataclass(base_cls.__name__, fields=fields, bases=(base_cls,))
 
     holder = sys.modules[__name__]
-    # 确定性命名: 同一基类在任何 rank 上都得到同样的名字。
+    # same base class yields the same name regardless of rank
     unique_name = "_Dynamic_{}_{}".format(
         base_cls.__module__.replace(".", "_"), base_cls.__name__
     )
     cls.__module__ = holder.__name__
     cls.__qualname__ = unique_name
     cls.__name__ = unique_name
-    # 供 _dynamic_config_reduce 序列化时还原用。
+    # Referenced by _dynamic_config_reduce when restoring the instance from a pickled state
     cls.__dynamic_base__ = base_cls
     cls.__dynamic_fields__ = tuple(f[0] for f in fields)
     cls.__reduce__ = _dynamic_config_reduce
@@ -91,9 +92,7 @@ def _make_picklable_dataclass(base_cls, fields):
 def transformer_config_post_init_wrapper(post_init_func):
     @wraps(post_init_func)
     def wrapper(self):
-        args = get_adaptor_args()
-
-        # remover experts from recompute_modules. Otherwise _post_init_ will raise error
+        # remove experts from recompute_modules. Otherwise _post_init_ will raise error
         if self.recompute_modules is None:
             self.recompute_modules = set()
         self.recompute_modules = set(self.recompute_modules)
@@ -109,8 +108,8 @@ def transformer_config_post_init_wrapper(post_init_func):
         # set overlap_moe_expert_parallel_comm to avoid AssertionError
         need_delay_wgrad_compute_schedules = {"dualpipev", "zb_h1"}
         if (
-            args.schedule_method in need_delay_wgrad_compute_schedules
-            or (args.schedule_method == "vanilla" and args.delay_1f1b_cooldown_wgrad_compute)
+            self.schedule_method in need_delay_wgrad_compute_schedules
+            or (self.schedule_method == "vanilla" and self.delay_1f1b_cooldown_wgrad_compute)
         ):
             origin_delay_wgrad_compute = self.delay_wgrad_compute
             self.delay_wgrad_compute = False
@@ -120,22 +119,22 @@ def transformer_config_post_init_wrapper(post_init_func):
 
         # Recompute specific transformer layers to save activation memory without enabling full recomputation
         # https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html#feature-6-recompute-selected-layers
-        if args.recompute_layer_ids is not None:
+        if self.recompute_layer_ids is not None:
             assert isinstance(
-                args.recompute_layer_ids, list
-            ), f"recompute_layer_ids={args.recompute_layer_ids} should be a list"
-            recompute_layer_ids = list(set(args.recompute_layer_ids))
+                self.recompute_layer_ids, list
+            ), f"recompute_layer_ids={self.recompute_layer_ids} should be a list"
+            recompute_layer_ids = list(set(self.recompute_layer_ids))
             assert len(recompute_layer_ids) > 0, "recompute layer ids is null"
             for layer_id in recompute_layer_ids:
                 assert (
                     layer_id >= 0 and layer_id < self.num_layers
-                ), f"recompute layer id must be between 0 and {args.num_layers - 1}"
+                ), f"recompute layer id must be between 0 and {self.num_layers - 1}"
 
-        if args.recompute_mtp_layer_ids is not None:
+        if self.recompute_mtp_layer_ids is not None:
             assert isinstance(
-                args.recompute_mtp_layer_ids, list
-            ), f"recompute_mtp_layer_ids={args.recompute_mtp_layer_ids} should be a list"
-            recompute_mtp_layer_ids = list(set(args.recompute_mtp_layer_ids))
+                self.recompute_mtp_layer_ids, list
+            ), f"recompute_mtp_layer_ids={self.recompute_mtp_layer_ids} should be a list"
+            recompute_mtp_layer_ids = list(set(self.recompute_mtp_layer_ids))
             assert len(recompute_mtp_layer_ids) > 0, "recompute layer ids is null"
             for layer_id in recompute_mtp_layer_ids:
                 assert (
@@ -143,8 +142,8 @@ def transformer_config_post_init_wrapper(post_init_func):
                 ), f"recompute layer id must be between 0 and {self.mtp_num_layers - 1}"
 
         if (
-            args.recompute_layer_ids is not None
-            or args.recompute_mtp_layer_ids is not None
+            self.recompute_layer_ids is not None
+            or self.recompute_mtp_layer_ids is not None
         ):
             if self.recompute_granularity != "full":
                 raise ValueError(
@@ -168,27 +167,11 @@ def transformer_config_post_init_wrapper(post_init_func):
             self.recompute_modules.append("mhc")
 
         if (
-            args.schedule_method in need_delay_wgrad_compute_schedules
-            or (args.schedule_method == "vanilla" and args.delay_1f1b_cooldown_wgrad_compute)
+            self.schedule_method in need_delay_wgrad_compute_schedules
+            or (self.schedule_method == "vanilla" and self.delay_1f1b_cooldown_wgrad_compute)
         ):
             self.delay_wgrad_compute = origin_delay_wgrad_compute
             self.overlap_moe_expert_parallel_comm = origin_overlap_moe_expert_parallel_comm
-
-        fields = []
-        for key, value in vars(args).items():
-            field_name = str(key)
-            field_type = type(value)
-            if not hasattr(self, key):
-                field_def = (field_name, field_type, field(init=False))
-                fields.append(field_def)
-
-        # Use a dynamic class that supports pickling, otherwise broadcasting the config
-        # will fail when exporting HF weights with PP>1.
-        self.__class__ = _make_picklable_dataclass(self.__class__, fields)
-
-        for key, value in vars(args).items():
-            if not hasattr(self, key):
-                setattr(self, key, value)
 
         # Validation for "mhc" in recompute_modules
         if self.recompute_granularity == "selective" and "mhc" in self.recompute_modules:
@@ -250,3 +233,92 @@ def transformer_config_post_init_wrapper(post_init_func):
             self.recompute_granularity = "full"
 
     return wrapper
+
+
+def field_specs_from_parser(skip: set = None):
+    parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
+    parser = add_adaptor_args(parser)
+
+    specs = {}
+    for action in parser._actions:
+        if isinstance(action, argparse._HelpAction):
+            continue
+        name = action.dest
+        if name in skip:
+            continue
+
+        # get the argument type
+        if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+            typ = bool
+        elif action.nargs in ("*", "+") or isinstance(
+            action, (argparse._AppendAction, argparse._AppendConstAction)
+        ):
+            typ = list
+        else:
+            typ = action.type or (type(action.default) if action.default is not None else str)
+
+        # get the default value
+        default = action.default
+        if isinstance(default, (list, dict, set)):
+            snapshot = type(default)(default)
+            specs[name] = (typ, field(default_factory=lambda s=snapshot: type(s)(s)))
+        else:
+            specs[name] = (typ, default)
+    return specs
+
+
+def transformer_config_init_wrapper(init_func, extra_field_specs):
+    """
+    extra_field_specs: dict[name -> (type, default)]
+      default can be a normal value, or it can be dataclasses.field(default_factory=...)
+    """
+    known_extra = set(extra_field_specs)
+
+    @wraps(init_func)
+    def wrapper(self, *args, **kwargs):
+        # pop the new fields out of kwargs
+        extras = {k: kwargs.pop(k) for k in list(kwargs) if k in known_extra}
+
+        try:
+            adaptor_args = get_adaptor_args()
+        except AssertionError:
+            adaptor_args = None
+
+        # construct a dataclass with new fields
+        new_fields = []
+        for name, (typ, default) in extra_field_specs.items():
+            if isinstance(default, type(field())):
+                new_fields.append((name, typ, default))
+            else:
+                new_fields.append((name, typ, field(default=default)))
+        self.__class__ = _make_picklable_dataclass(self.__class__, new_fields)
+
+        # set value for extra attrs
+        for name, (typ, default) in extra_field_specs.items():
+            if name in extras:
+                setattr(self, name, extras[name])
+            elif adaptor_args is not None and hasattr(adaptor_args, name):
+                setattr(self, name, getattr(adaptor_args, name))
+            elif isinstance(default, type(field())):
+                factory = default.default_factory
+                setattr(self, name, factory() if factory is not MISSING else default.default)
+            else:
+                setattr(self, name, default)
+
+        init_func(self, *args, **kwargs)
+
+    return wrapper
+
+
+# Skip existing TransformerConfig fields to avoid conflicts
+from megatron.core.transformer.transformer_config import TransformerConfig as MegatronCoreTransformerConfig
+from megatron.core.transformer.transformer_config import MLATransformerConfig as MegatronCoreMLATransformerConfig
+
+existing_attrs = {f.name for f in MegatronCoreTransformerConfig.__dataclass_fields__.values()}
+extra_field_specs = field_specs_from_parser(skip=existing_attrs)
+transformer_config_init_func = transformer_config_init_wrapper(
+    MegatronCoreTransformerConfig.__init__, extra_field_specs
+)
+mla_transformer_config_init_func = transformer_config_init_wrapper(
+    MegatronCoreMLATransformerConfig.__init__, extra_field_specs
+)
