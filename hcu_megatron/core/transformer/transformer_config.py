@@ -140,7 +140,7 @@ def transformer_config_post_init_wrapper(post_init_func):
             for layer_id in recompute_mtp_layer_ids:
                 assert (
                     layer_id >= 0 and layer_id < self.mtp_num_layers
-                ), f"recompute layer id must be between 0 and {args.mtp_num_layers - 1}"
+                ), f"recompute layer id must be between 0 and {self.mtp_num_layers - 1}"
 
         if (
             args.recompute_layer_ids is not None
@@ -181,8 +181,9 @@ def transformer_config_post_init_wrapper(post_init_func):
             if not hasattr(self, key):
                 field_def = (field_name, field_type, field(init=False))
                 fields.append(field_def)
-        # self.__class__ = make_dataclass(self.__class__.__name__, fields=fields, bases=(self.__class__,))
-        # 改用可被 pickle 的动态类, 否则 PP>1 导出 HF 权重时广播 config 会失败
+
+        # Use a dynamic class that supports pickling, otherwise broadcasting the config
+        # will fail when exporting HF weights with PP>1.
         self.__class__ = _make_picklable_dataclass(self.__class__, fields)
 
         for key, value in vars(args).items():
@@ -243,8 +244,8 @@ def transformer_config_post_init_wrapper(post_init_func):
                     )
 
         if (
-            args.recompute_layer_ids is not None
-            or args.recompute_mtp_layer_ids is not None
+            self.recompute_layer_ids is not None
+            or self.recompute_mtp_layer_ids is not None
         ):
             self.recompute_granularity = "full"
 

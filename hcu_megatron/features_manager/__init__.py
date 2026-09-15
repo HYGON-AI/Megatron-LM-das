@@ -11,6 +11,8 @@ from .basic.minimum_basic import MinimumBasicFeature
 from .transformer.hyper_connection_feature import HyperConnectionFeature
 from .moe.sync_free_moe_feature import SyncFreeMoeFeature
 from .transformer.dsa_feature import DSAFeature
+from .moe.mega_moe_feature import MegaMoeFeature
+
 
 ADAPTOR_FEATURES = [
     PipelineFeature(),
@@ -26,4 +28,5 @@ ADAPTOR_FEATURES = [
     HyperConnectionFeature(),
     SyncFreeMoeFeature(),
     DSAFeature(),
+    MegaMoeFeature(),
 ]

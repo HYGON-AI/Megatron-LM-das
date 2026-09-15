@@ -12,7 +12,13 @@ try:
 except ImportError:
     primus_turbo_torch = None
 
-from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.config import is_experimental_enabled
+from megatron.core.fusions.fused_indices_converter import fused_indices_to_multihot
+from megatron.core.transformer.moe.moe_utils import (
+    ProcessGroupCollection,
+    get_align_size_for_quantization,
+    permute,
+)
 from megatron.core.transformer.moe.token_dispatcher import (
     _HybridEPManager,
     logger,
@@ -63,7 +69,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         num_worst_tokens, permute_max_token_num = 0, 0
         if args.turbo_sync_free_moe_stage > 1:
             if args.sequence_parallel:
-                seq_length = args.seq_length // self.tp_size
+                seq_length = args.seq_length // args.tensor_model_parallel_size
             else:
                 seq_length = args.seq_length
             num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size
@@ -301,6 +307,41 @@ class _DeepepManager(MegatronCoreDeepepManager):
 
         return hidden_states
 
+    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if is_experimental_enabled() and self.permute_fusion:
+            self.dispatched_routing_map, self.dispatched_probs = fused_indices_to_multihot(
+                self.dispatched_indices, self.dispatched_probs, self.num_local_experts
+            )
+        else:
+            self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
+                self.dispatched_indices, self.dispatched_probs
+            )
+        if self.config.moe_router_padding_for_quantization:
+            self.dispatched_routing_map, self.tokens_per_expert = self._pad_routing_map(
+                self.dispatched_routing_map, self.tokens_per_expert
+            )
+
+        self.hidden_shape_before_permute = hidden_states.shape
+        assert self.dispatched_probs.dtype == torch.float32, "DeepEP only supports float32 probs"
+        (
+            hidden_states,
+            permuted_probs,
+            self.reversed_mapping_for_combine,
+            self.pad_offsets,
+            self.tokens_per_expert,
+        ) = permute(
+            hidden_states,
+            self.dispatched_routing_map,
+            probs=self.dispatched_probs,
+            num_out_tokens=self.num_worst_tokens * min(self.router_topk, self.num_local_experts), # self.tokens_per_expert.sum().item()
+            fused=self.permute_fusion,
+            tokens_per_expert=self.tokens_per_expert,
+            align_size=get_align_size_for_quantization(self.config),
+        )
+        if self.router_dtype == "fp64":
+            permuted_probs = permuted_probs.to(torch.float64)
+        return hidden_states, permuted_probs
+
 
 class MoEFlexTokenDispatcher(MegatronCoreMoEFlexTokenDispatcher):
     """A flexible token dispatcher that abstracts the underlying tensor and expert
@@ -334,9 +375,9 @@ class MoEFlexTokenDispatcher(MegatronCoreMoEFlexTokenDispatcher):
             args = get_args()
             # enable sync-free moe to elimiate deepep cpu busy-wait
             num_worst_tokens = 0
-            if get_args().sync_free_moe and get_args().sync_free_moe_backend == "deepep":
+            if args.sync_free_moe and args.sync_free_moe_backend == "deepep":
                 if args.sequence_parallel:
-                    seq_length = args.seq_length // self.tp_size
+                    seq_length = args.seq_length // args.tensor_model_parallel_size
                 else:
                     seq_length = args.seq_length
                 num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size

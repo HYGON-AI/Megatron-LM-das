@@ -397,13 +397,13 @@ class TransformerLayerSchedulePlanWithSplitAttn:
         return f_input, b_grad
 
 
-if get_adaptor_args().integrate_recompute_to_ep_comm_overlap:
-    from .model_chunk_schedule_plan_with_recompute import TransformerLayerSchedulePlanWithRecompute
-    layer_schedule_plan_cls = TransformerLayerSchedulePlanWithRecompute
-elif get_adaptor_args().overlap_ep_comm_with_split_attn:
-    layer_schedule_plan_cls = TransformerLayerSchedulePlanWithSplitAttn
-else:
-    layer_schedule_plan_cls = TransformerLayerSchedulePlanWithoutSplitAttn
+def get_transformer_layer_schedule_plan():
+    if get_adaptor_args().integrate_recompute_to_ep_comm_overlap:
+        from .model_chunk_schedule_plan_with_recompute import get_transformer_layer_schedule_plan_with_recompute
+        return get_transformer_layer_schedule_plan_with_recompute()
+    elif get_adaptor_args().overlap_ep_comm_with_split_attn:
+        return TransformerLayerSchedulePlanWithSplitAttn
+    return TransformerLayerSchedulePlanWithoutSplitAttn
 
 class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePlan):
     """Schedule the executing plan of the sub-modules in a model chunk sub-modules.
@@ -429,7 +429,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                 "is_first_layer": layer_idx == 0,
                 "is_last_layer": layer_idx == num_layers - 1,
             }
-            layer_plan = layer_schedule_plan_cls(
+            layer_plan = get_transformer_layer_schedule_plan()(
                 module.layers[layer_idx],
                 self.event,
                 self.state,
@@ -451,6 +451,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
         block_level_wgrad_compute=False,
     ):
         args = get_adaptor_args()
+        layer_schedule_plan_cls = get_transformer_layer_schedule_plan()
         if args.integrate_recompute_to_ep_comm_overlap and args.ep_overlap_early_recompute:
             run_func = TransformerModelChunkSchedulePlan.run_recompute_with_overlap_three_layers
             return run_func(
@@ -626,6 +627,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
             The output of the forward pass.
         """
         args = get_adaptor_args()
+        layer_schedule_plan_cls = get_transformer_layer_schedule_plan()
 
         f_input = None
         if f_schedule_plan:
@@ -736,7 +738,12 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                 f_layer = f_schedule_plan.get_layer(i)
                 nvtx_msg = f"layer_{i}f"
                 nvtx_range_push(nvtx_msg)
-                f_input, _ = layer_schedule_plan_cls.run_early_recompute(f_layer, None, None, f_input=f_input)
+                f_input, _ = layer_schedule_plan_cls.run_early_recompute(
+                    f_layer,
+                    None,
+                    None,
+                    f_input=f_input
+                )
                 nvtx_range_pop(nvtx_msg)
 
         if f_schedule_plan is not None and post_forward is not None:
