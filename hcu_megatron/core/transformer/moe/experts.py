@@ -23,6 +23,59 @@ from megatron.core.typed_torch import apply_module
 from hcu_megatron.training.arguments import get_adaptor_args
 
 
+def te_grouped_linear_sharded_state_dict_ultraep_wrapper(original_func):
+    """Emit only master experts and logical EP metadata for UltraEP."""
+    from functools import wraps
+
+    @wraps(original_func)
+    def wrapper(self, tp_axis_map, prefix="", sharded_offsets=(), metadata=None):
+        num_local_master = getattr(self, 'num_local_master_experts', None)
+        if num_local_master is None or self.num_gemms <= num_local_master:
+            return original_func(self, tp_axis_map, prefix, sharded_offsets, metadata)
+
+        real_num_gemms = self.num_gemms
+        self.num_gemms = num_local_master
+        try:
+            return original_func(self, tp_axis_map, prefix, sharded_offsets, metadata)
+        finally:
+            self.num_gemms = real_num_gemms
+
+    return wrapper
+
+
+def teg_grouped_mlp_sharded_state_dict_ultraep_wrapper(original_func):
+    """Restore logical local expert count while constructing a dist checkpoint."""
+    from functools import wraps
+    import re
+
+    @wraps(original_func)
+    def wrapper(self, prefix='', sharded_offsets=(), metadata=None):
+        num_local_master = getattr(self, 'num_local_master_experts', None)
+        if num_local_master is None or self.num_local_experts <= num_local_master:
+            return original_func(
+                self, prefix=prefix, sharded_offsets=sharded_offsets, metadata=metadata
+            )
+
+        real_num_local_experts = self.num_local_experts
+        self.num_local_experts = num_local_master
+        try:
+            state_dict = original_func(
+                self, prefix=prefix, sharded_offsets=sharded_offsets, metadata=metadata
+            )
+        finally:
+            self.num_local_experts = real_num_local_experts
+
+        filtered = {}
+        for key, value in state_dict.items():
+            match = re.search(r'(?:weight|bias)(\d+)', key)
+            if match and int(match.group(1)) >= num_local_master:
+                continue
+            filtered[key] = value
+        return filtered
+
+    return wrapper
+
+
 class TEGroupedMLP():
     def forward(
         self,

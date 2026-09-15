@@ -24,7 +24,8 @@ export GLOO_SOCKET_IFNAME=eth2
 export NCCL_SOCKET_IFNAME=eth2 
 export ROCSHMEM_MAX_NUM_CONTEXTS=48
 export ROCSHMEM_HEAP_SIZE=10737418240
-
+# export NCCL_NCHANNELS_PER_PEER=2 # avoid nan/split-size-0 bug
+# export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 # checkpoint save/load
 if [ -z "${IB_TYPE:-}" ]; then
   if [ -d /sys/class/infiniband ]; then
     _ib_devices=$(ls /sys/class/infiniband 2>/dev/null)
