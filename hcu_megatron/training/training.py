@@ -175,7 +175,7 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
 )
 from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data_from_csv
-from ..core.distributed.power_sgd import EFLayoutManager
+from hcu_megatron.core.distributed.power_sgd import EFLayoutManager
 from hcu_megatron.training import get_args
 
 stimer = StragglerDetector()

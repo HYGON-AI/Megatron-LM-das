@@ -33,10 +33,15 @@ from tests.unit_tests.a2a_overlap.utils import (
 )
 from tests.unit_tests.test_utilities import Utils
 
-from hcu_megatron import megatron_adaptor
 from hcu_megatron.core.models.common.model_chunk_schedule_plan import (
     TransformerLayerSchedulePlanWithoutSplitAttn,
     TransformerLayerSchedulePlanWithSplitAttn,
+)
+from hcu_megatron.megatron_adaptor import repatch
+from hcu_megatron.training.arguments import (
+    parse_adaptor_args,
+    set_adaptor_args,
+    destroy_adaptor_args,
 )
 
 
@@ -274,8 +279,8 @@ class TestA2AOverlap:
     This class contains tests to verify that the all-to-all overlap optimization
     produces the same results as the reference implementation.
     """
-
-    def setup_method(self, method):
+    @staticmethod
+    def _initialize():
         Utils.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=1,
@@ -283,6 +288,7 @@ class TestA2AOverlap:
         )
 
     def teardown_method(self, method):
+        destroy_adaptor_args()
         Utils.destroy_model_parallel()
 
     def create_test_args(self, num_layers=1, num_moe_experts=8, micro_batch_size=1):
@@ -304,6 +310,12 @@ class TestA2AOverlap:
         set_global_variables(args, False)
         return args
 
+    def create_test_adaptor_args(self):
+        sys.argv = ['test_schedule_chunk_1f1b.py']
+        args = parse_adaptor_args()
+        set_adaptor_args(args)
+        return args
+
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("overlap_ep_comm_with_split_attn", [False, True])
     def test_transformer_layer_overlap_dense(self, overlap_ep_comm_with_split_attn):
@@ -311,7 +323,10 @@ class TestA2AOverlap:
         Verifies all-to-all overlap optimization in dense transformer layer produces
         the same results as the reference implementation.
         """
-        self.create_test_args(num_moe_experts=None)
+        adaptor_args = self.create_test_adaptor_args()
+        megatron_args = self.create_test_args(num_moe_experts=None)
+        repatch(vars(adaptor_args), vars(megatron_args))
+        TestA2AOverlap._initialize()
         extra_kwargs = {"moe_token_dispatcher_type": "alltoall"}
         config = get_test_config(num_moe_experts=None, extra_kwargs=extra_kwargs)
         microbatches = 4
@@ -353,7 +368,11 @@ class TestA2AOverlap:
         the same results as the reference implement
         ation.
         """
-        self.create_test_args()
+        adaptor_args = self.create_test_adaptor_args()
+        megatron_args = self.create_test_args()
+        repatch(vars(adaptor_args), vars(megatron_args))
+        TestA2AOverlap._initialize()
+
         extra_kwargs = {
             "moe_token_dispatcher_type": "alltoall",
             "moe_shared_expert_intermediate_size": 512,
@@ -408,7 +427,11 @@ class TestA2AOverlap:
         Verifies all-to-all overlap optimization in transformer layer with early attn memory release
         produces the same results as the reference implementation.
         """
-        self.create_test_args()
+        adaptor_args = self.create_test_adaptor_args()
+        megatron_args = self.create_test_args()
+        repatch(vars(adaptor_args), vars(megatron_args))
+        TestA2AOverlap._initialize()
+
         extra_kwargs = {
             "moe_token_dispatcher_type": "alltoall",
             "ep_overlap_early_attn_memory_release": True,
@@ -464,7 +487,10 @@ class TestA2AOverlap:
         Verifies all-to-all overlap optimization in transformer layer produces
         the same results as the reference implementation.
         """
-        self.create_test_args()
+        adaptor_args = self.create_test_adaptor_args()
+        megatron_args = self.create_test_args()
+        repatch(vars(adaptor_args), vars(megatron_args))
+        TestA2AOverlap._initialize()
 
         extra_kwargs = {
             "moe_token_dispatcher_type": dispatcher_type,
@@ -522,7 +548,10 @@ class TestA2AOverlap:
         Verifies all-to-all overlap optimization in MTP layer produces
         the same results as the reference implementation.
         """
-        self.create_test_args()
+        adaptor_args = self.create_test_adaptor_args()
+        megatron_args = self.create_test_args()
+        repatch(vars(adaptor_args), vars(megatron_args))
+        TestA2AOverlap._initialize()
 
         extra_kwargs = {
             "moe_token_dispatcher_type": dispatcher_type,

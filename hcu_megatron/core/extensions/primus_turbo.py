@@ -10,7 +10,6 @@ import os
 from contextlib import contextmanager, nullcontext
 from typing import Callable, Optional, Tuple, Union
 
-import primus_turbo.pytorch as primus_turbo_torch
 import torch
 
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
@@ -23,6 +22,12 @@ from megatron.core.extensions.transformer_engine import (
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size
+
+try:
+    import primus_turbo.pytorch as primus_turbo_torch
+    HAVE_TURBO = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_TURBO = False
 
 # QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
 # quantization paths (added in PR #735).  Older primus_turbo 0.2.0 builds shipped
@@ -672,6 +677,7 @@ def fused_bias_act_with_probs(
     tokens_per_experts: torch.Tensor,
     activation_func: str,
 ):
+    assert HAVE_TURBO, "primus_turbo.pytorch is NOT installed"
     assert intermediate_parallel.ndim == 2
     assert permuted_probs.ndim == 1
     assert tokens_per_experts.device == intermediate_parallel.device
@@ -903,6 +909,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 type(self)._fwg_logn = getattr(type(self), "_fwg_logn", 0) + 1
 
             with _wgrad_ctx:
+                assert HAVE_TURBO, "primus_turbo.pytorch is NOT installed"
                 out = primus_turbo_torch.ops.grouped_gemm_fp8(
                     x,
                     quantized_weights,
@@ -913,6 +920,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             assert False, "FP4 is not supported in PrimusTurboGroupedLinear"
         else:
+            assert HAVE_TURBO, "primus_turbo.pytorch is NOT installed"
             out = primus_turbo_torch.ops.grouped_gemm(x, weights, m_splits, trans_b=True)
 
         return out, None

@@ -29,7 +29,7 @@ def remove_original_params(parser, param_names: Union[list, str]):
                     del parser._option_string_actions[option_string]
 
 
-def process_adaptor_args(parser):
+def add_adaptor_args(parser):
     # add extra arguments
     parser = _add_extra_network_size_args(parser)
     parser = _add_extra_training_args(parser)
@@ -55,7 +55,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         parser = extra_args_provider(parser)
 
     # add adaptor args
-    parser = process_adaptor_args(parser)
+    parser = add_adaptor_args(parser)
 
     # Parse.
     explicit_args = {
@@ -114,10 +114,10 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
 
 def _add_extra_network_size_args(parser):
-    # 删除原参数
+    # remove original argument
     remove_original_params(parser, ["normalization"])
 
-    # 重定义参数
+    # override the parameter definition
     group = parser.add_argument_group(title='extra network size args')
     group.add_argument('--normalization', default='LayerNorm',
                        choices=['LayerNorm', 'RMSNorm', 'LightopRMSNorm'],
@@ -171,10 +171,10 @@ def _add_extra_initialization_args(parser):
 
 
 def _add_extra_tokenizer_args(parser):
-    # 删除原参数
+    # remove original argument
     remove_original_params(parser, ["tokenizer_type"])
 
-    # 重定义参数
+    # override the parameter definition
     group = parser.add_argument_group(title='extra tokenizer args')
     group.add_argument('--extra-vocab-size', type=int, default=0,
                        help="--extra-vocab-size")
@@ -364,14 +364,22 @@ def _print_env_vars(title, exclude_vars=None):
         print(f'-------------------- end of {title} ---------------------', flush=True)
 
 
+def parse_adaptor_args():
+    parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
+    adaptor_args, _ = add_adaptor_args(parser).parse_known_args()
+
+    return adaptor_args
+
+
 _ADAPTOR_ARGS = None
 
-def get_adaptor_args():
+def set_adaptor_args(adaptor_args):
     global _ADAPTOR_ARGS
-    if _ADAPTOR_ARGS is None:
-        parser = argparse.ArgumentParser(description='Adaptor Arguments', allow_abbrev=False)
-        _ADAPTOR_ARGS, _ = process_adaptor_args(parser).parse_known_args()
+    _ADAPTOR_ARGS = adaptor_args
 
+
+def get_adaptor_args():
+    assert _ADAPTOR_ARGS is not None, 'adaptor_args is not initialized.'
     return _ADAPTOR_ARGS
 
 

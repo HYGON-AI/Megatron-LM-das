@@ -8,6 +8,13 @@ usage() {
 }
 
 export UNIT_TEST_MODE=1
+# The a2a_overlap fine-grained 1f1b schedule has a cross-stream memory-reuse
+# race under the CUDA caching allocator (comm-stream tensors consumed on the
+# comp stream without record_stream): expert wgrads are intermittently
+# corrupted ("value mismatch", flaky, load-dependent). Until the schedule's
+# cross-stream tensor lifetimes are fully annotated, disable allocator
+# caching for this bucket; it makes every allocation stream-synchronous
+export PYTORCH_NO_CUDA_MEMORY_CACHING=1
 
 # DTK environment (env-driven, default /opt/dtk; skip when absent)
 DTK_ENV="${DTK_ENV:-/opt/dtk/env.sh}"

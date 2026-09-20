@@ -22,13 +22,19 @@ from megatron.training.global_vars import (
 from tests.unit_tests.test_utilities import Utils
 
 from hcu_megatron.megatron_adaptor import repatch
-from hcu_megatron.training.arguments import get_adaptor_args
+from hcu_megatron.training.arguments import (
+    parse_adaptor_args,
+    set_adaptor_args,
+    destroy_adaptor_args,
+)
 
 
 def create_test_adaptor_args():
     sys.argv = ['test_pipeline_parallel_layer_layout.py']
-    args = get_adaptor_args()
+    destroy_adaptor_args()
+    args = parse_adaptor_args()
     args.schedule_method = "dualpipev"
+    set_adaptor_args(args)
     return args
 
 def create_test_args():

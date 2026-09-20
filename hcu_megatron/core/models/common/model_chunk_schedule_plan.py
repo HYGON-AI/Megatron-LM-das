@@ -405,6 +405,7 @@ def get_transformer_layer_schedule_plan():
         return TransformerLayerSchedulePlanWithSplitAttn
     return TransformerLayerSchedulePlanWithoutSplitAttn
 
+
 class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePlan):
     """Schedule the executing plan of the sub-modules in a model chunk sub-modules.
 
