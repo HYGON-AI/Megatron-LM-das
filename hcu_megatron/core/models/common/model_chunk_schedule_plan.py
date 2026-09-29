@@ -267,7 +267,7 @@ class TransformerLayerSchedulePlanWithSplitAttn:
             hook_module = self.layer.mtp_model_layer
 
         # After the last backward op (attn), release backward-pass params.
-        self.attn.set_post_backward_hook(lambda: post_backward_hook(hook_module))
+        self.attn_qkv.set_post_backward_hook(lambda: post_backward_hook(hook_module))
 
         # Determine the last node in forward order.
         if isinstance(self.moe_combine, NoopScheduleNode):
