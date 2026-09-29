@@ -20,8 +20,8 @@ export TRITON_HOME=/tmp
 # Auto-detect the IB HCA family and pick the matching profile. Force a specific
 # profile by exporting IB_TYPE=mlnx or IB_TYPE=shca before sourcing this file.
 
-export GLOO_SOCKET_IFNAME=eth2 
-export NCCL_SOCKET_IFNAME=eth2 
+export GLOO_SOCKET_IFNAME=eth0 
+export NCCL_SOCKET_IFNAME=eth0 
 export ROCSHMEM_MAX_NUM_CONTEXTS=48
 export ROCSHMEM_HEAP_SIZE=10737418240
 
@@ -50,7 +50,8 @@ case "$IB_TYPE" in
   shca)
     export NCCL_IB_HCA=shca_0:1,shca_1:1,shca_2:1,shca_3:1
     export NCCL_PLUGIN_P2P=ib
-    export NCCL_NET_PLUGIN=shca
+    export NCCL_NET_PLUGIN=/opt/rccl-rdma-sharp-plugins/lib/librccl-net-shca.so
+    export NCCL_TOPO_FILE=/usr/local/built-in-508-topo-input-tj-default.xml
     export RCCL_PXN_GPU_BALANCE=1
     # Per-machine tuning (e.g. 508-shca); enable as needed:
     export RCCL_NET_PLANE="shca_0,shca_3|shca_1,shca_2"
