@@ -23,6 +23,8 @@ class DistributedDataParallel():
                 return
 
             if param in self.param_to_bucket_group:
+                if getattr(param, 'is_eplb_master', False):
+                    return  # EPLB master grad ready is signalled manually after replica reduce
                 assert param.requires_grad
                 if self.ddp_config.overlap_grad_reduce:
                     # param.grad can temporarily be None in the following cases:
