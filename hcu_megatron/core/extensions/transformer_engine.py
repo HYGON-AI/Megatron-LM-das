@@ -6,6 +6,7 @@
 
 """MoE Permutation API"""
 import warnings
+from functools import wraps
 from typing import Optional, Tuple
 
 import torch
@@ -1059,3 +1060,23 @@ def moe_sort_chunks_by_index_with_probs(
     """
     output, permuted_probs, _ = torch.ops.te_moe.chunk_sort_fwd(inp, split_sizes, sorted_index, probs)
     return output, permuted_probs
+
+
+def te_grouped_linear_sharded_state_dict_wrapper(original_func):
+    """Emit only master experts and logical EP metadata when replicas exist."""
+    from functools import wraps
+
+    @wraps(original_func)
+    def wrapper(self, tp_axis_map, prefix="", sharded_offsets=(), metadata=None):
+        num_local_master = getattr(self, 'num_local_master_experts', None)
+        if num_local_master is None or self.num_gemms <= num_local_master:
+            return original_func(self, tp_axis_map, prefix, sharded_offsets, metadata)
+
+        real_num_gemms = self.num_gemms
+        self.num_gemms = num_local_master
+        try:
+            return original_func(self, tp_axis_map, prefix, sharded_offsets, metadata)
+        finally:
+            self.num_gemms = real_num_gemms
+
+    return wrapper

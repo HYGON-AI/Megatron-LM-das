@@ -23,6 +23,10 @@ class DistributedDataParallel():
                 return
 
             if param in self.param_to_bucket_group:
+                if getattr(param, 'is_eplb_master', False):
+                    # EPLB master grad ready is signalled manually after replica reduce
+                    return
+
                 assert param.requires_grad
                 cudagraph_wgrad_ready_event = getattr(param, '_cudagraph_wgrad_ready_event', None)
                 if self.ddp_config.overlap_grad_reduce and cudagraph_wgrad_ready_event is None:

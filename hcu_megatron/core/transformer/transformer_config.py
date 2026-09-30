@@ -6,6 +6,9 @@ import warnings
 from functools import wraps
 from dataclasses import field, make_dataclass, MISSING
 
+from megatron.core.transformer.transformer_config import TransformerConfig as MegatronCoreTransformerConfig
+from megatron.core.transformer.transformer_config import MLATransformerConfig as MegatronCoreMLATransformerConfig
+
 from hcu_megatron.training.arguments import add_adaptor_args, get_adaptor_args
 
 
@@ -92,6 +95,32 @@ def _make_picklable_dataclass(base_cls, fields):
 def transformer_config_post_init_wrapper(post_init_func):
     @wraps(post_init_func)
     def wrapper(self):
+        adaptor_field_specs = {name: spec for name, spec in field_specs_from_parser().items() if not hasattr(self, name)}
+
+        # construct a dataclass with new fields
+        new_fields = []
+        for name, (typ, default) in adaptor_field_specs.items():
+            if isinstance(default, type(field())):
+                new_fields.append((name, typ, default))
+            else:
+                new_fields.append((name, typ, field(default=default)))
+        self.__class__ = _make_picklable_dataclass(self.__class__, new_fields)
+
+        try:
+            adaptor_args = get_adaptor_args()
+        except AssertionError:
+            adaptor_args = None
+
+        # set value for extra attrs
+        for name, (typ, default) in adaptor_field_specs.items():
+            if adaptor_args is not None:
+                setattr(self, name, getattr(adaptor_args, name))
+            elif isinstance(default, type(field())):
+                factory = default.default_factory
+                setattr(self, name, factory() if factory is not MISSING else default.default)
+            else:
+                setattr(self, name, default)
+
         # remove experts from recompute_modules. Otherwise _post_init_ will raise error
         if self.recompute_modules is None:
             self.recompute_modules = set()
@@ -312,9 +341,6 @@ def transformer_config_init_wrapper(init_func, extra_field_specs):
 
 
 # Skip existing TransformerConfig fields to avoid conflicts
-from megatron.core.transformer.transformer_config import TransformerConfig as MegatronCoreTransformerConfig
-from megatron.core.transformer.transformer_config import MLATransformerConfig as MegatronCoreMLATransformerConfig
-
 existing_attrs = {f.name for f in MegatronCoreTransformerConfig.__dataclass_fields__.values()}
 extra_field_specs = field_specs_from_parser(skip=existing_attrs)
 transformer_config_init_func = transformer_config_init_wrapper(
