@@ -885,7 +885,7 @@ class Attention():
                             q_pos_emb,
                             config=self.config,
                             cu_seqlens=cu_seqlens_q,
-                            mscale=self._yarn_concentration_factor,,
+                            mscale=self._yarn_concentration_factor,
                             cp_group=self.pg_collection.cp,
                         )
                     else:

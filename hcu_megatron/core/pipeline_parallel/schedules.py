@@ -58,7 +58,7 @@ from hcu_megatron.training.arguments import get_adaptor_args
 
 def get_forward_backward_func_wrapper(fn):
     @wraps(fn)
-    def wrapper(pp_size=None, vp_size=None):
+    def wrapper(pp_size=None, vp_size=None, schedule_pg_collection=None):
         """Retrieves the appropriate forward_backward function given the
         configuration of parallel_state.
 
@@ -77,7 +77,7 @@ def get_forward_backward_func_wrapper(fn):
                 )
                 return forward_backward_pipelining_with_vocab_parallel
 
-            return fn(pp_size=pp_size, vp_size=vp_size)
+            return fn(pp_size=pp_size, vp_size=vp_size, schedule_pg_collection=schedule_pg_collection)
         elif args.schedule_method == "dualpipev":
             if args.enable_vocab_parallel:
                 from .dualpipev.dualpipev_vocab_schedules import forward_backward_pipelining_with_cutinhalf
@@ -376,6 +376,30 @@ def backward_step(input_tensor, output_tensor, output_tensor_grad, config, run_t
         mem_before = torch.cuda.memory_allocated()
 
     input_tensor_grad = _backward_step(input_tensor, output_tensor, output_tensor_grad, config)
+
+    if run_timer:
+        ScheduleTimers.for_chunk(0).b.stop()
+        ScheduleTimers.for_chunk(0).b_mem += torch.cuda.memory_allocated() - mem_before
+
+    return input_tensor_grad
+
+
+def backward_step_multimodule(
+    input_tensor,
+    output_tensor,
+    output_tensor_grad,
+    config,
+    run_timer=False,
+    language_model_module_name=None,
+):
+    from megatron.core.pipeline_parallel.schedules import backward_step_multimodule as _backward_step_multimodule
+
+    if run_timer:
+        ScheduleTimers.for_chunk(0).b_cnt += 1
+        ScheduleTimers.for_chunk(0).b.start()
+        mem_before = torch.cuda.memory_allocated()
+
+    input_tensor_grad = _backward_step_multimodule(input_tensor, output_tensor, output_tensor_grad, config, language_model_module_name)
 
     if run_timer:
         ScheduleTimers.for_chunk(0).b.stop()

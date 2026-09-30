@@ -8,12 +8,18 @@ from typing import Callable, Iterator, List, Optional, Union
 from hcu_megatron.core.pipeline_parallel.seq1f1b.sp_utils import sp_queue, sp_shape_queue
 import torch
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
-from megatron import core
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
-from megatron.core.pipeline_parallel.schedules import  check_first_val_step, finish_embedding_wgrad_compute,\
-    clear_embedding_activation_buffer, deallocate_output_tensor, custom_backward, forward_step, backward_step
+from megatron.core.pipeline_parallel.schedules import (
+    _build_default_pg_collection,
+    backward_step,
+    check_first_val_step,
+    clear_embedding_activation_buffer,
+    deallocate_output_tensor,
+    finish_embedding_wgrad_compute,
+    forward_step,
+)
 from megatron.core.pipeline_parallel import p2p_communication
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.pipeline_parallel.utils import (
@@ -26,11 +32,8 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.pipeline_parallel.combined_1f1b import combined_1f1b_schedule_for_interleaved_pipelining
 
 from megatron.core.utils import (
-    drain_embedding_wgrad_compute,
-    get_attr_wrapped_model,
     get_model_config,
     get_model_type,
-    get_model_xattn,
     nvtx_range_pop,
     nvtx_range_push,
 )
@@ -38,7 +41,6 @@ from megatron.core.utils import (
 from hcu_megatron.training import get_args
 # Types
 Shape = Union[List[int], torch.Size]
-
 
 
 def get_pp_rank_microbatches(
@@ -94,6 +96,7 @@ def get_pp_rank_microbatches(
         num_microbatches_remaining,
     )
 
+
 def get_schedule_table(num_microbatches, num_model_chunks, microbatch_group_size_per_vp_stage):
     """Get the schedule table for PP scheduling."""
     schedule_table = []
@@ -122,6 +125,7 @@ def get_schedule_table(num_microbatches, num_model_chunks, microbatch_group_size
                 ]
             )
     return schedule_table
+
 
 def seq1f1b_forward_backward_pipelining_with_interleaving(
     *,
@@ -169,21 +173,9 @@ def seq1f1b_forward_backward_pipelining_with_interleaving(
         p2p_communicator = P2PCommunicator(
             pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
         )
-        tp_group = parallel_state.get_tensor_model_parallel_group()
-        cp_group = parallel_state.get_context_parallel_group()
-        embd_group = parallel_state.get_embedding_group(check_initialized=False)
-        pp_group = parallel_state.get_pipeline_model_parallel_group()
-        pos_emb_group = parallel_state.get_position_embedding_group(check_initialized=False)
-
-        pg_collection = ProcessGroupCollection()
-        pg_collection.tp = tp_group
-        pg_collection.cp = cp_group
-        pg_collection.embd = embd_group
-        pg_collection.pos_embd = pos_emb_group
-        pg_collection.pp = pp_group
-        pg_collection.dp_cp = parallel_state.get_data_parallel_group(
-            with_context_parallel=True, partial_data_parallel=False
-        )
+        pg_collection = _build_default_pg_collection()
+        tp_group = pg_collection.tp
+        cp_group = pg_collection.cp
 
     elif p2p_communicator is not None and pg_collection is not None:
         model_type = get_model_type(model[0])
@@ -216,8 +208,6 @@ def seq1f1b_forward_backward_pipelining_with_interleaving(
             "Invalid combination of p2p_communicator, pg_collection"
             " provide none or provide all the process groups"
         )
-
-
 
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
@@ -601,7 +591,6 @@ def seq1f1b_forward_backward_pipelining_with_interleaving(
         backward_step_helper_postprocess(virtual_microbatch_id)
 
         return input_tensor_grad
-
 
     def forward_backward_helper_wrapper(
         f_virtual_microbatch_id=None,
@@ -1238,7 +1227,6 @@ def seq1f1b_forward_backward_pipelining_with_interleaving(
     return forward_data_store
 
 
-
 def get_tensor_shapes(
     *,
     seq_length: int,
@@ -1269,6 +1257,7 @@ def get_tensor_shapes(
 
     tensor_shapes.append((effective_seq_length, micro_batch_size, config.hidden_size))
     return tensor_shapes
+
 
 def seq1f1b_forward_backward_pipelining_without_interleaving(
     *,

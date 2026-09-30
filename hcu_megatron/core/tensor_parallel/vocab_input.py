@@ -15,6 +15,7 @@ from megatron.core.parallel_state import (
 )
 
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.mappings import (
     reduce_from_tensor_model_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
@@ -128,17 +129,25 @@ class VocabParallelInput(torch.nn.Module):
                 )
             )
             if config.perform_initialization:
-                _initialize_affine_weight_gpu(
-                    self.weight,
-                    init_method,
-                    partition_dim=0,
-                    stride=1,
-                    params_dtype=config.params_dtype,
-                )
+                _initialize_affine_weight_gpu(self.weight, init_method, partition_dim=0, stride=1)
             else:
                 set_tensor_model_parallel_attributes(
                     tensor=self.weight, is_parallel=True, dim=0, stride=1
                 )
+
+        self.gtp_remat_size = 1
+        gtp_remat_group = ProcessGroupCollection.use_mpu_process_groups(
+            required_pgs=["gtp_remat"]
+        ).gtp_remat
+        if gtp_remat_group is not None and gtp_remat_group.size() > 1:
+            from megatron.core.tensor_parallel.gtp_api import wrap_module_params_gtp
+
+            wrap_module_params_gtp(self, ["weight"], gtp_remat_group)
+            self.gtp_remat_size = gtp_remat_group.size()
+            # Nothing prefetches embedding — it is head of the UNGRAPHED
+            # chain in fwd, and its bwd bypasses all_gather_and_prefetch_bwd
+            # via GTPEmbeddingWeight.backward.
+            self.weight._need_weight_prefetch = False
 
     def forward(self, input_):
         if self.vocab_parallel_world_size > 1:
@@ -149,12 +158,19 @@ class VocabParallelInput(torch.nn.Module):
             masked_input[input_mask] = 0
         else:
             masked_input = input_
+
+        weight = self.weight
+        if self.gtp_remat_size > 1:
+            from megatron.core.tensor_parallel.gtp_api import GTPEmbeddingWeight
+
+            weight = GTPEmbeddingWeight.apply(self.weight)
+
         # Get the embeddings.
         if self.deterministic_mode:
-            output_parallel = self.weight[masked_input]
+            output_parallel = weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
-            output_parallel = F.embedding(masked_input, self.weight)
+            output_parallel = F.embedding(masked_input, weight)
         # Mask the output embedding.
         if self.vocab_parallel_world_size > 1:
             output_parallel[input_mask, :] = 0.0

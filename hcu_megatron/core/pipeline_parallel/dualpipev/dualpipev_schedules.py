@@ -16,12 +16,14 @@ from megatron.core.utils import (
     get_model_config,
     get_model_type,
 )
-from megatron.core.pipeline_parallel.schedules import clear_embedding_activation_buffer, deallocate_output_tensor
 from megatron.core.pipeline_parallel.schedules import (
+    _build_default_pg_collection,
     backward_step,
-    set_current_microbatch,
     check_first_val_step,
-    finish_embedding_wgrad_compute
+    clear_embedding_activation_buffer,
+    deallocate_output_tensor,
+    finish_embedding_wgrad_compute,
+    set_current_microbatch,
 )
 from megatron.core.pipeline_parallel.utils import (
     set_streams,
@@ -499,27 +501,11 @@ def forward_backward_pipelining_with_cutinhalf(
         p2p_communicator = DualpipeVP2PCommunicator(
             pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
         )
-        tp_group = parallel_state.get_tensor_model_parallel_group()
-        cp_group = parallel_state.get_context_parallel_group()
-        embd_group = parallel_state.get_embedding_group(check_initialized=False)
-        pp_group = parallel_state.get_pipeline_model_parallel_group()
-        pos_emb_group = parallel_state.get_position_embedding_group(check_initialized=False)
-
-        pg_collection = ProcessGroupCollection()
-        pg_collection.tp = tp_group
-        pg_collection.cp = cp_group
-        pg_collection.embd = embd_group
-        pg_collection.pos_embd = pos_emb_group
-        pg_collection.pp = pp_group
-        pg_collection.dp_cp = parallel_state.get_data_parallel_group(
-            with_context_parallel=True, partial_data_parallel=False
-        )
-        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
-            with_context_parallel=True
-        )
+        pg_collection = _build_default_pg_collection()
+        tp_group = pg_collection.tp
+        cp_group = pg_collection.cp
 
     elif p2p_communicator is not None and pg_collection is not None:
-        model_type = get_model_type(model[0])
         assert hasattr(p2p_communicator, 'config'), "p2p_communicator must have a config"
         assert hasattr(pg_collection, 'tp'), "pg_collection must have tp"
         assert hasattr(pg_collection, 'cp'), "pg_collection must have cp"

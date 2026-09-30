@@ -1,7 +1,7 @@
 # Some of this code was adopted from https://github.com/MayDomine/Seq1F1B/
 import torch
-
 from dataclasses import dataclass
+
 from hcu_megatron.core.pipeline_parallel.seq1f1b.split_solver import solver
 from hcu_megatron.training import get_args
 

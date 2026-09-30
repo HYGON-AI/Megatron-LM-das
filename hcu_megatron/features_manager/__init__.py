@@ -4,7 +4,6 @@ from .tensor_parallel.parallel_linear_feature import ParallelLinearFeature
 from .optimizer.optimizer_feature import OptimizerFeature
 from .communication.gradient_compress_feature import GradientCompressFeature
 from .communication.quantize_comm_feature import QuantizeCommFeature
-from .memory.swap_attention_feature import SwapAttentionFeature
 from .recompute.activation_function import RecomputeActivationFeature
 from .basic.megatron_basic import MegatronBasicFeature
 from .basic.minimum_basic import MinimumBasicFeature
@@ -21,7 +20,6 @@ ADAPTOR_FEATURES = [
     ParallelLinearFeature(),
     GradientCompressFeature(),
     QuantizeCommFeature(),
-    SwapAttentionFeature(),
     RecomputeActivationFeature(),
     MegatronBasicFeature(),
     MinimumBasicFeature(),

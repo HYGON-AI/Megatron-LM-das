@@ -16,9 +16,11 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import (
     custom_fwd,
     custom_bwd,
+    set_tensor_model_parallel_attributes,
 )
 
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
@@ -67,16 +69,22 @@ class _ForwardImpl(torch.autograd.Function):
         sequence_parallel,
         grad_output_buffer,
         wgrad_deferral_limit,
+        gtp_remat_size,
         fuse_forward_input_grad: bool = True,
         sync_allreduce: bool = False,
     ):
         assert label_smoothing == 0, "not yet supported"
+
+        if gtp_remat_size > 1:
+            weight = weight.all_gather_and_prefetch(fwd=True)
+
         ctx.label_smoothing = label_smoothing
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.sequence_parallel = sequence_parallel
         ctx.grad_output_buffer = grad_output_buffer
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
+        ctx.gtp_remat_size = gtp_remat_size
         ctx.fuse_forward_input_grad = fuse_forward_input_grad
         ctx.sync_allreduce = sync_allreduce
         ctx.input_shape = input.shape
@@ -241,6 +249,12 @@ class _ForwardImpl(torch.autograd.Function):
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
 
+        # GTP: re-gather weight for dgrad
+        if ctx.gtp_remat_size > 1:
+            sharded_weight = weight
+            weight = sharded_weight.all_gather_and_prefetch_bwd()
+            ctx.gradient_accumulation_fusion = False
+
         reudce_group = (
             get_tensor_model_parallel_group()
             if not ctx.sync_allreduce
@@ -377,16 +391,20 @@ class _ForwardImpl(torch.autograd.Function):
         else:
             grad_weight = grad_output.t().matmul(total_input)
 
+        # GTP: reduce-scatter wgrad
+        if ctx.gtp_remat_size > 1 and grad_weight is not None:
+            grad_weight = sharded_weight.wgrad_reduce_scatter(grad_weight)
+
         if not ctx.fuse_forward_input_grad:
             if ctx.sequence_parallel:
                 handle.wait()
-                return sub_grad_input, grad_weight, None, None, None, None, None, None, None, None, None
+                return sub_grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None
 
             if ctx.allreduce_dgrad:
                 handle.wait()
-                return grad_input, grad_weight, None, None, None, None, None, None, None, None, None
+                return grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None
 
-        return dummy_grad_input, grad_weight, None, None, None, None, None, None, None, None, None
+        return dummy_grad_input, grad_weight, None, None, None, None, None, None, None, None, None, None
 
 
 def _forward_impl(
@@ -399,9 +417,9 @@ def _forward_impl(
     sequence_parallel: bool,
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
+    gtp_remat_size: int = 1,
     fuse_forward_input_grad: bool = True,
     sync_allreduce: bool = False,
-
 ):
     args = [
         input,
@@ -413,6 +431,7 @@ def _forward_impl(
         sequence_parallel,
         grad_output_buffer,
         wgrad_deferral_limit,
+        gtp_remat_size,
         fuse_forward_input_grad,
         sync_allreduce,
     ]
@@ -498,12 +517,26 @@ class VocabParallelOutput(torch.nn.Module):
                         partition_dim=0,
                         stride=1,
                         is_expert=False,
-                        params_dtype=config.params_dtype,
+                    )
+                else:
+                    set_tensor_model_parallel_attributes(
+                        tensor=self.weight, is_parallel=True, dim=0, stride=1
                     )
 
             setattr(self.weight, 'allreduce', True)
         else:
             self.weight = None
+
+        self.gtp_remat_size = 1
+        _pg = ProcessGroupCollection.use_mpu_process_groups(
+            required_pgs=["gtp_remat", "expt_gtp_remat"]
+        )
+        gtp_remat_group = _pg.expt_gtp_remat if self.is_expert else _pg.gtp_remat
+        if gtp_remat_group is not None and gtp_remat_group.size() > 1:
+            from megatron.core.tensor_parallel.gtp_api import wrap_module_params_gtp
+
+            wrap_module_params_gtp(self, ["weight"], gtp_remat_group)
+            self.gtp_remat_size = gtp_remat_group.size()
 
         self.register_parameter('bias', None)
 
@@ -585,6 +618,7 @@ class VocabParallelOutput(torch.nn.Module):
                 if self.config.defer_embedding_wgrad_compute
                 else None
             ),
+            gtp_remat_size=self.gtp_remat_size,
             fuse_forward_input_grad=self.fuse_forward_input_grad,
             sync_allreduce=self.sync_allreduce,
         )

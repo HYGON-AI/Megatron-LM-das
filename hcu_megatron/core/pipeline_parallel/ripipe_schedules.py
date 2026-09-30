@@ -12,6 +12,8 @@ by scheduling recompute operations more efficiently.
 
 import collections
 import torch
+from typing import Optional, Callable, Union, Iterator, List
+
 from megatron.core import parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
@@ -39,7 +41,7 @@ from megatron.core.pipeline_parallel.schedules import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import create_cudagraphs
-from typing import Optional, Callable, Union, Iterator, List
+
 from hcu_megatron.core.tensor_parallel.checkpoint_manager import get_pipeline_checkpoint_manager
 from hcu_megatron.training import get_args
 

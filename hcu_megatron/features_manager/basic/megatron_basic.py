@@ -255,11 +255,12 @@ class MegatronBasicFeature(AbstractFeature):
                                     P2PCommunicator._communicate)
 
     def register_training_patches(self, patch_manager, args):
-        from hcu_megatron.training.training import train
+        from hcu_megatron.training.argument_utils import core_transformer_config_from_args_wrapper
         from hcu_megatron.training.initialize import _set_random_seed
+        from hcu_megatron.training.models.gpt import GPTModelBuilder
+        from hcu_megatron.training.training import train
         from hcu_megatron.training.training import train_step
         from hcu_megatron.training.training import setup_model_and_optimizer
-        from hcu_megatron.training.argument_utils import core_transformer_config_from_args_wrapper
         from hcu_megatron.training.training import save_checkpoint_and_time_wrapper
 
         # Add a fixed seed.
@@ -282,6 +283,9 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.training.training.save_checkpoint_and_time',
                                     save_checkpoint_and_time_wrapper,
                                     apply_wrapper=True)
+        # output model
+        patch_manager.register_patch('megatron.training.models.gpt.GPTModelBuilder.build_model',
+                                    GPTModelBuilder.build_model,)
 
     def register_miscellaneous_patches(self, patch_manager, args):
         from hcu_megatron.core.full_cuda_graph import clone_tensors_in_struct
