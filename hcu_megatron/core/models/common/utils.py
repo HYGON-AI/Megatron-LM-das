@@ -5,7 +5,7 @@ from typing import Callable
 
 import torch
 
-from megatron.core.models.gpt.fine_grained_callables import TransformerLayerNode as MegatronCoreTransformerLayerNode
+from megatron.core.models.common.utils import TransformerLayerNode as MegatronCoreTransformerLayerNode
 from megatron.core.pipeline_parallel.utils import make_viewless
 
 try:

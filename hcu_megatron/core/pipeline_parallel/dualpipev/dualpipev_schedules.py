@@ -645,7 +645,7 @@ def forward_backward_pipelining_with_cutinhalf(
             checkpoint_activations_microbatch=checkpoint_activations_microbatch,
             is_first_microbatch=is_first_microbatch,
             current_microbatch=cur_microbatch,
-            is_first_stage=is_pp_first_stage(pp_group),
+            is_first_stage=is_pp_first_stage(p2p_communicator.pp_group),
         )
         output_tensors[model_chunk_id].append(output_tensor)
 

@@ -117,7 +117,7 @@ class UltraEPFeature(AbstractFeature):
             _distributed_data_parallel_init_wrapper,
             _param_and_grad_buffer_init_wrapper,
         )
-        from hcu_megatron.core.transformer.moe.experts import te_grouped_mlp_sharded_state_dict_wrapper,
+        from hcu_megatron.core.transformer.moe.experts import te_grouped_mlp_sharded_state_dict_wrapper
         from hcu_megatron.core.transformer.moe.moe_layer_ultraep import (
             moe_layer_ultraep_forward_wrapper,
             moe_layer_ultraep_init_wrapper,

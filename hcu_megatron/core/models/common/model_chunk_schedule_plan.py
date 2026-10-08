@@ -752,7 +752,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                 b_layer.attn_qkv.backward_dw()
                 b_layer.attn_proj.backward_dw()
             else:
-                b_layer.attn.backward_dw()
+                b_layer.pre_dispatch_computation.backward_dw()
             b_layer.release_state()
 
         # post process forward
@@ -781,7 +781,7 @@ class TransformerModelChunkSchedulePlan(MegatronTransformerModelChunkSchedulePla
                         b_layer.attn_qkv.backward_dw()
                         b_layer.attn_proj.backward_dw()
                     else:
-                        b_layer.attn.backward_dw()
+                        b_layer.pre_dispatch_computation.backward_dw()
                     b_layer.mlp.backward_dw()
                     b_layer.release_state()
             return f_input, chunk_backward_dw

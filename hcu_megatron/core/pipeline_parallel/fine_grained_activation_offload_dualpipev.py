@@ -7,7 +7,7 @@ from megatron.core import parallel_state
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     debug_rank,
-    GPUTensorPool,
+    OffloadTensorPool,
     ChunkOffloadHandler,
 )
 
@@ -50,7 +50,7 @@ class PipelineOffloadManagerDualpipeV():
         self._d2h_stream = torch.cuda.Stream()
         self._h2d_stream = torch.cuda.Stream()
         # Shared CPU tensor pool for all chunks to improve reuse efficiency
-        self._cpu_tensor_pool = GPUTensorPool(device="cpu", pin_memory=True)
+        self._cpu_tensor_pool = OffloadTensorPool(device="cpu", pin_memory=True)
 
         # Whether the manager is in warmup phase.
         self._is_warmup = True
