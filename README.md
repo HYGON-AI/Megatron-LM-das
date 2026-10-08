@@ -35,9 +35,9 @@ This repository is based on the following fixed upstream baseline:
 
 - **Upstream project**: Megatron-LM
 - **Upstream repository**: https://github.com/NVIDIA/Megatron-LM.git
-- **Upstream branch**: `core_r0.18.0`
-- **Upstream tag**: `core_v0.18.2`
-- **Upstream commit**: `571370c829ca768fe37244f4e2e7f28d8accc4ab`
+- **Upstream branch**: `core_r0.19.0`
+- **Upstream tag**: `core_v0.19.2`
+- **Upstream commit**: `4b4acac9a1d28ea6829c8d4f566d75698a21249d`
 - **Upstream license**: BSD-3-Clause
 
 HCU adaptations, modifications, and original contributions by Hygon Information
