@@ -6,6 +6,7 @@ on:
   pull_request_target:
     branches:
       - core_v0.18.2
+      - core_v0.19.2
     types:
       - opened
       - synchronize
