@@ -27,7 +27,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import (
 )
 from megatron.core.quantization.utils import get_quant_config_or_none
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
-from megatron.core.transformer.enums import ModelType
+from megatron.core.transformer.enums import InferenceCudaGraphScope, ModelType
 from megatron.core.transformer.multi_token_prediction import (
     MultiTokenPredictionBlock,
     mtp_on_this_rank,

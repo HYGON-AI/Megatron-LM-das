@@ -157,7 +157,6 @@ from megatron.training.training import (
     preprocess_common_state_dict,
     print_datetime,
     resolve_ddp_bucket_size,
-    RL_LOGGABLE_TIMER_NAMES,
     should_disable_forward_pre_hook,
     save_checkpoint_and_time,
     update_train_iters,
