@@ -104,7 +104,9 @@ prepare_das_workspace() {
         "${script_dir}"  # sitecustomize.py: python3.10 typing.override shim
     )
     joined_python_path="$(IFS=:; printf '%s' "${python_paths[*]}")"
-    export PYTHONPATH="${joined_python_path}${PYTHONPATH:+:${PYTHONPATH}}"
+    # Use only the checked-out sources. CI images may contain an older repo
+    # copy whose namespace packages can otherwise shadow the current checkout.
+    export PYTHONPATH="${joined_python_path}"
 
     echo "HCU CI workspace prepared at ${repo_root}"
 }
