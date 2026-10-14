@@ -1,7 +1,6 @@
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
+# Adapted from https://github.com/AMD-AGI/Primus/blob/main/primus/backends/megatron/core/pipeline_parallel/pp_visualizer.py
 ###############################################################################
 
 """Pipeline-parallel visualization helpers.
@@ -16,9 +15,9 @@ import os
 
 import torch
 from megatron.core import parallel_state
-from megatron.training import get_args
 
 from hcu_megatron.core.parallel_state import get_train_iter
+from hcu_megatron.training.arguments import get_adaptor_args
 
 _GLOBAL_PP_VIS_EVENTS = []
 _GLOBAL_PP_VIS_EVENTS_PER_ITER = None
@@ -26,7 +25,7 @@ _GLOBAL_PP_VIS_EVENTS_PER_ITER = None
 
 def schedule_wrapper(func):
     def wrapper(*args, **kwargs):
-        megatron_args = get_args()
+        megatron_args = get_adaptor_args()
         train_iter = get_train_iter()
         to_dump_pp_data = (
             megatron_args.dump_pp_data
@@ -76,13 +75,13 @@ def schedule_wrapper(func):
 
 
 def fwd_bwd_wrapper(func, mode, minibatch=None, chunk=None):
-    def wrapper(*args, **kwargs):
-        megatron_args = get_args()
+    def patch_func(*args, **kwargs):
+        adaptor_args = get_adaptor_args()
         train_iter = get_train_iter()
         to_dump_pp_data = (
-            megatron_args.dump_pp_data
-            and train_iter >= megatron_args.dump_pp_data_step_start
-            and train_iter < megatron_args.dump_pp_data_step_end
+            adaptor_args.dump_pp_data
+            and train_iter >= adaptor_args.dump_pp_data_step_start
+            and train_iter < adaptor_args.dump_pp_data_step_end
         )
         if to_dump_pp_data:
             start = torch.cuda.Event(enable_timing=True)
@@ -107,7 +106,7 @@ def fwd_bwd_wrapper(func, mode, minibatch=None, chunk=None):
 
         return res
 
-    return wrapper
+    return patch_func
 
 
 def combined_fwd_bwd_wrapper(func, fwd_minibatch, fwd_chunk, bwd_minibatch, bwd_chunk):
@@ -122,7 +121,7 @@ def combined_fwd_bwd_wrapper(func, fwd_minibatch, fwd_chunk, bwd_minibatch, bwd_
     """
 
     def wrapper(*args, **kwargs):
-        megatron_args = get_args()
+        megatron_args = get_adaptor_args()
         train_iter = get_train_iter()
         to_dump_pp_data = (
             megatron_args.dump_pp_data
@@ -155,20 +154,15 @@ def combined_fwd_bwd_wrapper(func, fwd_minibatch, fwd_chunk, bwd_minibatch, bwd_
     return wrapper
 
 
-def set_dump_pp_data_patch():
-    from megatron.core.pipeline_parallel import schedules
-
-    schedules.forward_step = fwd_bwd_wrapper(schedules.forward_step, "fwd")
-    schedules.backward_step = fwd_bwd_wrapper(schedules.backward_step, "bwd")
-
-
 def dump_pp_data(args, num_mbs, pp_data_dir):
     torch.cuda.synchronize()
 
     global _GLOBAL_PP_VIS_EVENTS
     all_iter_data = {}
-    for iter_idx, iter_events in enumerate(_GLOBAL_PP_VIS_EVENTS):
+    for _, iter_events in enumerate(_GLOBAL_PP_VIS_EVENTS):
+        iter_idx = iter_events["iter"]
         iter_data = {
+            "iter": iter_idx,
             "total": None,
             "memory": None,
             "fwd_start": [],
@@ -205,13 +199,14 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
                     continue
                 iter_data[key].append(iter_events[key][i])
 
-        all_iter_data[iter_idx + 1] = iter_data
+        all_iter_data[iter_idx] = iter_data
 
     rank = torch.distributed.get_rank()
     dp_rank = parallel_state.get_data_parallel_rank()
+    tp_rank = parallel_state.get_tensor_model_parallel_rank()
     pp_rank = parallel_state.get_pipeline_model_parallel_rank()
     os.makedirs(pp_data_dir, exist_ok=True)
-    if dp_rank == 0:
+    if dp_rank == 0 and tp_rank == 0:
         log_path = os.path.join(pp_data_dir, f"pp_rank_{pp_rank}.json")
         with open(log_path, "w") as f:
             json.dump(all_iter_data, f, indent=2)

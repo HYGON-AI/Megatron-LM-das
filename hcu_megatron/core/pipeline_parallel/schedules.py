@@ -51,7 +51,7 @@ from megatron.core.utils import (
 
 from .ripipe_schedules import forward_backward_ripipe_pipelining
 from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
-from hcu_megatron.core.pipeline_parallel.pp_visualizer import schedule_wrapper
+from hcu_megatron.core.pipeline_parallel.pp_data_collector import schedule_wrapper
 from hcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
 
 
@@ -98,7 +98,7 @@ def get_forward_backward_func_wrapper(fn):
         else:
             raise ValueError(f"schedule_method {args.schedule_method} is not supported")
 
-        if args.pp_dump_data:
+        if args.dump_pp_data:
             forward_backward_func = schedule_wrapper(forward_backward_func)
         return forward_backward_func
 

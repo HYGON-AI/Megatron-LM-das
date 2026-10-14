@@ -96,9 +96,9 @@ class PipelineFeature(AbstractFeature):
         # dump pp schedule data for visualization
         group.add_argument('--dump-pp-data', action='store_true',
                            help='Enable dumping pp schedule data for visualization.')
-        group.add_argument('--dump-pp-data-step-start', action='store_true',
+        group.add_argument('--dump-pp-data-step-start', type=int, default=3,
                            help='Global step to start dumping pp schedule data.')
-        group.add_argument('--dump-pp-data-step-end', action='store_true',
+        group.add_argument('--dump-pp-data-step-end', type=int, default=4,
                            help='Global step to stop dumping pp schedule data.')
         group.add_argument('--dump-pp-data-dir', type=str, default=None,
                             help='Directory to write pp schedule data for visualization.')
@@ -431,9 +431,12 @@ class PipelineFeature(AbstractFeature):
 
         if args.dump_pp_data:
             from megatron.core.pipeline_parallel import schedules
-            from hcu_megatron.core.pipeline_parallel.pp_visualizer import fwd_bwd_wrapper
+            from hcu_megatron.core.pipeline_parallel.pp_data_collector import fwd_bwd_wrapper
+
+            forward_step_func = fwd_bwd_wrapper(schedules.forward_step, "fwd")
+            backward_step_func = fwd_bwd_wrapper(schedules.backward_step, "bwd")
 
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_step',
-                                        fwd_bwd_wrapper(schedules.forward_step, "fwd"))
+                                        forward_step_func)
             patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.backward_step',
-                                        fwd_bwd_wrapper(schedules.backward_step, "bwd"))
+                                        backward_step_func)
