@@ -1,5 +1,8 @@
 ###############################################################################
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# See LICENSE for license information.
 # Adapted from https://github.com/AMD-AGI/Primus (commit 9b0ce906)
 ###############################################################################
 import gc
