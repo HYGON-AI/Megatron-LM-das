@@ -22,6 +22,7 @@ from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size
+from megatron.training import print_rank_0
 from megatron.training.global_vars import get_args
 
 try:
@@ -83,10 +84,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     _HAVE_TRITON = False
 
-from primus.backends.megatron.core.extensions._triton.inplace_add import (
-    inplace_add_triton_,
-)
-from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
 
@@ -457,8 +454,8 @@ class PrimusTurboQuantConfig:
             if "scale_rounding_mode" in getattr(Float4QuantConfig, "__dataclass_fields__", {}):
                 fp4_kwargs["scale_rounding_mode"] = scale_rounding_mode
             elif scale_rounding_mode:
-                warning_rank_0(
-                    "Primus-Turbo Float4QuantConfig has no scale_rounding_mode; "
+                print_rank_0(
+                    "[WARNING] Primus-Turbo Float4QuantConfig has no scale_rounding_mode; "
                     f"mxfp4_scale_rounding_mode={scale_rounding_mode} is ignored."
                 )
             self._quant_config = Float4QuantConfig(**fp4_kwargs)
