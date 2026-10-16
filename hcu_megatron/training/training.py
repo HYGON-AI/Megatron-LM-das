@@ -15,6 +15,7 @@ from typing import Optional
 import torch
 import torch.distributed
 
+from megatron.core._rank_utils import safe_get_rank
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import get_canonical_lr_for_logging
 from megatron.training.theoretical_memory_usage import report_theoretical_memory
@@ -192,6 +193,7 @@ except ImportError:
 
 from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data_from_csv
 from hcu_megatron.core.distributed.power_sgd import EFLayoutManager
+from hcu_megatron.core.parallel_state import set_train_iter
 from hcu_megatron.training import get_args
 
 stimer = StragglerDetector()
@@ -2789,6 +2791,7 @@ def train(
             max_attention_logit = None
         else:
             ft_integration.on_training_step_start()
+            set_train_iter(iteration + 1)
             if args.enable_dynamic_grad_comp:
                 if args.find_rank_upper_limit:
                     loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, max_attention_logit = \
@@ -2842,6 +2845,18 @@ def train(
                     pg_collection=pg_collection,
                     p2p_communicator=p2p_communicator,
                 )
+
+            if args.dump_pp_data and iteration == args.dump_pp_data_step_end:
+                from hcu_megatron.core.pipeline_parallel.pp_data_collector import dump_pp_data
+                from hcu_megatron.core.pipeline_parallel.pp_data_visualizer import visualize_pp_data
+
+                dump_pp_data_dir = getattr(args, 'dump_pp_data_dir', None)
+                if dump_pp_data_dir is None:
+                    dump_pp_data_dir = './pp_data'
+                dump_pp_data(args, get_num_microbatches(), dump_pp_data_dir)
+                if safe_get_rank() == 0:
+                    visualize_pp_data(f"pp-{args.pipeline_model_parallel_size}", dump_pp_data_dir)
+
             ft_integration.on_training_step_end()
             if _maybe_raise_workload_exception is not None and iteration != start_iteration:
                 _maybe_raise_workload_exception()

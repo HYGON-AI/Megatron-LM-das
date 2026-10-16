@@ -27,18 +27,6 @@ from hcu_megatron.training.utils import print_rank_message
 
 
 class GPTModelBuilder():
-    """Builder to construct Megatron Core GPT models.
-
-    Example:
-        >>> transformer_cfg = TransformerConfig(num_layers=32, hidden_size=4096, ...)
-        >>> model_cfg = GPTModelConfig(transformer=transformer_cfg, vocab_size=32000, seq_length=2048, ...)
-        >>>
-        >>> # Single stage (e.g. inference)
-        >>> model = GPTModelBuilder(model_cfg).build_model(pg_collection)
-        >>>
-        >>> # Distributed training
-        >>> models = GPTModelBuilder(model_cfg).build_distributed_models(pg_collection)
-    """
 
     def build_model(
         self,

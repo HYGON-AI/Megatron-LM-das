@@ -93,6 +93,16 @@ class PipelineFeature(AbstractFeature):
         group.add_argument('--delay-1f1b-cooldown-wgrad-compute', action='store_true',
                            help='Delay the wgrad compute in 1f1b cooldown stage to reduce bubble')
 
+        # dump pp schedule data for visualization
+        group.add_argument('--dump-pp-data', action='store_true',
+                           help='Enable dumping pp schedule data for visualization.')
+        group.add_argument('--dump-pp-data-step-start', type=int, default=3,
+                           help='Global step to start dumping pp schedule data.')
+        group.add_argument('--dump-pp-data-step-end', type=int, default=4,
+                           help='Global step to stop dumping pp schedule data.')
+        group.add_argument('--dump-pp-data-dir', type=str, default=None,
+                            help='Directory to write pp schedule data for visualization.')
+
     def pre_validate_args(self, args):
         if args.schedule_method != "dualpipev":
             return args
@@ -418,3 +428,15 @@ class PipelineFeature(AbstractFeature):
             from hcu_megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
             patch_manager.register_patch('megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
                                          DistributedDataParallel._make_backward_post_hook)
+
+        if args.dump_pp_data:
+            from megatron.core.pipeline_parallel import schedules
+            from hcu_megatron.core.pipeline_parallel.pp_data_collector import fwd_bwd_wrapper
+
+            forward_step_func = fwd_bwd_wrapper(schedules.forward_step, "fwd")
+            backward_step_func = fwd_bwd_wrapper(schedules.backward_step, "bwd")
+
+            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.forward_step',
+                                        forward_step_func)
+            patch_manager.register_patch('megatron.core.pipeline_parallel.schedules.backward_step',
+                                        backward_step_func)

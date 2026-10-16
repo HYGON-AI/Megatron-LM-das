@@ -18,8 +18,6 @@ class MegatronBasicFeature(AbstractFeature):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument('--use-ckpt-memory-cache', action='store_true', default=False,
                     help='Whether to enable memory caching for checkpoints (to speed up access by keeping checkpoints in memory)')
-        group.add_argument('--comm-time-log-iter', type=int, default=None,
-                        help='iter to log communication time')
 
     def register_patches(self, patch_manager, args):
         self.register_core_distributed_patches(patch_manager, args)
@@ -169,7 +167,6 @@ class MegatronBasicFeature(AbstractFeature):
                                     apply_wrapper=True)
 
     def register_tensor_parallel_patches(self, patch_manager, args):
-        from hcu_megatron.core.parallel_state import log_timing_wrapper
         from hcu_megatron.core.tensor_parallel.random import checkpoint_wrapper
 
         # VocabParallelEmbedding
@@ -199,49 +196,6 @@ class MegatronBasicFeature(AbstractFeature):
         patch_manager.register_patch('megatron.core.tensor_parallel.random.checkpoint',
                                     checkpoint_wrapper,
                                     apply_wrapper=True)
-        
-        # NCCL time log
-        if args.comm_time_log_iter is not None:
-            patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer.dist_all_gather_func',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('megatron.core.distributed.param_and_grad_buffer.dist_reduce_scatter_func',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('megatron.core.tensor_parallel.mappings.dist_all_gather_func',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('megatron.core.tensor_parallel.mappings.dist_reduce_scatter_func',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-
-            patch_manager.register_patch('torch.distributed.broadcast',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.all_reduce',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.all_gather',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.all_gather_into_tensor',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.reduce_scatter',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.reduce_scatter_tensor',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.all_to_all_single',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.isend',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
-            patch_manager.register_patch('torch.distributed.irecv',
-                                        log_timing_wrapper,
-                                        apply_wrapper=True)
 
     def register_pipeline_parallel_patches(self, patch_manager, args):
         from hcu_megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
