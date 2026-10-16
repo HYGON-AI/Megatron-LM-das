@@ -2852,7 +2852,7 @@ def train(
 
                 dump_pp_data_dir = getattr(args, 'dump_pp_data_dir', None)
                 if dump_pp_data_dir is None:
-                    dump_pp_data_dir = './pp_data'
+                    dump_pp_data_dir = os.getcwd() + "/pp_data"
                 dump_pp_data(args, get_num_microbatches(), dump_pp_data_dir)
                 if safe_get_rank() == 0:
                     visualize_pp_data(f"pp-{args.pipeline_model_parallel_size}", dump_pp_data_dir)

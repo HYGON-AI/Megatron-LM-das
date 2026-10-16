@@ -430,6 +430,7 @@ class PipelineFeature(AbstractFeature):
                                          DistributedDataParallel._make_backward_post_hook)
 
         if args.dump_pp_data:
+            assert args.dump_pp_data_step_start < args.dump_pp_data_step_end
             from megatron.core.pipeline_parallel import schedules
             from hcu_megatron.core.pipeline_parallel.pp_data_collector import fwd_bwd_wrapper
 

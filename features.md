@@ -118,5 +118,12 @@ def unpermute(
 3. recompute-layer-ids/recompute-mtp-layer-ids允许同时设置，或只设置一个。如不设置，相应网络层不进行重计算；
 4. 不允许设置recompute-method参数。
 
-
+### 训练数据可视化
++ 项目支持对pipeline调度数据进行可视化，该功能参考[amd primus](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md)项目。使用该功能，需要增加以下参数:
+```
+--dump-pp-data
+--dump-pp-data-step-start  <int>                     # 开始迭代步，输出结果包含该步。可选参数，默认为3
+--dump-pp-data-step-end  <int>                       # 结束迭代步，输出结果不包含该步。可选参数，默认为4
+--dump-pp-data-dir <dir to write pp schedule data>   # 数据保存目录。可选参数，模型为<工作目录>/pp_data
+```
 
