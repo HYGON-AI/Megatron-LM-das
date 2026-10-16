@@ -118,5 +118,6 @@ def unpermute(
 3. recompute-layer-ids/recompute-mtp-layer-ids允许同时设置，或只设置一个。如不设置，相应网络层不进行重计算；
 4. 不允许设置recompute-method参数。
 
+### 融合线性交叉熵 HCU Linear Cross Entropy
 
-
++ 通过 `--cross-entropy-loss-fusion --cross-entropy-fusion-impl linear` 启用 HCU Linear CE，分块计算 logits 减少显存压力，在 GPT 的 `gpt_model_postprocess` 中直接融合输出投影与交叉熵。具体限制、调用链和验证方法见 [Linear CE 使用说明](docs/features/fusion_linear_ce.md)。
