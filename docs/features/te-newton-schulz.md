@@ -22,8 +22,8 @@ Muon 在更新二维权重时，需要对梯度执行 Newton–Schulz（NS）正
 --newton-schulz-tp-impl transformer_engine
 ```
 
-`--newton-schulz-tp-impl` 可选 `native`（默认）或 `transformer_engine`。选择 TE 时会自动启用优化器特性注册；需要 Transformer Engine 2.15.0 及以上版本，以及可用的分布式 NS 后端。该开关仅改变 TP `distributed` 模式下的 NS 实现，不改变 Muon 的其他更新逻辑。
+`--newton-schulz-tp-impl` 可选 `native`（默认）或 `transformer_engine`。选择 TE 时会自动启用优化器特性注册；需要 Transformer Engine 2.15.0 及以上版本、DTK 26.10.1 及以上。该开关仅改变 TP `distributed` 模式下的 NS 实现，不改变 Muon 的其他更新逻辑。
 
 ## 适用场景与预期收益
 
-适用于 **TP 大于 1、使用 Muon `distributed` 模式，且 NS 在优化器步骤中占比较高** 的训练任务。TE 的分布式实现有望降低这部分计算耗时；矩阵规模越大、NS 开销占比越高，越值得评估。收益应以相同模型、并行配置和训练参数下的优化器耗时及端到端迭代时间为准。
+适用于 **TP 大于 1、使用 Muon `distributed` 模式，且 NS 在优化器步骤中占比较高** 的训练任务。TE 的分布式实现有望降低这部分计算耗时；矩阵规模越大、NS 开销占比越高，越值得评估。
