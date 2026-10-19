@@ -127,3 +127,16 @@ def unpermute(
 --dump-pp-data-dir <dir to write pp schedule data>   # 数据保存目录。可选参数，模型为<工作目录>/pp_data
 ```
 
+### 项目支持 Mega Moe
++ 项目支持Mega Moe，将MoE层的all-to-all 通信与 grouped GEMM 融合，该功能参考[AMD Primus](https://github.com/AMD-AGI/Primus-Turbo/blob/main/docs/README_Mega_MoE.md)项目，使用如下参数开启：
+```
+--enable-mega-moe
+```
+
+### 项目支持 Muon优化器的Transformer Engine Newton–Schulz 实现
++ Muon 在更新二维权重时，需要对梯度执行 Newton–Schulz（NS）正交化。本特性为 Muon 的 `distributed` TP 模式接入 Transformer Engine（TE）的分布式 NS，作为现有实现的可选替代，在优化器更新占比较高的场景降低耗时，提高训练性能。开启方法：
+```
+--optimizer muon \
+--muon-tp-mode distributed \
+--newton-schulz-tp-impl transformer_engine
+```
