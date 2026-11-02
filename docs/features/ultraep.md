@@ -14,34 +14,40 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 
 | 路径 | 说明 |
 |------|------|
-| `hcu_megatron/core/transformer/moe/eplb_manager.py` | 封装 `ultra_ep.Manager`，负责物理专家数量计算、per-microbatch 虚拟 layer 槽分配、routing_map 从逻辑空间 reroute 到物理空间 |
-| `hcu_megatron/core/transformer/moe/moe_layer_ultraep.py` | 三个 autograd Function 控制 backward 时序 + 5 个注入到 `MoELayer` 的实例方法 + `MoELayer.__init__` / `.forward` 的 wrapper |
+| `hcu_megatron/core/transformer/moe/eplb_manager.py` | 封装 `ultra_ep.Manager`，管理专家布局、虚拟 layer 槽、步边界启停和副本通信的跨 rank 完成依赖 |
 | `hcu_megatron/features_manager/moe/ultraep_feature.py` | `UltraEPFeature`：CLI 参数注册、参数校验、patch 注册 |
 | `hcu_megatron/training/checkpointing.py` | native torch 格式 checkpoint 过滤 replica 专家的 wrapper |
-| `hcu_megatron/training/ultraep_autotune.py` | 仅在校准需要时测量完整 `train_step`，并把 iteration 耗时上报给 UltraEP runtime |
+| `hcu_megatron/training/ultraep_autotune.py` | 完整 `train_step` 计时、autotune 回调与自适应启停的训练桥 |
+| `hcu_megatron/training/ultraep_adaptive.py` | 有界自适应选择状态机，处理预热、配对采样、收益判断和校准预算 |
 
 ### 修改
 
 | 路径 | 说明 |
 |------|------|
+| `hcu_megatron/core/transformer/moe/moe_layer.py` | MoE 初始化/前向包装、autograd 回调、逻辑/物理专家执行配置切换及副本通信接线 |
 | `hcu_megatron/features_manager/__init__.py` | 将 `UltraEPFeature` 加入 `ADAPTOR_FEATURES` |
-| `hcu_megatron/core/distributed/distributed_data_parallel.py` | DDP backward hook 对 `is_eplb_master` 参数早返回，master 梯度 ready 由 UltraEP backward Function 手动触发 |
+| `hcu_megatron/core/distributed/distributed_data_parallel.py` | UltraEP 激活时延后 master 梯度 ready，副本归约后手动触发；baseline 恢复原 DDP hook |
 | `hcu_megatron/core/distributed/param_and_grad_buffer.py` | 新增 3 个 wrapper：过滤 replica 参数出 DDP bucket、DDP init 期间屏蔽 replica、过滤 `full_param_layout` 计算 |
 | `hcu_megatron/core/transformer/moe/experts.py` | 新增两个 sharded checkpoint wrapper，只导出 master 专家的 metadata |
 
 ### Patch 目标
 
-`--moe-enable-ultraep=True` 时注册以下基础 patch，未启用时零开销：
+MoE 初始化与前向复用基础 wrapper；其他 UltraEP 专用 patch 仅在
+`--moe-enable-ultraep` 开启时注册：
 
-- `MoELayer.__init__` / `.forward`
+- `MoELayer.__init__` / `.forward`（由基础 MoE wrapper 统一注册，内部按配置启用 UltraEP）
 - `_ParamAndGradBuffer.__init__`
 - `DistributedDataParallel.__init__`
+- `DistributedDataParallel._make_backward_post_hook`
 - `DistributedOptimizer.compute_full_param_layout`
 - `_get_param_groups`
 - `TEGroupedLinear._sharded_state_dict_grouped`
 - `TEGroupedMLP.sharded_state_dict`
 - `generate_state_dict`
-- `hcu_megatron.training.training.train_step`（仅在同时开启 `--moe-ultraep-autotune` 时注册）
+- `hcu_megatron.training.training.train_step`（开启 autotune 或 adaptive 时注册）
+
+`ultraep_backward_post_hook_wrapper` 统一包装 Megatron 或 HCU 的 DDP hook。
+UltraEP 激活时，在副本梯度归约后通知 DDP ready；自适应关闭时调用原 hook。
 
 ## 使用方式
 
@@ -50,7 +56,7 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 在容器内安装（DTK 平台专用 wheel）：
 
 ```bash
-pip install ultra_ep-1.0.0+<hash>-cp310-cp310-linux_x86_64.whl
+pip install "ultra_ep-1.0.0+<hash>-cp310-cp310-linux_x86_64.whl"
 ```
 
 当前环境已验证 wheel 为 `ultra_ep 1.0.0+636be96`。可用下面的命令同时检查版本和自动调优 API：
@@ -111,24 +117,42 @@ ULTRA_EP_GRAD_REDUCE_NUM_SMS
 
 调优只在前期校准阶段按需同步设备并测量完整 iteration；结束后 `train_step` 走直接快速路径。
 
-### 4. 最新 runtime 验证结果
+### 4. 自适应启用
 
-2026-09-21 在当前单节点环境完成以下验证：
+在已启用 UltraEP 的 `MOE_ARGS` 中追加：
 
-| 检查项 | 结果 |
-|------|------|
-| UltraEP wheel | `1.0.0+636be96` |
-| 软件/设备 | PyTorch `2.10.0`、HIP `6.3.26113`、8 × BW（80 SMS/卡） |
-| API 契约 | `AutotuneConfig`、Manager `autotune` 参数及四个调优/等待接口全部通过 |
-| Megatron 接线 | CLI 校验、`AutotuneConfig` 参数传递、train-step 快速/计时路径全部通过 |
-| 8-rank 硬件烟测 | RCCL、GDA rocSHMEM、autotune Manager 构造、预热回调及 placement 聚合通过 |
-| 静态检查 | Python compile、Shell 语法、`git diff --check` 通过 |
+```bash
+--moe-ultraep-adaptive
+```
 
-硬件烟测使用极小 expert 张量，不等同于重新执行 50 iteration 的完整模型性能测试；完整负载的历史结果见下方“快速回归”。
+功能默认关闭。开启后先预热 baseline，再交替比较 baseline 与 UltraEP 的完整
+`train_step` 耗时，选择后固定启用或关闭。可与 `--moe-ultraep-autotune` 联用：
+先调优通信参数，再进行比较；未开启 autotune 时使用默认或手动指定的通信参数。
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--moe-ultraep-adaptive-samples` | 3 | 每种模式的有效样本数，奇数且至少 3 |
+| `--moe-ultraep-adaptive-max-samples` | 5 | 补样上限，奇数且不小于初始样本数 |
+| `--moe-ultraep-adaptive-min-speedup` | 0.01 | 启用所需的最小完整步耗时改善比例 |
+| `--moe-ultraep-adaptive-max-calibration-steps` | 48 | 校准总步数上限，包含预热、调优、切换和无效步 |
+
+- 各 rank 完整步耗时先取 MAX，再按样本中位数计算收益。默认收益达到 1% 且
+  3 组配对均胜出时提前启用；结果有分歧时补到最多 5 组，最终按中位收益决定。
+- 无效步不计入评分但消耗预算。预算耗尽时只使用完整配对；样本不足或收益
+  未达门槛则选择 baseline，校准期间负载配置变化也回退 baseline。
+- 支持 TP/PP，要求 CP1/ETP1、无 bias 的 BF16 TE SwiGLU grouped experts、alltoall，
+  要求开启梯度累积融合。不支持 EP overlap、CUDA graph、重计算、延迟 wgrad、
+  shared-expert overlap、latent MoE、MTP 和 TE op fuser。
+- 未开启 UltraEP 时自动关闭 adaptive。校准结束后停止额外计时、同步和决策
+  collective，rank 0 输出选择结果；重启后重新校准。回退后保留副本显存。
+
+示例使用 `examples/qwen3/train_qwen3_30B_A3B_ultraep.sh`，启动方式沿用
+`examples/qwen3/run_qwen.sh`；回归测试见 `tests/unit_tests/moe/test_ultraep_framework.py`。
 
 ### 5. Dispatcher 要求
 
-`--moe-token-dispatcher-type` 必须是 `alltoall` 或 `flex`。`allgather` 不支持。
+基础 UltraEP 使用 `alltoall` 或 `flex`，不支持 `allgather`；自适应当前仅支持
+`alltoall`，见上面的自适应支持范围。
 
 ### 6. Checkpoint
 
@@ -143,7 +167,7 @@ forward:
   → _EPLBWeightSyncFunction.apply    # 非 recompute 路径
 
 backward（forward 逆序触发）:
-  _EPLBWeightSyncFunction.backward           # 异步 weight_sync
+  _EPLBWeightSyncFunction.backward           # weight_sync，当前流等待完成
   MoE backward                               # replica 梯度写共享 buffer，master 写 main_grad
   _EPLBReplicaGradReduceStartFunction.bw     # 异步 grad_reduce
   _EPLBReplicaGradReduceFinishFunction.bw    # 等待完成 → 手动 register_grad_ready

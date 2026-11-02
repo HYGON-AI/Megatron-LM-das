@@ -73,10 +73,25 @@ class UltraEPFeature(AbstractFeature):
                 'autotuner still reserves its configured device headroom.'
             ),
         )
+        group.add_argument('--moe-ultraep-adaptive', action='store_true',
+                           help=('Compare complete training steps with UltraEP on/off; '
+                                 'ignored when UltraEP is disabled.'))
+        group.add_argument('--moe-ultraep-adaptive-samples', type=int, default=3,
+                           help='Odd number of valid timed steps per mode (>= 3).')
+        group.add_argument('--moe-ultraep-adaptive-max-samples', type=int, default=5,
+                           help='Maximum odd sample count per mode when paired comparisons disagree.')
+        group.add_argument('--moe-ultraep-adaptive-min-speedup', type=float, default=0.01,
+                           help='Minimum fractional step-time improvement needed to enable UltraEP.')
+        group.add_argument('--moe-ultraep-adaptive-max-calibration-steps', type=int, default=48,
+                           help='Total local step budget, including warmup, tuning and invalid steps.')
 
     def validate_args(self, args):
         ultraep_enabled = getattr(args, 'moe_enable_ultraep', False)
         autotune_enabled = getattr(args, 'moe_ultraep_autotune', False)
+        adaptive_enabled = getattr(args, 'moe_ultraep_adaptive', False)
+        if adaptive_enabled and not ultraep_enabled:
+            args.moe_ultraep_adaptive = False
+            adaptive_enabled = False
         if ultraep_enabled:
             assert getattr(args, 'moe_num_redundant_experts_per_rank', 0) > 0, (
                 '--moe-num-redundant-experts-per-rank must be > 0 when '
@@ -105,16 +120,60 @@ class UltraEPFeature(AbstractFeature):
                 '--moe-ultraep-autotune currently requires '
                 '--optimizer-cuda-graph to be disabled.'
             )
+        if adaptive_enabled:
+            from hcu_megatron.training.ultraep_adaptive import AdaptiveConfig
+
+            AdaptiveConfig(
+                samples=getattr(args, 'moe_ultraep_adaptive_samples', 3),
+                max_samples=getattr(args, 'moe_ultraep_adaptive_max_samples', 5),
+                min_speedup=getattr(args, 'moe_ultraep_adaptive_min_speedup', 0.01),
+                max_calibration_steps=getattr(args, 'moe_ultraep_adaptive_max_calibration_steps', 48),
+            )
+            assert not getattr(args, 'overlap_moe_expert_parallel_comm', False), (
+                'UltraEP adaptive currently requires EP overlap to be disabled.'
+            )
+            assert all(getattr(args, name, 1) == 1 for name in (
+                'context_parallel_size', 'expert_tensor_parallel_size',
+            )), 'UltraEP adaptive currently requires CP1 / ETP1.'
+            assert getattr(args, 'moe_token_dispatcher_type', 'alltoall') == 'alltoall', (
+                'UltraEP adaptive currently requires the alltoall dispatcher.'
+            )
+            assert getattr(args, 'transformer_impl', 'transformer_engine') == 'transformer_engine', (
+                'UltraEP adaptive currently requires Transformer Engine experts.'
+            )
+            assert getattr(args, 'moe_grouped_gemm', True) and getattr(args, 'swiglu', True), (
+                'UltraEP adaptive currently requires SwiGLU grouped experts.'
+            )
+            assert not getattr(args, 'use_transformer_engine_op_fuser', False), (
+                'UltraEP adaptive does not yet support the TE op fuser.'
+            )
+            assert getattr(args, 'bf16', True) and not getattr(args, 'add_bias_linear', False), (
+                'UltraEP adaptive currently requires bias-free BF16 experts.'
+            )
+            assert not getattr(args, 'fp8', None) and not getattr(args, 'fp4', None), (
+                'UltraEP adaptive currently requires BF16 experts.'
+            )
+            assert getattr(args, 'gradient_accumulation_fusion', True), (
+                'UltraEP adaptive requires fused accumulation into replica main_grad buffers.'
+            )
+            assert getattr(args, 'cuda_graph_impl', 'none') in (None, 'none') and not getattr(
+                args, 'optimizer_cuda_graph', False
+            ), 'UltraEP adaptive requires CUDA graph capture to be disabled.'
+            assert not any(getattr(args, name, None) for name in (
+                'recompute_granularity', 'delay_wgrad_compute', 'moe_shared_expert_overlap',
+                'moe_latent_size', 'mtp_num_layers',
+            )), (
+                'UltraEP adaptive does not yet support recompute, delayed wgrad, '
+                'shared-expert overlap, latent MoE or MTP.'
+            )
         return args
 
     def register_patches(self, patch_manager, args):
         if not getattr(args, 'moe_enable_ultraep', False):
+            # Adaptor arguments are parsed separately from training arguments.
+            args.moe_ultraep_adaptive = False
             return
 
-        from hcu_megatron.core.transformer.moe.moe_layer_ultraep import (
-            moe_layer_ultraep_init_wrapper,
-            moe_layer_ultraep_forward_wrapper,
-        )
         from hcu_megatron.core.distributed.param_and_grad_buffer import (
             _param_and_grad_buffer_init_wrapper,
             _distributed_data_parallel_init_wrapper,
@@ -125,17 +184,8 @@ class UltraEPFeature(AbstractFeature):
             te_grouped_mlp_sharded_state_dict_wrapper,
         )
         from hcu_megatron.training.checkpointing import generate_state_dict_ultraep_wrapper
+        from hcu_megatron.core.distributed.distributed_data_parallel import ultraep_backward_post_hook_wrapper
 
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
-            moe_layer_ultraep_init_wrapper,
-            apply_wrapper=True,
-        )
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.forward',
-            moe_layer_ultraep_forward_wrapper,
-            apply_wrapper=True,
-        )
         patch_manager.register_patch(
             'megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer.__init__',
             _param_and_grad_buffer_init_wrapper,
@@ -144,6 +194,11 @@ class UltraEPFeature(AbstractFeature):
         patch_manager.register_patch(
             'megatron.core.distributed.distributed_data_parallel.DistributedDataParallel.__init__',
             _distributed_data_parallel_init_wrapper,
+            apply_wrapper=True,
+        )
+        patch_manager.register_patch(
+            'megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
+            ultraep_backward_post_hook_wrapper,
             apply_wrapper=True,
         )
         patch_manager.register_patch(
@@ -171,7 +226,7 @@ class UltraEPFeature(AbstractFeature):
             generate_state_dict_ultraep_wrapper,
             apply_wrapper=True,
         )
-        if getattr(args, 'moe_ultraep_autotune', False):
+        if getattr(args, 'moe_ultraep_autotune', False) or getattr(args, 'moe_ultraep_adaptive', False):
             from hcu_megatron.training.ultraep_autotune import (
                 ultraep_autotune_train_step_wrapper,
             )
