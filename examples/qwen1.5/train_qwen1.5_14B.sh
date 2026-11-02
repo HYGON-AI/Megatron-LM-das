@@ -113,7 +113,8 @@ TRAINING_ARGS=(
     --hidden-dropout 0
     --swiglu
     --add-qkv-bias
-    --lr 3.0e-5 
+    --rotary-base 1000000
+    --lr 3.0e-5
     --lr-decay-style cosine 
     --min-lr 3.0e-6
     --lr-warmup-iters ${LR_WARMUP_ITERS}
@@ -132,10 +133,9 @@ MODEL_PARALLEL_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type QwenTokenizer
-    --merge-file ${TOKENIZER_MODEL_PATH}/merges.txt
-    --vocab-file ${TOKENIZER_MODEL_PATH}/vocab.json
-    --data-path ${DATA_PATH} 
+    --tokenizer-type HuggingFaceTokenizer
+    --tokenizer-model ${TOKENIZER_MODEL_PATH}
+    --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -145,8 +145,8 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
