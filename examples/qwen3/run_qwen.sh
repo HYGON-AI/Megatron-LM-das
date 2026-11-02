@@ -15,13 +15,13 @@ CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
 # Those variables need to modify
-DTK_ENV=""                                                               # where env.sh of dtk
-DATA_PATH=""                                                             # Data file path (e.g., oscar-1GB_head-llama2_text_document, sft.json, or vlm-config.json)
-TOKENIZER_MODEL_PATH=""                                                  # HuggingFace path to model. example Qwen/Qwen3-32B
+DTK_ENV="${DTK_ENV:-}"                                                               # where env.sh of dtk
+DATA_PATH="${DATA_PATH:-}"                                                             # Data file path (e.g., oscar-1GB_head-llama2_text_document, sft.json, or vlm-config.json)
+TOKENIZER_MODEL_PATH="${TOKENIZER_MODEL_PATH:-}"                                                  # HuggingFace path to model. example Qwen/Qwen3-32B
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
-TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_qwen3vl_8B.sh}                        # script under examples/qwen3 to run
-NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
+TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_qwen3_8B.sh}                        # script under examples/qwen3 to run
+NCCL_ENV=${NCCL_ENV:-${MEGATRON_PATH}/requirements/env.sh}                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
 if [[ "${LAUNCHER}" != "mpirun" && "${LAUNCHER}" != "torchrun" ]]; then

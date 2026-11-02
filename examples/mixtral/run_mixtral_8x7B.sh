@@ -15,13 +15,13 @@ CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
 # Those variables need to modify
-DTK_ENV=""                                                               # where env.sh of dtk
-DATA_PATH=""                                                             # path to oscar-1GB_head-llama2_text_document
-TOKENIZER_MODEL_PATH=""                                                  # path to tokenizer.model
+DTK_ENV="${DTK_ENV:-}"                                                               # where env.sh of dtk
+DATA_PATH="${DATA_PATH:-}"                                                             # path to oscar-1GB_head-llama2_text_document
+TOKENIZER_MODEL_PATH="${TOKENIZER_MODEL_PATH:-}"                                                  # path to tokenizer.model
 LAUNCHER="mpirun"                                                        # mpirun or torchrun
 CHECKPOINT_PATH=""                                                       # path to ckpt
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_mixtral_8x7B.sh} # script under this example directory to run
-NCCL_ENV=${MEGATRON_PATH}/requirements/env.sh                            # Please adjust the variables based on the actual NET being used
+NCCL_ENV=${NCCL_ENV:-${MEGATRON_PATH}/requirements/env.sh}                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
 
 if [[ "${LAUNCHER}" != "mpirun" && "${LAUNCHER}" != "torchrun" ]]; then
