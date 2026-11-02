@@ -15,7 +15,6 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 | 路径 | 说明 |
 |------|------|
 | `hcu_megatron/core/transformer/moe/eplb_manager.py` | 封装 `ultra_ep.Manager`，管理专家布局、虚拟 layer 槽、步边界启停和副本通信的跨 rank 完成依赖 |
-| `hcu_megatron/core/transformer/moe/moe_layer_ultraep.py` | MoE 初始化/前向包装、autograd 回调、逻辑/物理专家执行配置切换及副本通信接线 |
 | `hcu_megatron/features_manager/moe/ultraep_feature.py` | `UltraEPFeature`：CLI 参数注册、参数校验、patch 注册 |
 | `hcu_megatron/training/checkpointing.py` | native torch 格式 checkpoint 过滤 replica 专家的 wrapper |
 | `hcu_megatron/training/ultraep_autotune.py` | 完整 `train_step` 计时、autotune 回调与自适应启停的训练桥 |
@@ -25,6 +24,7 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 
 | 路径 | 说明 |
 |------|------|
+| `hcu_megatron/core/transformer/moe/moe_layer.py` | MoE 初始化/前向包装、autograd 回调、逻辑/物理专家执行配置切换及副本通信接线 |
 | `hcu_megatron/features_manager/__init__.py` | 将 `UltraEPFeature` 加入 `ADAPTOR_FEATURES` |
 | `hcu_megatron/core/distributed/distributed_data_parallel.py` | UltraEP 激活时延后 master 梯度 ready，副本归约后手动触发；baseline 恢复原 DDP hook |
 | `hcu_megatron/core/distributed/param_and_grad_buffer.py` | 新增 3 个 wrapper：过滤 replica 参数出 DDP bucket、DDP init 期间屏蔽 replica、过滤 `full_param_layout` 计算 |
@@ -32,9 +32,10 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 
 ### Patch 目标
 
-`--moe-enable-ultraep=True` 时注册以下基础 patch，未启用时零开销：
+MoE 初始化与前向复用基础 wrapper；其他 UltraEP 专用 patch 仅在
+`--moe-enable-ultraep` 开启时注册：
 
-- `MoELayer.__init__` / `.forward`
+- `MoELayer.__init__` / `.forward`（由基础 MoE wrapper 统一注册，内部按配置启用 UltraEP）
 - `_ParamAndGradBuffer.__init__`
 - `DistributedDataParallel.__init__`
 - `DistributedDataParallel._make_backward_post_hook`
@@ -45,6 +46,9 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 - `generate_state_dict`
 - `hcu_megatron.training.training.train_step`（开启 autotune 或 adaptive 时注册）
 
+`ultraep_backward_post_hook_wrapper` 统一包装 Megatron 或 HCU 的 DDP hook。
+UltraEP 激活时，在副本梯度归约后通知 DDP ready；自适应关闭时调用原 hook。
+
 ## 使用方式
 
 ### 1. 安装 `ultra_ep` C++ 扩展
@@ -52,7 +56,7 @@ UltraEP 是基于冗余专家副本的 MoE 在线专家并行负载均衡方案�
 在容器内安装（DTK 平台专用 wheel）：
 
 ```bash
-pip install ultra_ep-1.0.0+<hash>-cp310-cp310-linux_x86_64.whl
+pip install "ultra_ep-1.0.0+<hash>-cp310-cp310-linux_x86_64.whl"
 ```
 
 当前环境已验证 wheel 为 `ultra_ep 1.0.0+636be96`。可用下面的命令同时检查版本和自动调优 API：
@@ -147,7 +151,8 @@ ULTRA_EP_GRAD_REDUCE_NUM_SMS
 
 ### 5. Dispatcher 要求
 
-`--moe-token-dispatcher-type` 必须是 `alltoall` 或 `flex`。`allgather` 不支持。
+基础 UltraEP 使用 `alltoall` 或 `flex`，不支持 `allgather`；自适应当前仅支持
+`alltoall`，见上面的自适应支持范围。
 
 ### 6. Checkpoint
 
@@ -162,7 +167,7 @@ forward:
   → _EPLBWeightSyncFunction.apply    # 非 recompute 路径
 
 backward（forward 逆序触发）:
-  _EPLBWeightSyncFunction.backward           # 异步 weight_sync
+  _EPLBWeightSyncFunction.backward           # weight_sync，当前流等待完成
   MoE backward                               # replica 梯度写共享 buffer，master 写 main_grad
   _EPLBReplicaGradReduceStartFunction.bw     # 异步 grad_reduce
   _EPLBReplicaGradReduceFinishFunction.bw    # 等待完成 → 手动 register_grad_ready

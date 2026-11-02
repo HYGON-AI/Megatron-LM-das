@@ -32,7 +32,7 @@ from hcu_megatron.core.distributed.param_and_grad_buffer import (
     _param_and_grad_buffer_init_wrapper,
 )
 from hcu_megatron.core.transformer.moe import eplb_manager as eplb_manager_module
-from hcu_megatron.core.transformer.moe import moe_layer_ultraep
+from hcu_megatron.core.transformer.moe import moe_layer
 from hcu_megatron.core.transformer.moe.experts import (
     te_grouped_linear_sharded_state_dict_wrapper,
     te_grouped_mlp_sharded_state_dict_wrapper,
@@ -135,6 +135,7 @@ class TestUltraEPFeature:
         assert train_step in {item[0] for item in tuned.patches}
         assert train_step in {item[0] for item in adaptive.patches}
         assert len(tuned.patches) == len(base.patches) + 1
+        assert not any('moe_layer.MoELayer.' in item[0] for item in tuned.patches)
         names = {item[1] for item in tuned.patches}
         assert "te_grouped_linear_sharded_state_dict_wrapper" in names
         assert "te_grouped_mlp_sharded_state_dict_wrapper" in names
@@ -272,57 +273,44 @@ class TestDistributedParameterHandling:
         assert filtered == [params[0], params[2]]
         assert marker == "ok"
 
-    def test_master_backward_hook_defers_ready_registration(self):
-        master = nn.Parameter(torch.zeros(2), requires_grad=False)
-        master.is_eplb_master = True
-        bucket = MagicMock()
-        ddp = SimpleNamespace(
-            param_to_bucket_group={master: bucket},
-            ddp_config=SimpleNamespace(overlap_grad_reduce=True),
-            force_all_reduce=False,
-        )
-        hook = types.MethodType(
-            HcuDistributedDataParallel._make_backward_post_hook, ddp
-        )(master)
-        args = SimpleNamespace(
-            gradient_accumulation_fusion=False,
-            delay_wgrad_compute=False,
-            recompute_in_advance=False,
-            recompute_in_bubble=False,
-        )
-        with patch(
-            "hcu_megatron.core.distributed.distributed_data_parallel.get_args",
-            return_value=args,
-        ), patch(
-            "hcu_megatron.core.distributed.distributed_data_parallel.is_graph_capturing",
-            return_value=False,
-        ):
-            hook()
-        bucket.register_grad_ready.assert_not_called()
-
-    def test_master_ready_wrapper_preserves_baseline_hook(self):
+    @pytest.mark.parametrize('use_hcu_hook', [False, True])
+    def test_master_ready_wrapper_switches_between_ultraep_and_baseline(self, use_hcu_hook):
+        from megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
         from hcu_megatron.core.distributed.distributed_data_parallel import ultraep_backward_post_hook_wrapper
 
-        param = torch.nn.Parameter(torch.ones(2))
+        param = nn.Parameter(torch.ones(2))
         param.is_eplb_master = True
         param._eplb_manager = SimpleNamespace(ultraep_active=True)
         param.main_grad = torch.zeros_like(param)
-        param.grad_added_to_main_grad = True
-        original_hook = MagicMock()
-        bucket = object()
+        param.grad_added_to_main_grad = False
+        bucket = MagicMock()
         ddp = SimpleNamespace(
             param_to_bucket_group={param: bucket},
-            ddp_config=SimpleNamespace(overlap_param_gather=False),
+            ddp_config=SimpleNamespace(overlap_grad_reduce=True, overlap_param_gather=True),
+            force_all_reduce=False,
+            _make_forward_pre_hook=MagicMock(),
         )
-        hook = ultraep_backward_post_hook_wrapper(lambda self, p: original_hook)(ddp, param)
-        param.grad = torch.ones_like(param)
-        with patch('hcu_megatron.core.distributed.distributed_data_parallel.is_graph_capturing', return_value=False):
-            hook()
-        assert param._ddp_bucket_group is bucket and param.grad is None
-        original_hook.assert_not_called()
-        param._eplb_manager.ultraep_active = False
-        hook()
-        original_hook.assert_called_once()
+        original = (HcuDistributedDataParallel if use_hcu_hook else DistributedDataParallel)._make_backward_post_hook
+        hook = ultraep_backward_post_hook_wrapper(original)(ddp, param)
+        assert param._ddp_bucket_group is bucket
+        assert param._eplb_forward_pre_hook is ddp._make_forward_pre_hook.return_value
+        args = SimpleNamespace(
+            gradient_accumulation_fusion=True, delay_wgrad_compute=False,
+            recompute_in_advance=False, recompute_in_bubble=False,
+        )
+        with patch('hcu_megatron.core.distributed.distributed_data_parallel.get_args', return_value=args), patch(
+            'hcu_megatron.core.distributed.distributed_data_parallel.is_graph_capturing', return_value=False,
+        ), patch(
+            'megatron.core.distributed.distributed_data_parallel.is_graph_capturing', return_value=False,
+        ):
+            for index, active in enumerate((True, False, True, False), start=1):
+                param._eplb_manager.ultraep_active = active
+                param.grad = torch.ones_like(param)
+                hook()
+                torch.testing.assert_close(param.main_grad, torch.full_like(param, index))
+                assert param.grad is None
+                assert bucket.register_grad_ready.call_count == index // 2
+        assert bucket.register_grad_ready.call_args_list == [call(param, False)] * 2
 
 
 def _grouped_linear(num_experts, numel):
@@ -377,9 +365,64 @@ def _fake_moe_layer():
 
 
 class TestMoELayerUltraEP:
+    @pytest.mark.parametrize('enabled', [False, True])
+    def test_init_combines_common_setup_and_optional_ultraep(self, monkeypatch, enabled):
+        from megatron.core import parallel_state
+
+        layer = _fake_moe_layer()
+        manager = eplb_manager_module.EPLBManager.__new__(eplb_manager_module.EPLBManager)
+        manager.__dict__.update(vars(layer.eplb_manager))
+        manager.adaptive_config, manager.ultraep_active = AdaptiveConfig(), False
+        manager._adaptive_layers, events = [], []
+        config = SimpleNamespace(
+            moe_enable_ultraep=enabled, moe_ultraep_adaptive=enabled,
+            num_moe_experts=4, recompute_granularity='selective', recompute_modules=['router'],
+        )
+        group, pg_collection = object(), object()
+        monkeypatch.setattr(eplb_manager_module, 'HAVE_EPLB', enabled)
+        monkeypatch.setattr(parallel_state, 'get_expert_model_parallel_group', lambda: group)
+
+        def create_manager(**kwargs):
+            events.append('manager')
+            return manager
+
+        factory = MagicMock(side_effect=create_manager)
+        monkeypatch.setattr(eplb_manager_module, 'get_or_create_eplb_manager', factory)
+        monkeypatch.setattr(moe_layer, 'get_adaptor_args', lambda: SimpleNamespace(
+            integrate_recompute_to_ep_comm_overlap=False,
+        ))
+
+        def init(self, config, **kwargs):
+            events.append('original')
+            self.config = config
+            self.num_local_experts = 2
+            self.local_expert_indices = [2, 3]
+            self.experts.num_local_experts = 2
+
+        original = MagicMock(side_effect=init)
+        wrapped = moe_layer.moe_layer_init_wrapper(original)
+        wrapped(layer, config, pg_collection=pg_collection, is_mtp_layer=True, name='moe')
+        original.assert_called_once_with(
+            layer, config, submodules=None, layer_number=None,
+            pg_collection=pg_collection, is_mtp_layer=True, name='moe',
+        )
+        assert layer.router_recompute and not layer.experts_recompute
+        assert layer.eplb_enabled == enabled and config.num_moe_experts == 4
+        if enabled:
+            assert events == ['manager', 'original']
+            factory.assert_called_once_with(config=config, ep_group=group)
+            assert layer.eplb_manager is manager and not manager.ultraep_active
+            assert len(manager._adaptive_layers) == 1 and manager._adaptive_layers[0][0] is layer
+            assert layer.experts.num_local_experts == layer.token_dispatcher.num_local_experts == 2
+            assert layer.experts.linear_fc1.num_gemms == 2
+        else:
+            assert events == ['original'] and layer.eplb_manager is None
+            factory.assert_not_called()
+            assert layer.experts.linear_fc1.num_gemms == 2
+
     def test_registers_master_and_replica_parameters_and_dispatcher(self):
         layer = _fake_moe_layer()
-        moe_layer_ultraep._eplb_register_redundant_experts(layer)
+        moe_layer._eplb_register_redundant_experts(layer)
 
         for linear, buffer, grad_buffer in (
             (
@@ -416,15 +459,15 @@ class TestMoELayerUltraEP:
 
     def test_master_pointer_registration_is_idempotent(self):
         layer = _fake_moe_layer()
-        moe_layer_ultraep._eplb_register_redundant_experts(layer)
+        moe_layer._eplb_register_redundant_experts(layer)
         for linear in (layer.experts.linear_fc1, layer.experts.linear_fc2):
             for index in range(2):
                 getattr(linear, f"weight{index}").main_grad = torch.zeros_like(
                     getattr(linear, f"weight{index}")
                 )
 
-        moe_layer_ultraep._eplb_register_master_experts(layer)
-        moe_layer_ultraep._eplb_register_master_experts(layer)
+        moe_layer._eplb_register_master_experts(layer)
+        moe_layer._eplb_register_master_experts(layer)
         call_args = layer.eplb_manager.runtime.construct_local_master_ptr_pool.call_args
         layer.eplb_manager.runtime.construct_local_master_ptr_pool.assert_called_once()
         assert call_args.kwargs["layer_id"] == 4
@@ -439,12 +482,12 @@ class TestMoELayerUltraEP:
             lambda event, layer_id=None: event.current_stream_wait()
         )
 
-        moe_layer_ultraep._eplb_start_grad_reduce(layer, 11)
-        moe_layer_ultraep._eplb_start_grad_reduce(layer, 12)
+        moe_layer._eplb_start_grad_reduce(layer, 11)
+        moe_layer._eplb_start_grad_reduce(layer, 12)
         with pytest.raises(AssertionError, match="launched twice"):
-            moe_layer_ultraep._eplb_start_grad_reduce(layer, 11)
-        moe_layer_ultraep._eplb_finish_grad_reduce(layer, 12)
-        moe_layer_ultraep._eplb_finish_grad_reduce(layer, 11)
+            moe_layer._eplb_start_grad_reduce(layer, 11)
+        moe_layer._eplb_finish_grad_reduce(layer, 12)
+        moe_layer._eplb_finish_grad_reduce(layer, 11)
         assert first.wait_count == second.wait_count == 1
         assert layer._eplb_grad_reduce_event_handles == {}
         assert layer.eplb_manager.runtime.wait_grad_reduce.call_args_list == [
@@ -454,14 +497,14 @@ class TestMoELayerUltraEP:
 
     def test_master_grad_ready_only_for_overlap_buckets(self):
         layer = _fake_moe_layer()
-        moe_layer_ultraep._eplb_register_redundant_experts(layer)
+        moe_layer._eplb_register_redundant_experts(layer)
         overlap_bucket = MagicMock()
         overlap_bucket.ddp_config.overlap_grad_reduce = True
         sync_bucket = MagicMock()
         sync_bucket.ddp_config.overlap_grad_reduce = False
         layer.experts.linear_fc1.weight0._ddp_bucket_group = overlap_bucket
         layer.experts.linear_fc1.weight1._ddp_bucket_group = sync_bucket
-        moe_layer_ultraep._eplb_register_master_grad_ready(layer)
+        moe_layer._eplb_register_master_grad_ready(layer)
         overlap_bucket.register_grad_ready.assert_called_once_with(
             layer.experts.linear_fc1.weight0
         )
@@ -493,16 +536,20 @@ class TestMoELayerUltraEP:
         layer.combine = lambda output: output
         layer.postprocess = lambda output, shared: output
         original = MagicMock()
-        output, bias = moe_layer_ultraep.moe_layer_ultraep_forward_wrapper(original)(layer, torch.ones(2, 2))
+        output, bias = moe_layer.moe_layer_forward_wrapper(original)(layer, torch.ones(2, 2))
         original.assert_not_called()
         assert output.shape == (2, 2) and bias is None
         assert events == ['dispatch', 'wait_weight_sync', 'experts']
         assert event.wait_count == 1 and layer._eplb_weight_sync_event_handle is None
 
-    def test_disabled_forward_delegates_unchanged(self):
+    @pytest.mark.parametrize('ultraep_enabled', [False, True])
+    def test_disabled_forward_delegates_unchanged(self, ultraep_enabled):
         original = MagicMock(return_value=("output", "bias"))
-        wrapped = moe_layer_ultraep.moe_layer_ultraep_forward_wrapper(original)
-        layer = SimpleNamespace(eplb_enabled=False)
+        wrapped = moe_layer.moe_layer_forward_wrapper(original)
+        layer = SimpleNamespace(
+            eplb_enabled=ultraep_enabled, eplb_manager=SimpleNamespace(ultraep_active=False),
+            training=False, experts_recompute=False, router_recompute=False,
+        )
         hidden = torch.ones(1)
         assert wrapped(layer, hidden, intermediate_tensors="i", padding_mask="p") == (
             "output",
@@ -515,9 +562,37 @@ class TestMoELayerUltraEP:
             padding_mask="p",
         )
 
+    @pytest.mark.parametrize('recompute', ['router', 'experts'])
+    def test_baseline_recompute_uses_dispatched_tokens(self, monkeypatch, recompute):
+        hidden, dispatched = torch.ones(2, 2), torch.full((2, 2), 3.0)
+        probs, routing = torch.ones(2, 2), torch.eye(2, dtype=torch.bool)
+        dispatcher = SimpleNamespace(
+            dispatch_postprocess=MagicMock(return_value=(dispatched, torch.tensor([2]), probs)),
+            combine_preprocess=lambda output: output,
+        )
+        experts = MagicMock(return_value=(dispatched * 2, None))
+        layer = SimpleNamespace(
+            eplb_enabled=False, training=False, token_dispatcher=dispatcher, experts=experts,
+            router_recompute=recompute == 'router', experts_recompute=recompute == 'experts',
+            shared_experts_compute=lambda hidden: None,
+            route=lambda hidden, mask: (probs, routing),
+            preprocess=lambda hidden, probs, routing: (hidden, probs),
+            dispatch=lambda hidden, probs: (dispatched, probs),
+            combine=lambda output: output, postprocess=lambda output, shared: output,
+        )
+        checkpoint = MagicMock(side_effect=lambda function, distribute, *args: function(*args))
+        monkeypatch.setattr(moe_layer.tensor_parallel, 'checkpoint', checkpoint)
+        original = MagicMock()
+        output, bias = moe_layer.moe_layer_forward_wrapper(original)(layer, hidden)
+        assert dispatcher.dispatch_postprocess.call_args.args[0] is dispatched
+        assert experts.call_args.args[0] is dispatched
+        torch.testing.assert_close(output, dispatched * 2)
+        assert bias is None and checkpoint.call_count == 1
+        original.assert_not_called()
+
     def test_enabled_init_requires_runtime(self, monkeypatch):
-        monkeypatch.setattr(moe_layer_ultraep, "HAVE_EPLB", False)
-        wrapped = moe_layer_ultraep.moe_layer_ultraep_init_wrapper(MagicMock())
+        monkeypatch.setattr(eplb_manager_module, "HAVE_EPLB", False)
+        wrapped = moe_layer.moe_layer_init_wrapper(MagicMock())
         with pytest.raises(ImportError, match="ultra_ep could not be imported"):
             wrapped(object(), SimpleNamespace(moe_enable_ultraep=True))
 
@@ -534,9 +609,9 @@ class TestMoELayerUltraEP:
         manager._adaptive_layers = []
         manager.ultraep_active = False
         layer.eplb_manager = manager
-        baseline = moe_layer_ultraep._capture_expert_execution_state(layer)
-        moe_layer_ultraep._eplb_register_redundant_experts(layer)
-        manager.register_adaptive_layer(layer, baseline, moe_layer_ultraep._capture_expert_execution_state(layer))
+        baseline = moe_layer._capture_expert_execution_state(layer)
+        moe_layer._eplb_register_redundant_experts(layer)
+        manager.register_adaptive_layer(layer, baseline, moe_layer._capture_expert_execution_state(layer))
         params = tuple(layer.experts.parameters())
         pointers = [param.data_ptr() for param in params]
         for active in (True, False, True, False):

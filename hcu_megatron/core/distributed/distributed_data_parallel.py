@@ -12,7 +12,7 @@ from hcu_megatron.training import get_args
 
 
 def ultraep_backward_post_hook_wrapper(original):
-    """Defer master readiness in every schedule; preserve the baseline hook."""
+    """Wrap the selected Megatron/HCU hook for UltraEP; preserve baseline behavior."""
     @wraps(original)
     def wrapper(self, param):
         original_hook = original(self, param)
@@ -52,10 +52,6 @@ class DistributedDataParallel():
                 return
 
             if param in self.param_to_bucket_group:
-                if getattr(param, 'is_eplb_master', False) and getattr(
-                    getattr(param, '_eplb_manager', None), 'ultraep_active', True
-                ):
-                    return  # EPLB master grad ready is signalled manually after replica reduce
                 assert param.requires_grad
                 if self.ddp_config.overlap_grad_reduce:
                     # param.grad can temporarily be None in the following cases:

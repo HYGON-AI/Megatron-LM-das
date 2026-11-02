@@ -174,10 +174,6 @@ class UltraEPFeature(AbstractFeature):
             args.moe_ultraep_adaptive = False
             return
 
-        from hcu_megatron.core.transformer.moe.moe_layer_ultraep import (
-            moe_layer_ultraep_init_wrapper,
-            moe_layer_ultraep_forward_wrapper,
-        )
         from hcu_megatron.core.distributed.param_and_grad_buffer import (
             _param_and_grad_buffer_init_wrapper,
             _distributed_data_parallel_init_wrapper,
@@ -190,16 +186,6 @@ class UltraEPFeature(AbstractFeature):
         from hcu_megatron.training.checkpointing import generate_state_dict_ultraep_wrapper
         from hcu_megatron.core.distributed.distributed_data_parallel import ultraep_backward_post_hook_wrapper
 
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
-            moe_layer_ultraep_init_wrapper,
-            apply_wrapper=True,
-        )
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.forward',
-            moe_layer_ultraep_forward_wrapper,
-            apply_wrapper=True,
-        )
         patch_manager.register_patch(
             'megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer.__init__',
             _param_and_grad_buffer_init_wrapper,
