@@ -16,8 +16,6 @@ from pathlib import Path
 # submodules are upgraded.
 EXPECTED_SUBMODULES = {
     "3rdparty/Megatron-LM": "4b4acac9a1d28ea6829c8d4f566d75698a21249d",
-    "3rdparty/Megatron-Energon": "ea11c980eb7f0cb22fd25549e1ceebfe710618f5",
-    "3rdparty/Megatron-Bridge": "0fbfe7d3e970fbd75c1281d71cee586ce1f3df5e",
 }
 
 

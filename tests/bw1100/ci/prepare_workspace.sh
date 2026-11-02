@@ -35,18 +35,13 @@ prepare_das_workspace() {
 
     for safe_path in \
         "${repo_root}" \
-        "${repo_root}/3rdparty/Megatron-LM" \
-        "${repo_root}/3rdparty/Megatron-Energon" \
-        "${repo_root}/3rdparty/Megatron-Bridge"; do
+        "${repo_root}/3rdparty/Megatron-LM"; do
         if ! git config --global --get-all safe.directory 2>/dev/null |
             grep -Fqx -- "${safe_path}"; then
             git config --global --add safe.directory "${safe_path}"
         fi
     done
 
-    # Top-level submodules only (non-recursive): Megatron-Bridge contains the
-    # nested 3rdparty/Megatron-LM submodule whose gitlink cannot be resolved,
-    # and repo code does not use Bridge. Switch to --recursive only if needed.
     git -C "${repo_root}" submodule sync
 
     # A persistent runner can retain an interrupted submodule checkout. Git
@@ -56,8 +51,6 @@ prepare_das_workspace() {
     local -a top_level_submodules
     top_level_submodules=(
         "3rdparty/Megatron-LM"
-        "3rdparty/Megatron-Energon"
-        "3rdparty/Megatron-Bridge"
     )
     git_dir="$(git -C "${repo_root}" rev-parse --absolute-git-dir)"
     for submodule_path in "${top_level_submodules[@]}"; do
@@ -94,13 +87,9 @@ prepare_das_workspace() {
         pip install "${DAS_HCU_MEGATRON_WHEEL}"
     fi
 
-    # Energon and Bridge are src-layout: the megatron.* packages live under
-    # src/, so the repo root alone does not make megatron.bridge importable.
     python_paths=(
         "${repo_root}"
         "${repo_root}/3rdparty/Megatron-LM"
-        "${repo_root}/3rdparty/Megatron-Energon/src"
-        "${repo_root}/3rdparty/Megatron-Bridge/src"
         "${script_dir}"  # sitecustomize.py: python3.10 typing.override shim
     )
     joined_python_path="$(IFS=:; printf '%s' "${python_paths[*]}")"
