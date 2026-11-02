@@ -39,7 +39,7 @@ RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 export MEGATRON_LAUNCH_BACKEND=${launch_backend:-"mpirun"}
-MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
@@ -101,10 +101,6 @@ GPT_MODEL_ARGS=(
     --position-embedding-type rope
     --untie-embeddings-and-output-weights
     --kv-channels 128
-
-    --use-bridge
-    --bridge-hf-model ${TOKENIZER_MODEL_PATH}
-    # --load-weights
 )
 
 TRAINING_ARGS=(
@@ -168,11 +164,15 @@ EVAL_AND_LOGGING_ARGS=(
     --log-throughput
     --eval-iters 5
     --log-interval 1
-    --save-interval 1000 
+    --save-interval 10
     --eval-interval 1000 
     # --save $CHECKPOINT_PATH
+    # --no-save-optim
+    # --no-save-rng
     # --load $CHECKPOINT_PATH
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
+    # --no-load-optim
+    # --no-load-rng
+    # --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
 TORCH_PROFIE_ARGS=(

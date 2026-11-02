@@ -41,7 +41,7 @@ RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 export MEGATRON_LAUNCH_BACKEND=${launch_backend:-"mpirun"}
-MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
@@ -54,7 +54,7 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GPU_MAX_HW_QUEUES=4
 
 # split hyperparameters
-TP=4
+TP=1
 PP=1
 CP=1
 
@@ -64,7 +64,7 @@ GBS=256
 
 # seq hyperparameters
 SEQ_LEN=4096
-MAX_POSITION_EMBEDDINGS=32768
+MAX_POSITION_EMBEDDINGS=40960
 
 # train iteration hyperparameters
 TRAIN_ITERS=50
@@ -87,16 +87,16 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 28   
+    --num-layers 28
     --hidden-size 1024
-    --ffn-hidden-size 5504 
+    --ffn-hidden-size 3072
     --num-attention-heads 16
+    --kv-channels 128
     --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --num-query-groups 8
     --group-query-attention
     --normalization RMSNorm
     --position-embedding-type rope
-    --untie-embeddings-and-output-weights
 )
 
 TRAINING_ARGS=(
@@ -115,7 +115,7 @@ TRAINING_ARGS=(
     --attention-dropout 0
     --hidden-dropout 0
     --swiglu
-    --use-qk-norm
+    --qk-layernorm
     --rotary-base 1000000
     --lr 3.0e-5 
     --lr-decay-style cosine 
@@ -148,8 +148,8 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 

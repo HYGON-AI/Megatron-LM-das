@@ -56,7 +56,7 @@ LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 export MEGATRON_LAUNCH_BACKEND=${launch_backend:--mpirun}
 
-MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-}}}
@@ -71,7 +71,7 @@ export GPU_MAX_HW_QUEUES=4
 
 # split hyperparameters
 TP=2
-PP=2
+PP=1
 CP=1
 
 # batch hyperparameters
@@ -104,17 +104,8 @@ TORCH_DISTRIBUTED_ARGS=(
     --nproc_per_node $GPUS_PER_NODE
 )
 
-BRIDGE_ARGS=()
-if [[ "${LOAD_HF_WEIGHTS}" == "true" ]]; then
-    BRIDGE_ARGS=(
-        --use-bridge
-        --bridge-hf-model ${TOKENIZER_MODEL_PATH}
-        --load-weights
-    )
-fi
 
 GPT_MODEL_ARGS=(
-    ${BRIDGE_ARGS[@]}
     --seq-length ${SEQ_LEN}
     --num-layers 36
     --hidden-size 4096
@@ -157,7 +148,7 @@ TRAINING_ARGS=(
     --use-flash-attn
 
     # --fp8-format hybrid
-    # --fp8-recipe tensorwise
+    # --fp8-recipe blockwise # tensorwise
     # --fp8-param-gather
 )
 
@@ -185,23 +176,29 @@ else
         --no-create-attention-mask-in-dataloader
         --train-data-path ${DATA_PATH}/train.jsonl
         --valid-data-path ${DATA_PATH}/valid.jsonl
+        --finetune
     )
 fi
 
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 EVAL_AND_LOGGING_ARGS=(
     --log-throughput
     --eval-iters 5
     --log-interval 1
-    --save-interval 1000 
+    --save-interval 50
     --eval-interval 1000 
     # --save $CHECKPOINT_PATH
+    # --no-save-optim
+    # --no-save-rng
     # --load $CHECKPOINT_PATH
+    # --no-load-optim
+    # --no-load-rng
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 
 TORCH_PROFIE_ARGS=(
     --profile
-    --profile-ranks 0 4
+    --profile-ranks 0
     --profile-step-start 3
     --profile-step-end 4
     --profile-dir torch_prof_qwen3_8B_tp${TP}-pp${PP}-cp${CP}
