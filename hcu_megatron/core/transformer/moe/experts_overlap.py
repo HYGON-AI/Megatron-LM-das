@@ -2,43 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # Some of this code was adopted from https://github.com/baidu-baige/Loong-Megatron
-"""
-Ported from:
-  /public/home/chenyashu/code/LoongForge/LoongForge-master/third_party/
-  Loong-Megatron/megatron/core/transformer/moe/experts.py:1000-1174
-  (TEGroupedMLP.forward_with_dispatch_overlap method)
 
-Modifications from Loong:
-  - Turned from bound method into module-level function so we can patch it
-    into upstream TEGroupedMLP without modifying the class (matches how
-    hcu_megatron's patch mechanism works).
-  - Uses `_grouped_mlp_get_expert_weights` / `_grouped_mlp_set_expert_weights`
-    helpers from hcu_megatron.core.transformer.moe.experts (also ports of
-    Loong's TEGroupedMLP methods).
-  - Uses `experts._apply_activation(...)` via getattr to reuse the private
-    activation helper defined in upstream MegatronCoreTEGroupedMLP.
-
-Time-space schedule:
-  ─────────────────────────────────────────────────────────────────────────
-  Default stream (home compute path):
-    [get home fc1 w] → [fc1_preprocess] → [home fc1 GEMM]
-                                             ↓ activation
-                                          [wait fc1_event] → [set echo fc1 w]
-                                          [echo fc1 GEMM] → [act]
-    [get home fc2 w] → [fc2_preprocess] → [home fc2 GEMM]
-                                             ↓
-                                          [wait fc2_event] → [set echo fc2 w]
-                                          [echo fc2 GEMM]
-    → [cat home_out + echo_out]
-
-  moe_a2a_stream (dispatch path):
-    [wait default] → [fc1 A2A] → [record fc1_event]
-    [wait default] → [fc2 A2A] → [record fc2_event]
-  ─────────────────────────────────────────────────────────────────────────
-
-The overlap is real: fc1 A2A runs on the side stream while home fc1 GEMM
-runs on the default stream. Same for fc2.
-"""
 from typing import List, Optional, Tuple
 import torch
 import torch.nn.functional as F
