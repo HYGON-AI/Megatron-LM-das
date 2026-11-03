@@ -375,16 +375,17 @@ class PrimusGroupedMLP(MegatronCoreTEGroupedMLP):
         # NOTE: None means no bias
         return output, None
 
-    @staticmethod
-    def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
+    def _apply_bias(self, intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
         if bias_parallel is None:
             return intermediate_parallel
 
-        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return MegatronCoreTEGroupedMLP._apply_bias(
-            intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
+        return super()._apply_bias(
+            intermediate_parallel,
+            bias_parallel,
+            tokens_per_expert_cpu,
+            permuted_probs,
         )
 
     def forward(
@@ -772,16 +773,17 @@ class PrimusTurboGroupedMLP(MegatronCoreTEGroupedMLP):
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
             return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
 
-    @staticmethod
-    def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
+    def _apply_bias(self, intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
         if bias_parallel is None:
             return intermediate_parallel
 
-        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return MegatronCoreTEGroupedMLP._apply_bias(
-            intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
+        return super()._apply_bias(
+            intermediate_parallel,
+            bias_parallel,
+            tokens_per_expert_cpu,
+            permuted_probs,
         )
 
     def forward(
