@@ -759,7 +759,7 @@ class PrimusTurboGroupedMLP(MegatronCoreTEGroupedMLP):
                 activation = "gelu"
             else:
                 raise ValueError(
-                    "Only support fusion of swiglu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
+                    "Only support fusion of swiglu and gelu in PrimusGroupedMLP when `use_primus_fused_act_with_probs` is True."
                 )
 
             # `forward()` unsqueeze(-1)'s `permuted_probs` to [tokens, 1] so the non-fused

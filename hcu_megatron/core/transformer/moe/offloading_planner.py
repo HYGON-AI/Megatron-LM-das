@@ -415,10 +415,11 @@ def reclaim_spare_experts(
     mask_original_order = torch.zeros_like(mask_sorted)
     mask_original_order.scatter_(1, indices_sorted, mask_sorted)
 
-    # Do OR operation along dim=0 to get a 1D tensor indicating which columns to mask
+    # True means this spare-expert column must retain its offloading assignments:
+    # at least one home rank cannot reclaim them without exceeding its load limit.
     mask_column = mask_original_order.any(dim=0)
 
-    # Apply the column mask directly to count_tokens_from_home_expert_to_spare_expert
+    # Disable only columns that every home rank can safely reclaim.
     count_tokens_from_home_expert_to_spare_expert = torch.where(
         mask_column.unsqueeze(0),
         count_tokens_from_home_expert_to_spare_expert,
