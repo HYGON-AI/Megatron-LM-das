@@ -192,7 +192,7 @@ def approx_bin_packing_triton(
     count_spillover_remaining = count_spillover_per_expert.clone()
 
     m_tensor = avg_tokens_per_ep_rank.to(torch.int32).reshape(1)
-    interval_size_tensor = (m_tensor // (num_buckets - 1) if num_buckets > 1 else m_tensor).reshape(1)
+    interval_size_tensor = (m_tensor // (num_buckets - 1) if num_buckets > 1 else m_tensor).reshape(1).clamp(min=1)
 
     # Compute bucket indices for each expert
     bucket_indices = torch.where(
