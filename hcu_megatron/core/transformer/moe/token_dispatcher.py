@@ -643,7 +643,7 @@ class _DeepEPWeightDispatch(torch.autograd.Function):
 
 
 class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
-    """Drop-in weight dispatcher using a DCU-compatible DeepEP Buffer backend.
+    """Drop-in weight dispatcher using a DeepEP Buffer backend.
 
     Uses the standard high-throughput Buffer API. Overlap launches asynchronous
     dispatch on a side stream and waits only when echo GEMM needs the weights.
@@ -659,7 +659,6 @@ class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
 
         if not fused_a2a.HAVE_DEEP_EP:
             raise RuntimeError(
-                '--moe-echo-expert-dispatch-type deepep requires a DCU-compatible '
                 'deep_ep package exposing Buffer; install it in the training '
                 'environment or select alltoall.'
             )
@@ -689,7 +688,7 @@ class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
             raise ValueError('DeepEP echo expert dispatch requires home expert weights')
         reference = expert_weights[0]
         if reference.dtype != torch.bfloat16 or not reference.is_cuda:
-            raise ValueError('DeepEP echo expert dispatch requires BF16 weights on CUDA/ROCm/DCU')
+            raise ValueError('DeepEP echo expert dispatch requires BF16 weights on CUDA/ROCm/HCU')
         if any(w.shape != reference.shape or w.dtype != reference.dtype
                or w.device != reference.device for w in expert_weights):
             raise ValueError('Home expert weights must have the same shape, dtype and device')

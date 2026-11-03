@@ -1,15 +1,6 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-"""Phase-2b wiring for --moe-enable-echo.
+# SPDX-License-Identifier: Apache-2.0
 
-Phase 2b delivers real echo dispatch:
-- __init__ wrapper bumps num_moe_experts, lets upstream build extended
-  router/dispatcher/experts, then shrinks router back to home size and
-  frees Parameter registration on echo slots (so optimizer skips them).
-- forward wrapper runs planner + expert-weight A2A + token dispatch through
-  the extended dispatcher so spare experts actually receive tokens.
-
-This retains Phase 1 dump machinery for regression comparability.
-"""
 import warnings
 
 from argparse import ArgumentParser
@@ -32,7 +23,6 @@ class EchoExpertFeature(AbstractFeature):
         group.add_argument('--moe-echo-expert-dispatch-type', type=str,
                            default='alltoall', choices=['alltoall', 'deepep'],
                            help='Communication backend for echo expert weights (not tokens). '
-                                'deepep requires a DCU-compatible deep_ep Buffer implementation '
                                 'and BF16 expert weights.')
         group.add_argument('--moe-echo-algorithm', type=str, default='sinkhorn',
                            choices=['sinkhorn', 'greedy', 'auction'],
