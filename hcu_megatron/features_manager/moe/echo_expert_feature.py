@@ -45,10 +45,25 @@ class EchoExpertFeature(AbstractFeature):
         if dispatch_type not in ('alltoall', 'deepep'):
             raise ValueError(f'Unsupported echo expert dispatch type: {dispatch_type}')
         if not getattr(args, 'moe_enable_echo', False):
-            if any(getattr(args, k, None) not in (None, False, 'sinkhorn', 8)
-                   for k in ('moe_num_echo_experts',
-                             'moe_echo_dump_dir')):
-                warnings.warn('--moe-echo-* flags have no effect without --moe-enable-echo')
+            echo_defaults = {
+                'moe_num_echo_experts': None,
+                'moe_echo_expert_dispatch_type': 'alltoall',
+                'moe_echo_algorithm': 'sinkhorn',
+                'moe_echo_ranks_per_node': 8,
+                'moe_echo_dump_dir': None,
+                'moe_echo_expert_dispatch_overlap': False,
+            }
+            changed = [
+                name for name, default in echo_defaults.items()
+                if getattr(args, name, default) != default
+            ]
+            if changed:
+                flags = ', '.join(
+                    '--' + name.replace('_', '-') for name in changed
+                )
+                warnings.warn(
+                    f'{flags} have no effect without --moe-enable-echo'
+                )
             return args
 
         if args.moe_num_echo_experts is None:

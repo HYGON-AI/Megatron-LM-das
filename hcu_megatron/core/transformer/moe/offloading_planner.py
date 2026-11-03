@@ -904,7 +904,7 @@ def gen_offloading_plan(
         "approx_bin_packing",
         "sinkhorn",
         "auction",
-    ] = "approx_bin_packing",
+    ] = "sinkhorn",
     ranks_per_node: int = 8,
     _force_triton: bool | None = None,  # passed through to gen_assignment_sinkhorn for testing
     ep_group=None,
@@ -968,11 +968,13 @@ def gen_offloading_plan(
             Description: Data type used for index tensors in the computation
 
         assignment_algorithm: Algorithm to use for token assignment
-            Type: Literal["one_shot_greedy", "approx_bin_packing"]
-            Default: "one_shot_greedy"
+            Type: Literal["one_shot_greedy", "approx_bin_packing", "sinkhorn", "auction"]
+            Default: "sinkhorn"
             Description:
-                - "one_shot_greedy": Uses gen_assignment with one_shot_greedy_assignment
-                - "approx_bin_packing": Uses gen_assignment_for_approx_bp
+                - "one_shot_greedy": Uses one-shot greedy assignment
+                - "approx_bin_packing": Uses approximate bin packing
+                - "sinkhorn": Uses Sinkhorn assignment
+                - "auction": Uses auction assignment
 
     Returns:
         tuple containing:

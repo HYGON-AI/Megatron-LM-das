@@ -96,7 +96,7 @@ TORCH_DISTRIBUTED_ARGS=(
 
 GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
-    --num-layers 12
+    --num-layers 48
     --hidden-size 2048
     --ffn-hidden-size 6144
     --moe-ffn-hidden-size 768
