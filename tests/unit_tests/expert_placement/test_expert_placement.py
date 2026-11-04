@@ -6,9 +6,12 @@ A MoELayer with a placement must compute exactly the same function as the
 stock layer when physical slot p holds the weights of logical expert
 phys2log[p], and its torch_dist checkpoint must store experts by logical ID.
 
-Run inside the training container from the repository root, e.g.:
+Run inside the training container from the repository root, either as a script:
     PYTHONPATH=$PWD:$PWD/3rdparty/Megatron-LM torchrun --nproc-per-node 4 \
         tests/unit_tests/expert_placement/test_expert_placement.py [--grouped-gemm]
+or through pytest (as CI does):
+    PYTHONPATH=$PWD:$PWD/3rdparty/Megatron-LM torchrun --nproc-per-node 4 -m pytest -q \
+        tests/unit_tests/expert_placement/test_expert_placement.py
 
 Checks (each rank prints FAIL lines; the script exits non-zero on any failure):
   1. load_placement / moe_layer_ordinal parse and validate placement.json;
@@ -23,6 +26,7 @@ import re
 import sys
 import tempfile
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -143,7 +147,7 @@ def check_slots(layer, phys2log, reference, what):
             close(t, reference[phys2log[p]][suf], f"{what}: slot {p} {suf} != logical {phys2log[p]}", 0, 0)
 
 
-def test_placement_file(ep_size, tmpdir):
+def check_placement_file(ep_size, tmpdir):
     config = make_config(ep_size, False)
     perm = torch.randperm(NUM_EXPERTS, generator=torch.Generator().manual_seed(1)).tolist()
     per = NUM_EXPERTS // ep_size
@@ -163,7 +167,7 @@ def test_placement_file(ep_size, tmpdir):
         pass
 
 
-def test_forward_backward(ep_size, grouped, phys2log):
+def check_forward_backward(ep_size, grouped, phys2log):
     config = make_config(ep_size, grouped)
     ref = build(config, grouped, seed=123)
     test = build(config, grouped, seed=456)
@@ -192,7 +196,7 @@ def test_forward_backward(ep_size, grouped, phys2log):
     return ref, test
 
 
-def test_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir):
+def check_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir):
     logical = gather_slots(ref)
     dist_checkpointing.save(test.sharded_state_dict(), ckpt_dir)
 
@@ -209,39 +213,64 @@ def test_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir):
     check_slots(moved, other, logical, "load into a different placement")
 
 
+def run_checks(grouped):
+    """Run all checks on an initialized EP group; returns the global failure count."""
+    FAILURES.clear()
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    ep_size = ps.get_expert_model_parallel_world_size()
+    assert NUM_EXPERTS % ep_size == 0, f"world size {ep_size} must divide {NUM_EXPERTS}"
+
+    # Apply the same wrappers the ExpertPlacementFeature registers (restored afterwards so
+    # other tests in the same process see the stock MoELayer).
+    route, sharded = MoELayer.route, MoELayer.sharded_state_dict
+    MoELayer.route = ec.moe_layer_route_placement_wrapper(route)
+    MoELayer.sharded_state_dict = ec.moe_layer_sharded_state_dict_placement_wrapper(sharded)
+    try:
+        phys2log = torch.randperm(NUM_EXPERTS, generator=torch.Generator().manual_seed(0)).tolist()
+        tmp = [tempfile.mkdtemp(prefix="ec_placement_test_") if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(tmp, src=0)
+        ckpt_dir = os.path.join(tmp[0], "ckpt")
+        if dist.get_rank() == 0:
+            os.makedirs(ckpt_dir)
+        dist.barrier()
+
+        check_placement_file(ep_size, tmp[0])
+        ref, test = check_forward_backward(ep_size, grouped, phys2log)
+        check_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir)
+    finally:
+        MoELayer.route, MoELayer.sharded_state_dict = route, sharded
+
+    failed = torch.tensor([len(FAILURES)], device="cuda")
+    dist.all_reduce(failed)
+    return int(failed)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("grouped", [False, True], ids=["sequential_mlp", "grouped_gemm"])
+def test_expert_placement_equivalence(grouped):
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    if world < 2 or NUM_EXPERTS % world:
+        pytest.skip(f"requires torchrun with a world size > 1 that divides {NUM_EXPERTS}")
+    Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=world)
+    try:
+        failed = run_checks(grouped)
+    finally:
+        Utils.destroy_model_parallel()
+    assert failed == 0, f"{failed} expert placement check(s) failed: {FAILURES}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grouped-gemm", action="store_true", help="TEGroupedMLP instead of SequentialMLP")
     args = ap.parse_args()
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
     Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=Utils.world_size)
-    ep_size = ps.get_expert_model_parallel_world_size()
-    assert NUM_EXPERTS % ep_size == 0, f"world size {ep_size} must divide {NUM_EXPERTS}"
-
-    # Apply the same wrappers the ExpertPlacementFeature registers.
-    MoELayer.route = ec.moe_layer_route_placement_wrapper(MoELayer.route)
-    MoELayer.sharded_state_dict = ec.moe_layer_sharded_state_dict_placement_wrapper(MoELayer.sharded_state_dict)
-
-    phys2log = torch.randperm(NUM_EXPERTS, generator=torch.Generator().manual_seed(0)).tolist()
-    tmp = [tempfile.mkdtemp(prefix="ec_placement_test_") if dist.get_rank() == 0 else None]
-    dist.broadcast_object_list(tmp, src=0)
-    ckpt_dir = os.path.join(tmp[0], "ckpt")
+    failed = run_checks(args.grouped_gemm)
     if dist.get_rank() == 0:
-        os.makedirs(ckpt_dir)
-    dist.barrier()
-
-    test_placement_file(ep_size, tmp[0])
-    ref, test = test_forward_backward(ep_size, args.grouped_gemm, phys2log)
-    test_checkpoint(ep_size, args.grouped_gemm, ref, test, phys2log, ckpt_dir)
-
-    failed = torch.tensor([len(FAILURES)], device="cuda")
-    dist.all_reduce(failed)
-    if dist.get_rank() == 0:
-        print("expert placement checks:", "PASSED" if int(failed) == 0 else f"FAILED ({int(failed)} failures)", flush=True)
+        print("expert placement checks:", "PASSED" if failed == 0 else f"FAILED ({failed} failures)", flush=True)
     Utils.destroy_model_parallel()
-    sys.exit(0 if int(failed) == 0 else 1)
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":

@@ -13,15 +13,19 @@ mainstream model:
     group-limited   moe_router_num_groups + placement       (DeepSeek-V3)
     etp2            expert tensor parallel size 2           (GPT-567B); needs >= 4 GPUs
 
-Run inside the training container from the repository root, e.g.:
+Run inside the training container from the repository root, either as a script:
     PYTHONPATH=$PWD:$PWD/3rdparty/Megatron-LM torchrun --nproc-per-node 4 \
         tests/unit_tests/expert_placement/test_dedup_dispatcher.py [--grouped-gemm] [--permute-fusion]
+or through pytest (as CI does):
+    PYTHONPATH=$PWD:$PWD/3rdparty/Megatron-LM torchrun --nproc-per-node 4 -m pytest -q \
+        tests/unit_tests/expert_placement/test_dedup_dispatcher.py
 """
 import argparse
 import dataclasses
 import os
 import sys
 
+import pytest
 import torch
 import torch.distributed as dist
 
@@ -142,48 +146,72 @@ def check_hf_import_permutation(grouped):
             close(t, logical[phys2log[p]][suf], f"hf-import: slot {p} {suf} != logical {phys2log[p]}", 0, 0)
 
 
+def run_checks(gg, permute_fusion=False):
+    """Run every scenario; returns the global failure count. Initializes and destroys the
+    model-parallel state itself (the etp2 scenario needs a different layout)."""
+    FAILURES.clear()
+    RESULTS.clear()
+    COMMON.clear()
+    if permute_fusion:
+        COMMON["moe_permute_fusion"] = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    # Same wrapper the ExpertPlacementFeature registers; restored so other tests see the stock layer.
+    route = MoELayer.route
+    MoELayer.route = ec.moe_layer_route_placement_wrapper(route)
+    try:
+        Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=Utils.world_size)
+        ep_size = ps.get_expert_model_parallel_world_size()
+        compare("base/contiguous", gg)
+        compare("base/placement", gg, random_placement(0))
+        compare("capacity/placement", gg, random_placement(1), moe_expert_capacity_factor=1.0)
+        compare("shared-overlap/placement", gg, random_placement(2),
+                moe_shared_expert_intermediate_size=96, moe_shared_expert_overlap=True)
+        if ep_size % 2 == 0:
+            compare("group-limited/placement", gg, group_respecting_placement(2, 3),
+                    moe_router_num_groups=2, moe_router_group_topk=1)
+        check_group_validation(ep_size)
+        check_hf_import_permutation(gg)
+
+        if Utils.world_size >= 4 and Utils.world_size % 2 == 0:
+            Utils.initialize_model_parallel(tensor_model_parallel_size=1,
+                                            expert_model_parallel_size=Utils.world_size // 2,
+                                            expert_tensor_parallel_size=2)
+            compare("etp2/placement", gg, random_placement(4), expert_tensor_parallel_size=2,
+                    expert_model_parallel_size=Utils.world_size // 2)
+
+        failed = torch.tensor([len(FAILURES)], device="cuda")
+        dist.all_reduce(failed)
+        if dist.get_rank() == 0:
+            for tag, sent, base in RESULTS:
+                print(f"[{tag}] rows sent {sent} vs stock {base} ({100.0 * (1 - sent / base):.1f}% removed)")
+        return int(failed)
+    finally:
+        MoELayer.route = route
+        COMMON.clear()
+        Utils.destroy_model_parallel()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("grouped", [False, True], ids=["sequential_mlp", "grouped_gemm"])
+def test_dedup_dispatcher_equivalence(grouped):
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    if world < 2 or NUM_EXPERTS % world:
+        pytest.skip(f"requires torchrun with a world size > 1 that divides {NUM_EXPERTS}")
+    failed = run_checks(grouped)
+    assert failed == 0, f"{failed} dedup dispatcher check(s) failed: {FAILURES}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--grouped-gemm", action="store_true", help="TEGroupedMLP instead of SequentialMLP")
     ap.add_argument("--permute-fusion", action="store_true",
                     help="--moe-permute-fusion: Transformer Engine permute/unpermute kernels in both dispatchers")
     args = ap.parse_args()
-    gg = args.grouped_gemm
-    if args.permute_fusion:
-        COMMON["moe_permute_fusion"] = True
-
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    MoELayer.route = ec.moe_layer_route_placement_wrapper(MoELayer.route)
-
-    Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=Utils.world_size)
-    ep_size = ps.get_expert_model_parallel_world_size()
-    compare("base/contiguous", gg)
-    compare("base/placement", gg, random_placement(0))
-    compare("capacity/placement", gg, random_placement(1), moe_expert_capacity_factor=1.0)
-    compare("shared-overlap/placement", gg, random_placement(2),
-            moe_shared_expert_intermediate_size=96, moe_shared_expert_overlap=True)
-    if ep_size % 2 == 0:
-        compare("group-limited/placement", gg, group_respecting_placement(2, 3),
-                moe_router_num_groups=2, moe_router_group_topk=1)
-    check_group_validation(ep_size)
-    check_hf_import_permutation(gg)
-
-    if Utils.world_size >= 4 and Utils.world_size % 2 == 0:
-        Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=Utils.world_size // 2,
-                                        expert_tensor_parallel_size=2)
-        compare("etp2/placement", gg, random_placement(4), expert_tensor_parallel_size=2,
-                expert_model_parallel_size=Utils.world_size // 2)
-
-    failed = torch.tensor([len(FAILURES)], device="cuda")
-    dist.all_reduce(failed)
+    failed = run_checks(args.grouped_gemm, args.permute_fusion)
     if dist.get_rank() == 0:
-        for tag, sent, base in RESULTS:
-            print(f"[{tag}] rows sent {sent} vs stock {base} ({100.0 * (1 - sent / base):.1f}% removed)")
-        print("dedup dispatcher checks:", "PASSED" if int(failed) == 0 else f"FAILED ({int(failed)} failures)",
-              flush=True)
-    Utils.destroy_model_parallel()
-    sys.exit(0 if int(failed) == 0 else 1)
+        print("dedup dispatcher checks:", "PASSED" if failed == 0 else f"FAILED ({failed} failures)", flush=True)
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":
