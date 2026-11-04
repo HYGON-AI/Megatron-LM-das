@@ -445,6 +445,11 @@ class MoEElasticExpertDispatcher:
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        if pg_collection is None:
+            raise ValueError(
+                "MoEElasticExpertDispatcher requires pg_collection "
+                "with an expert-parallel process group."
+            )
         self.config = config
         self.ep_group = pg_collection.ep
         self.ep_size = self.ep_group.size()
