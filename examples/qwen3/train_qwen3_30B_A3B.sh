@@ -55,7 +55,7 @@ export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
 
 # split hyperparameters
 TP=1
-PP=2
+PP=4
 CP=1
 EP=8
 ETP=1

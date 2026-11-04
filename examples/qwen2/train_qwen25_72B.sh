@@ -54,15 +54,15 @@ export GPU_MAX_HW_QUEUES=4
 
 # split hyperparameters
 TP=4
-PP=4
-CP=2
+PP=8
+CP=1
 
 # batch hyperparameters
 MBS=1
 GBS=128
 
 # seq hyperparameters
-SEQ_LEN=8192
+SEQ_LEN=4096
 MAX_POSITION_EMBEDDINGS=131072
 
 # train iteration hyperparameters
@@ -125,15 +125,6 @@ TRAINING_ARGS=(
     --ddp-average-in-collective
     --overlap-grad-reduce
     --use-flash-attn
-
-    # --swap-attention
-
-    --optimizer-cpu-offload
-    # --optimizer-offload-fraction 1.0
-    --use-torch-optimizer-for-cpu-offload
-    --use-precision-aware-optimizer
-    --main-grads-dtype bf16 
-    --main-params-dtype fp16 
     
 )
 
