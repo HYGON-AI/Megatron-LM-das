@@ -93,7 +93,7 @@ def approx_bin_packing_kernel(
     - bucket i: values in range [m - i*interval_size, m - (i-1)*interval_size)
     - bucket num_buckets-1: smallest positive values
     """
-    m = tl.load(m_ptr)
+    m = tl.load(m_ptr)   #Average load per EP rank; threshold for spillover bucketing.
     interval_size = tl.load(interval_size_ptr)
 
     current_bucket = 0
@@ -428,7 +428,6 @@ def reclaim_spare_experts(
     return count_tokens_from_home_expert_to_spare_expert
 
 
-
 def breadth_first_allocation(
     count_tokens_per_expert_from_ep_rank,
     count_tokens_from_home_expert_to_spare_expert,
@@ -496,7 +495,6 @@ def breadth_first_allocation(
         torch.arange(count_tokens_from_home_expert_to_spare_expert.shape[1], device=device),
     ] -= count_tokens_floors.sum(dim=0)
     return count_tokens_floors, count_tokens_per_expert_from_ep_rank_after_offload, capacity_spare_remaining
-
 
 
 def depth_first_allocation(
@@ -866,6 +864,7 @@ def reroute_tokens_triton(
 
     return map_token_to_all_experts, probs_rerouted
 
+
 @torch.compiler.disable
 def _synchronize_offloading_plan(expert_map, home_counts, spare_counts, ep_group):
     """Use EP rank 0's complete plan before token routing or weight dispatch.
@@ -1141,7 +1140,6 @@ def gen_offloading_plan(
         -1, num_experts + num_echo_experts
     )
     return map_token_to_all_experts, probs_rerouted, map_home_expert_to_spare
-
 
 
 def gen_assignment(
@@ -1571,6 +1569,7 @@ def _sinkhorn_phase2_all_rounds_kernel(
     tl.store(rem_spill_ptr + e_idx, rem_spill)
     tl.store(rem_spare_ptr + r_idx, rem_spare)
 
+
 @torch.compiler.disable
 def _sinkhorn_transport_flow(u, v, M, demand, home_rank_of_e, hot_excess):
     """Keep numerically sensitive flow arithmetic on one eager execution path.
@@ -1586,6 +1585,7 @@ def _sinkhorn_transport_flow(u, v, M, demand, home_rank_of_e, hot_excess):
     row_budget = hot_excess[home_rank_of_e].clamp(min=1.0)
     T_er_norm = T_rr[home_rank_of_e] / row_budget.unsqueeze(1)
     return T_rr, T_er_norm
+
 
 def gen_assignment_sinkhorn(
     count_tokens_per_expert_from_ep_rank: torch.Tensor,
@@ -1720,8 +1720,6 @@ def gen_assignment_sinkhorn(
 
     rem_spill = spill.float().clone()
     rem_spare = spare_cap.float().clone()
-
-
 
     if _use_triton:
         # ALL K rounds in a SINGLE kernel launch.

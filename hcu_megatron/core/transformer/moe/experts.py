@@ -375,17 +375,16 @@ class PrimusGroupedMLP(MegatronCoreTEGroupedMLP):
         # NOTE: None means no bias
         return output, None
 
-    def _apply_bias(self, intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
+    @staticmethod
+    def _apply_bias(intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
         if bias_parallel is None:
             return intermediate_parallel
 
+        # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return super()._apply_bias(
-            intermediate_parallel,
-            bias_parallel,
-            tokens_per_expert_cpu,
-            permuted_probs,
+        return MegatronCoreTEGroupedMLP._apply_bias(
+            intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
         )
 
     def forward(
@@ -564,7 +563,6 @@ class DummyFunction(torch.autograd.Function):
     `weight{i}` so TE's GroupedLinear doesn't crash. DummyFunction wraps an
     empty tensor into a graph node whose backward returns zero gradient.
     """
-
     @staticmethod
     def forward(ctx, x, weight_shape):
         ctx.input = x
@@ -576,7 +574,7 @@ class DummyFunction(torch.autograd.Function):
         return torch.zeros_like(ctx.input), None
 
 
-def _grouped_mlp_free_expert_parameters(self, expert_indices: List[int]):
+def _grouped_mlp_free_expert_parameters(experts, expert_indices: List[int]):
     """Free the nn.Parameter slots for the given expert indices on this rank.
 
     Called once at init (or before first echo forward) so the runtime can
@@ -584,7 +582,7 @@ def _grouped_mlp_free_expert_parameters(self, expert_indices: List[int]):
     conflicting with autograd registration.
     """
     to_free_weight_names = [f'weight{i}' for i in expert_indices]
-    for module in [self.linear_fc1, self.linear_fc2]:
+    for module in [experts.linear_fc1, experts.linear_fc2]:
         for name, _ in list(module.named_parameters()):
             if name in to_free_weight_names:
                 delattr(module, name)
@@ -592,16 +590,16 @@ def _grouped_mlp_free_expert_parameters(self, expert_indices: List[int]):
 
 
 def _grouped_mlp_get_expert_weights(
-    self, module: str, expert_indices: List[int]
+    experts, module: str, expert_indices: List[int]
 ) -> List[torch.Tensor]:
     """Return per-expert weight tensors for the given indices."""
     assert module in ("fc1", "fc2"), f"Invalid module: {module}"
-    expert_layer = self.linear_fc1 if module == "fc1" else self.linear_fc2
+    expert_layer = experts.linear_fc1 if module == "fc1" else experts.linear_fc2
     return [getattr(expert_layer, f"weight{i}") for i in expert_indices]
 
 
 def _grouped_mlp_set_expert_weights(
-    self,
+    experts,
     module: str,
     expert_weights: List[torch.Tensor],
     expert_indices: List[int],
@@ -613,16 +611,16 @@ def _grouped_mlp_set_expert_weights(
 
     """
     assert module in ("fc1", "fc2"), f"Invalid module: {module}"
-    expert_layer = self.linear_fc1 if module == "fc1" else self.linear_fc2
-    fused = self.config.gradient_accumulation_fusion
+    expert_layer = experts.linear_fc1 if module == "fc1" else experts.linear_fc2
+    fused = experts.config.gradient_accumulation_fusion
     if fused:
 
         grad_dtype = getattr(expert_layer, "weight0").main_grad.dtype
     shape_attr = f"{module}_weight_shape"
-    weight_shape = getattr(self, shape_attr, None)
+    weight_shape = getattr(experts, shape_attr, None)
     if weight_shape is None:
         weight_shape = getattr(expert_layer, "weight0").shape
-        setattr(self, shape_attr, weight_shape)
+        setattr(experts, shape_attr, weight_shape)
     # Persistent per-slot main_grad sinks, allocated once and reused every
     # forward instead of a fresh torch.zeros per slot per call. Contents are
     # never read (echo slots are not optimizer Parameters).
@@ -652,223 +650,6 @@ def _grouped_mlp_set_expert_weights(
             w.main_grad = sink
         w.grad_added_to_main_grad = True
         setattr(expert_layer, f"weight{expert_index}", w)
-
-
-class TEGroupedMLP():
-    def forward(
-        self,
-        permuted_local_hidden_states,
-        tokens_per_expert,
-        permuted_probs,
-    ):
-        def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
-            # Whether activation function is interleaved GLU
-            with_glu_interleaving = (
-                self.config.gated_linear_unit
-                and self.config.moe_mlp_glu_interleave_size is not None
-            )
-            if self.config.use_te_activation_func:
-                if bias_parallel is not None:
-                    intermediate_parallel = intermediate_parallel + bias_parallel
-                if with_glu_interleaving:
-                    intermediate_parallel = self._remove_glu_interleaving(
-                        intermediate_parallel, self.config.moe_mlp_glu_interleave_size
-                    )
-                intermediate_parallel = self.activation_func(intermediate_parallel)
-                if permuted_probs is not None:
-                    original_dtype = intermediate_parallel.dtype
-                    intermediate_parallel = intermediate_parallel * permuted_probs
-                    intermediate_parallel = intermediate_parallel.to(original_dtype)
-            elif self.config.bias_activation_fusion and not with_glu_interleaving:
-                if self.activation_func == F.silu and self.config.gated_linear_unit:
-                    # dtype is handled inside the fused kernel
-                    intermediate_parallel = weighted_bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        permuted_probs,
-                        self.config.activation_func_fp8_input_store,
-                    )
-                elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
-                    intermediate_parallel = weighted_bias_quick_geglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        permuted_probs,
-                        self.config.activation_func_fp8_input_store,
-                        self.config.glu_linear_offset,
-                        self.config.activation_func_clamp_value,
-                    )
-                else:
-                    raise ValueError(
-                        "Only support fusion of swiglu and quick_gelu in TEGroupedMLP."
-                    )
-            elif (
-                self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
-            ):
-                assert (
-                    bias_parallel is None
-                ), "Bias is not supported with fused weighted squared relu."
-                intermediate_parallel = weighted_squared_relu_impl(
-                    intermediate_parallel, permuted_probs
-                )
-            else:
-                from hcu_megatron.core.fusions.fused_bias_gelu import fused_bias_gelu
-
-                intermediate_parallel = fused_bias_gelu(self, intermediate_parallel, permuted_probs)
-
-            return intermediate_parallel
-
-
-class PrimusTurboGroupedMLP(MegatronCoreTEGroupedMLP):
-    def __init__(
-        self,
-        num_local_experts: int,
-        config: TransformerConfig,
-        submodules: GroupedMLPSubmodules,
-        pg_collection: Optional[ProcessGroupCollection] = None,
-    ):
-        args = get_args()
-
-        super().__init__(
-            num_local_experts,
-            config,
-            submodules,
-            pg_collection,
-        )
-
-        self.use_primus_fused_act_with_probs = args.use_primus_fused_act_with_probs
-
-    def bias_act_func_with_mask(
-        self,
-        intermediate_parallel: torch.Tensor,
-        bias_parallel: torch.Tensor,
-        permuted_probs: torch.Tensor,
-        tokens_per_experts: Union[torch.Tensor, None] = None,
-    ):
-        if self.use_primus_fused_act_with_probs:
-            from hcu_megatron.core.extensions.primus_turbo import (
-                fused_bias_act_with_probs,
-            )
-
-            assert (
-                tokens_per_experts is not None
-            ), "tokens_per_experts is required when `use_primus_fused_act_with_probs` is True."
-
-            if self.activation_func == F.silu and self.config.gated_linear_unit:
-                activation = "silu"
-            elif self.activation_func == F.gelu and self.config.gated_linear_unit:
-                activation = "gelu"
-            else:
-                raise ValueError(
-                    "Only support fusion of swiglu and gelu in PrimusGroupedMLP when `use_primus_fused_act_with_probs` is True."
-                )
-
-            # `forward()` unsqueeze(-1)'s `permuted_probs` to [tokens, 1] so the non-fused
-            # asserts ndim == 1. Squeeze back to 1D for the fused kernel only.
-            probs_1d = permuted_probs.squeeze(-1) if permuted_probs.dim() == 2 else permuted_probs
-            # dtype is handled inside the fused kernel
-            return fused_bias_act_with_probs(
-                intermediate_parallel, bias_parallel, probs_1d, tokens_per_experts, activation
-            )
-        else:
-            # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
-            return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
-
-    def _apply_bias(self, intermediate_parallel, bias_parallel, tokens_per_expert, permuted_probs):
-        if bias_parallel is None:
-            return intermediate_parallel
-
-        tokens_per_expert_cpu = tokens_per_expert.tolist()
-
-        return super()._apply_bias(
-            intermediate_parallel,
-            bias_parallel,
-            tokens_per_expert_cpu,
-            permuted_probs,
-        )
-
-    def forward(
-        self,
-        permuted_local_hidden_states: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
-        permuted_probs: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Forward of PrimusGroupedMLP
-
-        Args:
-            permuted_local_hidden_states (torch.Tensor): The permuted input hidden states of the
-            local experts.
-            tokens_per_expert (torch.Tensor): The number of tokens per expert.
-            permuted_probs (torch.Tensor): The permuted probs of each token produced by the router.
-
-        Return:
-            output (torch.Tensor): The output of the local experts.
-        """
-        if self.config.fp8 or self.config.fp4:
-            # NOTE: When moe_router_padding_for_quantization is true the token is padded. So we can skip the padding here to reduce cpu sync.
-            tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
-            actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
-            permuted_local_hidden_states, tokens_per_expert_cpu = self.quantization_padding(
-                permuted_local_hidden_states, tokens_per_expert_cpu
-            )
-            permuted_probs, _ = self.quantization_padding(
-                permuted_probs.unsqueeze(-1), actual_tokens_per_expert_cpu
-            )
-            tokens_per_expert = torch.tensor(
-                tokens_per_expert_cpu, device=permuted_local_hidden_states.device
-            )
-        else:
-            permuted_probs = permuted_probs.unsqueeze(-1)
-
-        if self.config.moe_apply_probs_on_input:
-            assert (
-                self.config.moe_router_topk == 1
-            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
-            original_dtype = permuted_local_hidden_states.dtype
-            permuted_local_hidden_states = permuted_probs * permuted_local_hidden_states
-            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
-            # Probs already applied, so reset to 1.
-            permuted_probs = torch.ones_like(permuted_probs)
-
-        with off_interface(
-            self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
-        ) as permuted_local_hidden_states:
-            fc1_output, bias_parallel = apply_module(self.linear_fc1)(
-                permuted_local_hidden_states, tokens_per_expert
-            )
-        if self.offload_expert_fc1:
-            fc1_output = off_interface.group_commit(
-                fc1_output,
-                name="expert_fc1",
-                forced_released_tensors=[permuted_local_hidden_states],
-            )
-
-        if self.activation_recompute:
-            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                # NOTE: use the bias_act_func_with_mask instead of the bias_act_func to reduce the extra compute when stage of `sync_free_moe` is 3.
-                bias_act_output = self.activation_checkpoint.checkpoint(
-                    self.bias_act_func_with_mask, fc1_output, bias_parallel, permuted_probs, tokens_per_expert
-                )
-        else:
-            with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                bias_act_output = self.bias_act_func(fc1_output, bias_parallel, permuted_probs)
-        output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
-        if self.activation_recompute:
-            self.activation_checkpoint.discard_output_and_register_recompute(output)
-
-        # Delay the offload of the moe act until after the linear_fc2 has been computed
-        # to make sure the fc1_output is reloaded to GPU before recomputing moe_act.
-        if self.offload_moe_act:
-            output = off_interface.group_commit(output, name="moe_act", forced_released_tensors=[fc1_output])
-        output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
-
-        # upad and concat the output
-        if self.config.fp8 or self.config.fp4:
-            output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
-
-        output_bias = None
-
-        return output, output_bias
 
 
 from .experts_overlap import _grouped_mlp_forward_with_dispatch_overlap

@@ -98,23 +98,3 @@ class EchoExpertFeature(AbstractFeature):
                 '--moe-router-force-load-balancing to see auction/sinkhorn/greedy effects.'
             )
         return args
-
-    def register_patches(self, patch_manager, args):
-        if not getattr(args, 'moe_enable_echo', False):
-            return
-
-        from hcu_megatron.core.transformer.moe.moe_layer import (
-            echo_forward_wrapper,
-            moe_layer_init_echo_wrapper,
-        )
-
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
-            moe_layer_init_echo_wrapper,
-            apply_wrapper=True,
-        )
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.forward',
-            echo_forward_wrapper,
-            apply_wrapper=True,
-        )

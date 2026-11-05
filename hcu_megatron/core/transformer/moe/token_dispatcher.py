@@ -585,6 +585,8 @@ class MoEElasticExpertDispatcher:
         """One-shot: preprocess + A2A + sort. Returns list of dispatched weights."""
         preprocessed = self.expert_dispatch_preprocess(metadata, *expert_weights)
         return self.expert_dispatch_communication(metadata, preprocessed, *expert_weights)
+
+
 # ============================================================================
 # DeepEP expert-weight dispatcher: BF16 chunks, synchronous and overlap paths.
 # Each (home expert, echo slot) copy is routed as rows with top-k=1.
@@ -653,7 +655,8 @@ class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
     Uses the standard high-throughput Buffer API. Overlap launches asynchronous
     dispatch on a side stream and waits only when echo GEMM needs the weights.
     """
-
+    # Validated with simulated FC1 and FC2 weight matrices in DeepEP chunked communication benchmarks.
+    # With stable timings, 8192 performed well and similarly to larger chunks, so it remains the default.
     weight_chunk_size = 8192
 
     def __init__(self, config, pg_collection):
