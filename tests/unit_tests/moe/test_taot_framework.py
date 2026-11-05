@@ -1,4 +1,5 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
 """TAOT framework unit tests and EP integration tests.
 
 Framework tests use fake runtimes. Integration tests use real TE, Triton and
