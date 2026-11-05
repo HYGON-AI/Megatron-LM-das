@@ -154,6 +154,9 @@ def run_checks(gg, permute_fusion=False):
     COMMON.clear()
     if permute_fusion:
         COMMON["moe_permute_fusion"] = True
+    # Exact fp32 matmuls for the comparisons; the previous values are restored in finally so
+    # later tests in the same process keep their TF32 settings.
+    tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     # Same wrapper the ExpertPlacementFeature registers; restored so other tests see the stock layer.
@@ -188,6 +191,7 @@ def run_checks(gg, permute_fusion=False):
         return int(failed)
     finally:
         MoELayer.route = route
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
         COMMON.clear()
         Utils.destroy_model_parallel()
 

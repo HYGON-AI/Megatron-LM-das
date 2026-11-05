@@ -238,6 +238,9 @@ def check_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir):
 def run_checks(grouped):
     """Run all checks on an initialized EP group; returns the global failure count."""
     FAILURES.clear()
+    # Exact fp32 matmuls for the comparisons; the previous values are restored in finally so
+    # later tests in the same process keep their TF32 settings.
+    tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     ep_size = ps.get_expert_model_parallel_world_size()
@@ -263,6 +266,7 @@ def run_checks(grouped):
         check_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir)
     finally:
         MoELayer.route, MoELayer.sharded_state_dict = route, sharded
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
         # Every rank must be done reading the placement file and checkpoint before rank 0
         # removes them.
         dist.barrier()
