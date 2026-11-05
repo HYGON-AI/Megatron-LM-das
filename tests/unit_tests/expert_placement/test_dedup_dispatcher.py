@@ -35,8 +35,8 @@ from megatron.core import parallel_state as ps  # noqa: E402
 from megatron.core.transformer.moe.moe_layer import MoELayer  # noqa: E402
 from tests.unit_tests.test_utilities import Utils  # noqa: E402
 from test_expert_placement import (  # noqa: E402
-    FAILURES, HIDDEN, MBS, NUM_EXPERTS, SEQ, build, check, close, copy_permuted, gather_slots,
-    make_config, set_placement,
+    FAILURES, HIDDEN, MBS, NUM_EXPERTS, SEQ, adaptor_args_initialized, build, check, close,
+    copy_permuted, gather_slots, make_config, set_placement,
 )
 
 from hcu_megatron.core.transformer.moe import expert_placement as ec  # noqa: E402
@@ -198,7 +198,8 @@ def test_dedup_dispatcher_equivalence(grouped):
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if world < 2 or NUM_EXPERTS % world:
         pytest.skip(f"requires torchrun with a world size > 1 that divides {NUM_EXPERTS}")
-    failed = run_checks(grouped)
+    with adaptor_args_initialized():
+        failed = run_checks(grouped)
     assert failed == 0, f"{failed} dedup dispatcher check(s) failed: {FAILURES}"
 
 

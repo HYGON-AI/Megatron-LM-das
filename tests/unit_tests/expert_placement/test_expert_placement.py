@@ -23,8 +23,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -42,10 +44,30 @@ from megatron.core.transformer.spec_utils import get_submodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.unit_tests.test_utilities import Utils
 
+import hcu_megatron.training.arguments as hcu_arguments
 from hcu_megatron.core.transformer.moe import expert_placement as ec
 
 NUM_EXPERTS, TOPK, HIDDEN, SEQ, MBS = 16, 4, 64, 32, 2
 FAILURES = []
+
+
+@contextmanager
+def adaptor_args_initialized():
+    """Provide HCU adaptor args for the duration of a test if none are set.
+
+    When the whole suite runs in one process (CI), an earlier test may have imported
+    hcu_megatron.megatron_adaptor, which wraps parallel_state.initialize_model_parallel with
+    code that reads get_adaptor_args(), and then called destroy_adaptor_args() on teardown.
+    Only args created here are removed again.
+    """
+    created = hcu_arguments._ADAPTOR_ARGS is None
+    if created:
+        hcu_arguments.set_adaptor_args(hcu_arguments.parse_adaptor_args())
+    try:
+        yield
+    finally:
+        if created:
+            hcu_arguments.destroy_adaptor_args()
 
 
 def check(cond, msg):
@@ -226,6 +248,7 @@ def run_checks(grouped):
     route, sharded = MoELayer.route, MoELayer.sharded_state_dict
     MoELayer.route = ec.moe_layer_route_placement_wrapper(route)
     MoELayer.sharded_state_dict = ec.moe_layer_sharded_state_dict_placement_wrapper(sharded)
+    tmp = [None]
     try:
         phys2log = torch.randperm(NUM_EXPERTS, generator=torch.Generator().manual_seed(0)).tolist()
         tmp = [tempfile.mkdtemp(prefix="ec_placement_test_") if dist.get_rank() == 0 else None]
@@ -240,6 +263,12 @@ def run_checks(grouped):
         check_checkpoint(ep_size, grouped, ref, test, phys2log, ckpt_dir)
     finally:
         MoELayer.route, MoELayer.sharded_state_dict = route, sharded
+        # Every rank must be done reading the placement file and checkpoint before rank 0
+        # removes them.
+        dist.barrier()
+        if dist.get_rank() == 0 and tmp[0] is not None:
+            shutil.rmtree(tmp[0], ignore_errors=True)
+        dist.barrier()
 
     failed = torch.tensor([len(FAILURES)], device="cuda")
     dist.all_reduce(failed)
@@ -252,11 +281,12 @@ def test_expert_placement_equivalence(grouped):
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if world < 2 or NUM_EXPERTS % world:
         pytest.skip(f"requires torchrun with a world size > 1 that divides {NUM_EXPERTS}")
-    Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=world)
-    try:
-        failed = run_checks(grouped)
-    finally:
-        Utils.destroy_model_parallel()
+    with adaptor_args_initialized():
+        Utils.initialize_model_parallel(tensor_model_parallel_size=1, expert_model_parallel_size=world)
+        try:
+            failed = run_checks(grouped)
+        finally:
+            Utils.destroy_model_parallel()
     assert failed == 0, f"{failed} expert placement check(s) failed: {FAILURES}"
 
 
