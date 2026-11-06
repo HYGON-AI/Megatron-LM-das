@@ -109,7 +109,6 @@ from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelpe
 from megatron.core.utils import unwrap_model
 from megatron.training.config import FaultInjectorConfig
 from megatron.training.initialize import write_args_to_tensorboard
-from hcu_megatron.training.route_collector import get_route_collector, init_route_collector
 
 try:
     from torch_memory_saver import torch_memory_saver
@@ -196,6 +195,7 @@ from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data
 from hcu_megatron.core.distributed.power_sgd import EFLayoutManager
 from hcu_megatron.core.parallel_state import set_train_iter
 from hcu_megatron.training import get_args
+from hcu_megatron.training.route_collector import get_route_collector, init_route_collector
 
 stimer = StragglerDetector()
 
