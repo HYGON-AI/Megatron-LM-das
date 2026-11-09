@@ -239,4 +239,91 @@ def linear_cross_entropy(
     return _impl(hidden, weight, labels, tp_group, reduction, ignore_index, sequence_parallel)
 
 
-__all__ = ["linear_cross_entropy", "LinearCrossEntropy"]
+def linear_cross_entropy_for_training(
+    hidden: torch.Tensor,
+    weight: torch.Tensor,
+    labels: torch.Tensor,
+    loss_mask: torch.Tensor,
+    ignore_index: int = -100,
+) -> torch.Tensor:
+    """Compute HCU Linear CE while preserving Megatron's token-loss contract.
+
+    Megatron's GPT training loop expects the model to return a contiguous
+    ``[batch, sequence]`` tensor of token losses.  The current HCU native
+    operator deliberately exposes only a scalar, mean-reduced DP loss.  This
+    adapter masks labels before the native call, then expands and scales that
+    scalar so the existing training loss function still computes the same
+    summed loss and gradient without materializing vocabulary logits.
+
+    ``loss_mask`` must be binary.  A non-binary weighted loss mask cannot be
+    represented by the current mean-only native operator.
+    """
+    if labels.shape != loss_mask.shape:
+        raise ValueError(
+            "labels and loss_mask must have identical [batch, sequence] shapes, got "
+            f"{tuple(labels.shape)} and {tuple(loss_mask.shape)}"
+        )
+    if labels.dim() != 2:
+        raise ValueError(
+            "HCU Linear Cross Entropy training expects labels and loss_mask with "
+            f"[batch, sequence] shape, got {tuple(labels.shape)}"
+        )
+    if labels.numel() == 0:
+        raise ValueError("HCU Linear Cross Entropy training requires at least one token")
+    if hidden.dim() != labels.dim() + 1:
+        raise ValueError(
+            "hidden must have one more dimension than labels, got "
+            f"hidden.dim={hidden.dim()} and labels.dim={labels.dim()}"
+        )
+    expected_hidden_shape = (labels.shape[1], labels.shape[0])
+    if tuple(hidden.shape[:-1]) != expected_hidden_shape:
+        raise ValueError(
+            "hidden must use Megatron's [sequence, batch, hidden] layout matching labels; "
+            f"got hidden {tuple(hidden.shape)} and labels {tuple(labels.shape)}"
+        )
+
+    # The standard pretraining data path supplies a binary mask.  Avoid a
+    # device-to-host synchronization here while still rejecting weighted masks,
+    # whose semantics cannot be represented by the current mean-only native op.
+    torch._assert_async(
+        torch.all((loss_mask == 0) | (loss_mask == 1)),
+        "HCU Linear Cross Entropy requires a binary loss_mask",
+    )
+    valid_tokens = (loss_mask != 0) & (labels != ignore_index)
+    native_labels = torch.where(
+        valid_tokens, labels, torch.full_like(labels, ignore_index)
+    ).transpose(0, 1).contiguous()
+    num_valid_tokens = valid_tokens.sum()
+
+    # Native mean CE returns NaN when every token is ignored.  Keep one benign
+    # target for the launch, then multiply its contribution by zero below.  The
+    # returned loss and all gradients are consequently zero, matching the
+    # existing masked-token training contract.
+    safe_native_labels = native_labels.view(-1).clone()
+    safe_native_labels[0] = torch.where(
+        num_valid_tokens == 0,
+        torch.zeros((), dtype=safe_native_labels.dtype, device=safe_native_labels.device),
+        safe_native_labels[0],
+    )
+    safe_native_labels = safe_native_labels.view_as(native_labels)
+
+    native_loss = linear_cross_entropy(
+        hidden.contiguous(),
+        weight.contiguous(),
+        safe_native_labels,
+        tp_group=None,
+        reduction="mean",
+        ignore_index=ignore_index,
+        sequence_parallel=False,
+    )
+
+    # ``pretrain_gpt.loss_func`` subsequently computes
+    # ``sum(token_losses * loss_mask)``.  Scale the native mean so this equals
+    # the conventional sum over valid tokens, including labels that were
+    # already equal to ``ignore_index``.
+    schedule_token_count = loss_mask.float().sum().clamp_min(1.0)
+    schedule_loss = native_loss * num_valid_tokens.to(native_loss.dtype) / schedule_token_count
+    return schedule_loss.expand_as(labels).contiguous()
+
+
+__all__ = ["linear_cross_entropy", "linear_cross_entropy_for_training", "LinearCrossEntropy"]
