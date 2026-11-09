@@ -5,7 +5,7 @@
 import torch
 import torch.nn.functional as F
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 from megatron.core import tensor_parallel
 from megatron.core.activations import squared_relu
 from megatron.core.fusions.fused_bias_geglu import quick_gelu, weighted_bias_quick_geglu_impl
@@ -383,7 +383,7 @@ class PrimusGroupedMLP(MegatronCoreTEGroupedMLP):
         # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return super()._apply_bias(
+        return MegatronCoreTEGroupedMLP._apply_bias(
             intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
         )
 
@@ -495,3 +495,169 @@ class PrimusGroupedMLP(MegatronCoreTEGroupedMLP):
         output_bias = None
 
         return output, output_bias
+
+
+# Bridge TE fused wgrad buffers and differentiable echo weight transport.
+#
+# Like Loong-Megatron's HybridEPExpertDispatch.backward, replica gradients are
+# explicitly added to home main_grad: MCore's DDP hook skips ordinary gradients
+# once the home fused GEMM has set grad_added_to_main_grad.
+#
+# Synchronous AlltoAll/DeepEP and overlap weight backward run on the compute
+# stream. Overlap registers its autograd exchange on that stream too, so home
+# and replica additions are ordered without a global pending-gradient queue.
+class _EchoHomeWeightGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, weight):
+        if getattr(weight, 'main_grad', None) is None:
+            raise RuntimeError('Fused echo dispatch requires a home weight main_grad buffer')
+        ctx.weight = weight
+        return weight.view_as(weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        weight = ctx.weight
+        weight.main_grad.add_(grad_output)
+        weight.grad_added_to_main_grad = True
+        # Trigger the leaf/DDP hook, which must not accumulate this branch again.
+        return torch.zeros_like(weight)
+
+
+class _EchoReplicaWeightGrad(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, weight, main_grad):
+        # Each in-flight forward owns its buffer. Do not reuse a module slot's
+        # buffer: pipeline microbatches can replace slots before backward.
+        ctx.main_grad = main_grad
+        ctx.weight_dtype = weight.dtype
+        return weight.view_as(weight)
+
+    @staticmethod
+    def backward(ctx, dummy_grad):
+        # TE has already computed wgrad into this buffer. Its autograd output
+        # is only a scheduling dummy, and can contain uninitialized values.
+        return ctx.main_grad.to(dtype=ctx.weight_dtype), None
+
+
+def echo_dispatch_home_weights(weights, fused):
+    """Wrap only the weight-dispatch branch; TE keeps original home Parameters."""
+    if not fused:
+        return weights
+    return [_EchoHomeWeightGrad.apply(weight) for weight in weights]
+
+
+def echo_replica_weight(weight, grad_dtype):
+    """Expose a uniform-dtype wgrad output to TE and return it to transport."""
+    main_grad = torch.zeros_like(weight, dtype=grad_dtype)
+    replica = _EchoReplicaWeightGrad.apply(weight, main_grad)
+    replica.main_grad = main_grad
+    replica.grad_added_to_main_grad = False
+    return replica
+
+
+class DummyFunction(torch.autograd.Function):
+    """Autograd placeholder for empty echo expert weight tensors.
+
+    When a spare-expert slot receives no tokens on this rank, its weight
+    tensor is empty (numel==0). We still need to place *some* tensor at
+    `weight{i}` so TE's GroupedLinear doesn't crash. DummyFunction wraps an
+    empty tensor into a graph node whose backward returns zero gradient.
+    """
+    @staticmethod
+    def forward(ctx, x, weight_shape):
+        ctx.input = x
+        dummy_weight = torch.empty(weight_shape, dtype=x.dtype, device=x.device)
+        return dummy_weight
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return torch.zeros_like(ctx.input), None
+
+
+def _grouped_mlp_free_expert_parameters(experts, expert_indices: List[int]):
+    """Free the nn.Parameter slots for the given expert indices on this rank.
+
+    Called once at init (or before first echo forward) so the runtime can
+    later reinstall dispatched weights via `set_expert_weights` without
+    conflicting with autograd registration.
+    """
+    to_free_weight_names = [f'weight{i}' for i in expert_indices]
+    for module in [experts.linear_fc1, experts.linear_fc2]:
+        for name, _ in list(module.named_parameters()):
+            if name in to_free_weight_names:
+                delattr(module, name)
+                module._parameters.pop(name, None)
+
+
+def _grouped_mlp_get_expert_weights(
+    experts, module: str, expert_indices: List[int]
+) -> List[torch.Tensor]:
+    """Return per-expert weight tensors for the given indices."""
+    assert module in ("fc1", "fc2"), f"Invalid module: {module}"
+    expert_layer = experts.linear_fc1 if module == "fc1" else experts.linear_fc2
+    return [getattr(expert_layer, f"weight{i}") for i in expert_indices]
+
+
+def _grouped_mlp_set_expert_weights(
+    experts,
+    module: str,
+    expert_weights: List[torch.Tensor],
+    expert_indices: List[int],
+):
+    """Install (in-place) dispatched weights onto per-expert slots.
+
+    Uses setattr rather than nn.Parameter registration so echo can rewrite
+    weights each forward without triggering optimizer state confusion.
+
+    """
+    assert module in ("fc1", "fc2"), f"Invalid module: {module}"
+    expert_layer = experts.linear_fc1 if module == "fc1" else experts.linear_fc2
+    fused = experts.config.gradient_accumulation_fusion
+    if fused:
+
+        grad_dtype = getattr(expert_layer, "weight0").main_grad.dtype
+    shape_attr = f"{module}_weight_shape"
+    weight_shape = getattr(experts, shape_attr, None)
+    if weight_shape is None:
+        weight_shape = getattr(expert_layer, "weight0").shape
+        setattr(experts, shape_attr, weight_shape)
+    # Persistent per-slot main_grad sinks, allocated once and reused every
+    # forward instead of a fresh torch.zeros per slot per call. Contents are
+    # never read (echo slots are not optimizer Parameters).
+    sinks = getattr(expert_layer, "_echo_main_grad_sinks", None)
+    if sinks is None:
+        sinks = {}
+        setattr(expert_layer, "_echo_main_grad_sinks", sinks)
+    for i, expert_index in enumerate(expert_indices):
+        w = expert_weights[i]
+        if w.numel() == 0:
+            w = DummyFunction.apply(w, weight_shape)
+        if isinstance(w, torch.nn.Parameter):
+            # Restoring a home slot must never mark its DDP buffer as written.
+            setattr(expert_layer, f"weight{expert_index}", w)
+            continue
+        if fused:
+            w = echo_replica_weight(w, grad_dtype)
+            setattr(expert_layer, f"weight{expert_index}", w)
+            continue
+        # Attach TE-compatible attrs so backward doesn't crash on missing
+        # main_grad. Echo slots don't accumulate gradients across steps.
+        if not hasattr(w, "main_grad"):
+            sink = sinks.get(expert_index)
+            if sink is None or sink.dtype != w.dtype or sink.device != w.device:
+                sink = torch.zeros(weight_shape, dtype=w.dtype, device=w.device)
+                sinks[expert_index] = sink
+            w.main_grad = sink
+        w.grad_added_to_main_grad = True
+        setattr(expert_layer, f"weight{expert_index}", w)
+
+
+from .experts_overlap import _grouped_mlp_forward_with_dispatch_overlap
+
+__all__ = [
+    'DummyFunction',
+    '_grouped_mlp_free_expert_parameters',
+    '_grouped_mlp_get_expert_weights',
+    '_grouped_mlp_set_expert_weights',
+    '_grouped_mlp_forward_with_dispatch_overlap',
+]
