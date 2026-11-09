@@ -1,5 +1,5 @@
 trl
-transformers==5.11.0
+transformers==5.16.1
 packaging
 six
 regex
