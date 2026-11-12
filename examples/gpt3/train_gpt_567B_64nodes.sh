@@ -114,7 +114,7 @@ MOE_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
     --split 98,2,0
