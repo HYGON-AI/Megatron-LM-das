@@ -23,6 +23,7 @@ CHECKPOINT_PATH=""                                                       # path 
 TRAIN_SCRIPT=${TRAIN_SCRIPT:-train_llama3_8B.sh}                         # script under this example directory to run
 NCCL_ENV=${NCCL_ENV:-${MEGATRON_PATH}/requirements/env.sh}                            # Please adjust the variables based on the actual NET being used
 LAUNCH_WITH_BINDING=${MEGATRON_PATH}/requirements/launch_with_binding.sh # Please adjust the variables based on the actual NET being used
+SSH_PORT=${SSH_PORT:-}                                                   # mpirun 跨机 ssh 端口；容器 sshd 不是默认 22 时必须设置（hcu-bench 跑时由 container.ssh_port 自动注入）
 
 if [[ "${LAUNCHER}" != "mpirun" && "${LAUNCHER}" != "torchrun" ]]; then
     echo "Only mpirun and torchrun are supported as launch methods"
@@ -49,6 +50,13 @@ else
     MASTER_PORT=${MASTER_PORT:-25900}
 fi
 
+# mpirun 默认走 22 端口 ssh 到远端节点拉起进程；容器内 sshd 常不是 22，跨机必须用
+# plm_rsh_args 传实际端口，否则会卡在连接超时/被拒（root@<node>: Permission denied）。
+MPIRUN_SSH_ARGS=""
+if [[ "${LAUNCHER}" == "mpirun" && -n "${SSH_PORT}" ]]; then
+    MPIRUN_SSH_ARGS="--mca plm_rsh_args '-p ${SSH_PORT}'"
+fi
+
 torchrun_args=""
 if [[ "${LAUNCHER}" == "torchrun" ]]; then
     torchrun_args+="
@@ -69,6 +77,7 @@ CMD="mpirun -np ${MPIRUN_NP} --hostfile ${HOSTFILE} \
     --allow-run-as-root \
     --bind-to none \
     --mca plm_rsh_no_tree_spawn 1 \
+    ${MPIRUN_SSH_ARGS} \
     ${torchrun_args} \
     bash -c '
     source ${DTK_ENV} && \

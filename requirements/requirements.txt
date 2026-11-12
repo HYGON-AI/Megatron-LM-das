@@ -1,5 +1,5 @@
 trl
-transformers == 5.11.0
+transformers==5.16.1
 packaging
 six
 regex
@@ -8,16 +8,12 @@ sentencepiece
 pybind11
 blobfile
 flux
-tiktoken
-# torch == 2.9.0
-numpy == 1.26.0
+tiktoken==0.14.0
+numpy==1.26.0
 nvidia-modelopt
-flash-linear-attention == 0.5.1
-
+flash-linear-attention==0.5.2
 hydra-core
 omegaconf
-tilelang
-# ==== test ====
 nltk
 pytest
 requests 
@@ -26,10 +22,15 @@ tensorboard
 tensorboardX
 scipy
 psutil
-setuptools == 80.8.0
-setuptools-scm == 9.2.2
-modelscope
-wandb
+setuptools==80.8.0
+setuptools-scm==9.2.2
+modelscope==1.40.1
+wandb==0.18.7
 openai
 uvicorn
 pytest-mock
+megatron-energon
+emerging-optimizers
+nemo_run==0.4.0
+torchx
+diffusers
