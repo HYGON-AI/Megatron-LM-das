@@ -53,13 +53,13 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GPU_MAX_HW_QUEUES=4
 
 # split hyperparameters
-TP=2
-PP=1
+TP=1
+PP=2
 CP=1
 
 # batch hyperparameters
 MBS=1
-GBS=256
+GBS=64
 
 # seq hyperparameters
 SEQ_LEN=4096
