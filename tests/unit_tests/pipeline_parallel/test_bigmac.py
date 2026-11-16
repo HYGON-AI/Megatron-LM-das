@@ -3,7 +3,7 @@
 
 # CPU algorithm checks; no model weights or distributed runtime are required.
 # Run from the repository root:
-# python -B tests/unit_tests/pipeline_parallel/test_bigmac_algorithm.py -v
+# python -B tests/unit_tests/pipeline_parallel/test_bigmac.py -v
 
 import os
 import sys
