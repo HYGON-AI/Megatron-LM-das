@@ -91,6 +91,8 @@ def unpermute(
 ### 项目支持UltraEP
 + 项目支持基于冗余专家副本的MoE在线负载均衡及自动调优。具体使用说明见[UltraEP](./docs/features/ultraep.md)
 
+### 项目支持BigMac
++ 项目支持BigMac流水线并行优化，可提升多模态大模型的训练性能。具体使用说明见[BigMac](./docs/features/bigmac.md)
 
 ### 项目支持量化通信
 + 项目支持量化通信，对all-to-all通信数据进行低精度表示，减少通信量。具体见[all2all量化通信](./docs/features/quantize-all2all.md)
