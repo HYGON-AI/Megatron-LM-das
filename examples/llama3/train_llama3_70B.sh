@@ -59,7 +59,7 @@ CP=1
 
 # batch hyperparameters
 MBS=1
-GBS=512
+GBS=256
 
 # seq hyperparameters
 SEQ_LEN=4096

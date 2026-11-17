@@ -11,8 +11,9 @@ CI 划分为两条独立流水线：PR 只执行单元测试，Nightly 只执行
 | `Nightly Test (HCU)` | 每天 19:00 UTC（北京时间次日 03:00）、手动触发 | Qwen3-8B pretrain 10 steps、Qwen3-8B SFT 10 steps、Qwen3-VL-8B SFT 10 steps |
 
 Nightly 的手动入口支持 `all`、`pretrain`、`sft`、`vl_sft`。选择 `all` 时，三个训练
-用例在同一台 8 卡 runner 上按 pretrain、SFT、VL SFT 的顺序串行运行，并在每个阶段后
-恢复 runner 工作区属主。即使前一阶段失败，属主恢复成功后仍会继续运行后续阶段，最终由
+用例按 pretrain、SFT、VL SFT 的顺序串行运行，每个训练 job 使用一台 8 卡 runner。
+测试和属主恢复 job 从组织 `ci-general` 组申请标签为 `[self-hosted, ci, bw1100]` 的 runner，
+不保证不同 job 分配到同一台机器。即使前一阶段失败，属主恢复 job 成功后仍会继续运行后续阶段，最终由
 `Finish` 汇总三项结论。
 
 ## Qwen3-8B 训练入口
@@ -58,7 +59,6 @@ env.sh 用 `$0` 推算该变量，被别的脚本 source 时会算成 `/`。它�
 
 | 变量 | PR | Nightly | 说明 |
 |---|---|---|---|
-| `DAS_HCU_CI_RUNNER_LABEL` | 必填 | 必填 | 专用 HCU runner 标签 |
 | `DAS_HCU_CI_IMAGE` | 必填 | 必填 | 训练镜像滚动 tag，形如 `<harbor>/megatron:0.18.2-latest` |
 | `DAS_HCU_ASSET_ROOT` | - | 必填 | 模型和数据共同根目录，只读挂载 |
 | `DAS_QWEN3_8B_MODEL_PATH` | - | 必填 | Qwen3-8B Hugging Face 模型绝对路径 |
@@ -87,11 +87,12 @@ Bridge 子模块，再设置 `PYTHONPATH`。PR 将 `BUCKET=tests/unit_tests` 传
 
 1. PR 使用 `pull_request_target`，workflow 控制逻辑来自目标分支；checkout 显式使用
    PR head repository 与 head SHA。
-2. PR 的控制面 job 运行在 GitHub-hosted runner；测试和属主恢复使用专用、隔离的
-   self-hosted HCU runner。
+2. PR 的控制面 job 运行在 GitHub-hosted runner；测试和属主恢复使用组织 `ci-general`
+   组中带 `[self-hosted, ci, bw1100]` 标签的 runner，不再依赖 `DAS_HCU_CI_RUNNER_LABEL`。
 3. workflow 权限为只读，不向 PR 测试注入仓库 secrets。
 4. Nightly 只运行目标分支代码，不接受 PR head，并使用只读真实资产。
-5. 每个容器测试阶段后都恢复工作区属主，避免持久 runner 的后续 checkout 失败。
+5. 属主恢复是独立 job，只处理其被分配节点上的工作区；多节点池不保证它与测试 job
+   同机，因此当前流程不能保证修复测试节点上残留的属主问题。
 
 ## 镜像
 
