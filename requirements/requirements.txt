@@ -9,7 +9,7 @@ pybind11
 blobfile
 flux
 tiktoken==0.14.0
-numpy==1.26.0
+numpy
 nvidia-modelopt
 flash-linear-attention==0.5.2
 hydra-core
@@ -25,7 +25,7 @@ psutil
 setuptools==80.8.0
 setuptools-scm==9.2.2
 modelscope==1.40.1
-wandb==0.18.7
+wandb
 openai
 uvicorn
 pytest-mock

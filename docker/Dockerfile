@@ -12,7 +12,7 @@ ARG BASE_IMAGE      # dtk 基础镜像完整引用 (必传, 如 …/hcu/base/dtk
 ARG PIP_INDEX_URL       # 内网 pip 完整 index-url; CI 按 DTK 版本拼好传入 (...,/nightly/dtk2604/+simple/)
                         # trusted-host 由 Dockerfile 从链接自动提取; token 不再单独传/推导
 # --- AICC 编译器 ---
-ARG RESOURCE_SERVER_URL # 资源服务器地址
+ARG RESOURCE_SERVER_URL # 资源服务器地址 (必传, 构建期强校验); AICC 大版本由基础镜像 DTK_VERSION 派生
 ARG AICC_VERSION        # AICC 完整版本号, 可选; 缺省时按基础镜像 DTK_VERSION 派生大版本
 # --- 镜像信息 ---
 ARG BUILD_TIME          # 构建时间戳 (与产物 tag 的时间段一致, 如 20261009-1113); 缺省用当时时间
@@ -20,11 +20,11 @@ ARG BUILD_TIME          # 构建时间戳 (与产物 tag 的时间段一致, 如
 ARG TORCH_VERSION       # torch 大版本; das-install 的 torch_tag 由此推导
 # --- rccl-tests ---
 ARG RCCL_TEST           # rccl-tests 仓库地址 (必传, 构建期强校验)
-ARG RCCL_TESTS_COMMIT   # rccl-tests 锁定 commit
-ARG RCCL_GPU_TARGETS    # 编译目标 GPU 架构列表, 空格分隔
+ARG RCCL_TESTS_COMMIT   # rccl-tests 锁定 commit (必传, 构建期强校验)
+ARG RCCL_GPU_TARGETS    # 编译目标 GPU 架构列表 (必传, 构建期强校验), 空格分隔
 # --- run_nhc ---
 ARG RUN_NHC     # run_nhc 源码仓库地址 (必传, 构建期强校验)
-ARG RUN_NHC_COMMIT   # run_nhc 锁定 commit (必传)
+ARG RUN_NHC_COMMIT   # run_nhc 锁定 commit (必传, 构建期强校验)
 
 # ============================================================================
 # run_nhc 二进制构建阶段
@@ -36,45 +36,50 @@ ARG PIP_INDEX_URL
 ARG RUN_NHC
 ARG RUN_NHC_COMMIT
 
+# 依赖说明: run_nhc 仓库没有 requirements.txt; 全量扫描 import 后必需的第三方只有 requests
+# (redis / urllib3 在源码中均为 try/except 可选依赖, urllib3 随 requests 安装)
 RUN : "${PIP_INDEX_URL:?PIP_INDEX_URL build argument is required}" && \
     : "${RUN_NHC:?RUN_NHC build argument is required}" && \
+    : "${RUN_NHC_COMMIT:?RUN_NHC_COMMIT build argument is required}" && \
+    PIP_HOST="$(python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "${PIP_INDEX_URL}")" && \
+    if [ -z "${PIP_HOST}" ]; then echo "Error: cannot extract host from PIP_INDEX_URL"; exit 1; fi && \
     mkdir -p ~/.pip && \
     printf '%s\n' \
       '[global]' \
       "index-url = ${PIP_INDEX_URL}" \
-      "trusted-host = $(echo "${PIP_INDEX_URL}" | sed 's#^http\?://##; s#:.*##')" \
+      "trusted-host = ${PIP_HOST}" \
       > ~/.pip/pip.conf && \
     python3 -m pip install --no-cache-dir \
       --extra-index-url https://mirrors.aliyun.com/pypi/simple/ \
       --trusted-host mirrors.aliyun.com \
-      pyinstaller requests && \
+      'pyinstaller==6.11.1' 'requests==2.32.3' && \
     git clone "${RUN_NHC}" /src/run_nhc && \
-    if [ -n "${RUN_NHC_COMMIT}" ]; then \
-        cd /src/run_nhc && git checkout "${RUN_NHC_COMMIT}"; \
-    fi && \
-    cd /src/run_nhc/node_check && \
-    mkdir -p /src/pyi /src/pyi-work && \
-    python3 -m PyInstaller --clean --noconfirm --onedir \
-        --paths /src/run_nhc \
-        --distpath /src/pyi --workpath /src/pyi-work --specpath /src/pyi-work \
-        --name checkstatus_bin \
-        --add-data "${PWD}/etc:etc" \
-        --add-data "${PWD}/tools:tools" \
-        --add-data "${PWD}/version:." \
-        checkstatus.py && \
-    python3 -m PyInstaller --clean --noconfirm --onedir \
-        --paths /src/run_nhc \
-        --distpath /src/pyi --workpath /src/pyi-work --specpath /src/pyi-work \
-        --name generate_template_bin \
-        --add-data "${PWD}/etc:etc" \
-        --add-data "${PWD}/tools:tools" \
-        --add-data "${PWD}/version:." \
-        generate_template.py && \
-    mkdir -p /out/node_check/bin /out/node_check/log && \
-    cp -a /src/pyi/checkstatus_bin/checkstatus_bin /out/node_check/bin/checkstatus && \
-    cp -a /src/pyi/checkstatus_bin/_internal /out/node_check/bin/_internal && \
-    cp -a /src/pyi/generate_template_bin/_internal/. /out/node_check/bin/_internal/ && \
-    cp -a /src/pyi/generate_template_bin/generate_template_bin /out/node_check/bin/generate_template && \
+    cd /src/run_nhc && git checkout "${RUN_NHC_COMMIT}" && \
+    printf '%s\n' \
+      "src = '/src/run_nhc'" \
+      "nc = src + '/node_check'" \
+      "datas = [(nc + '/etc', 'etc'), (nc + '/tools', 'tools'), (nc + '/version', '.')]" \
+      "def analyze(script):" \
+      "    return Analysis([nc + '/' + script], pathex=[src], datas=datas," \
+      "                    hiddenimports=[], hookspath=[], hooksconfig={}," \
+      "                    runtime_hooks=[], excludes=[], noarchive=False)" \
+      "a_check = analyze('checkstatus.py')" \
+      "a_gen = analyze('generate_template.py')" \
+      "def make_exe(analysis, name):" \
+      "    return EXE(PYZ(analysis.pure), analysis.scripts, [], exclude_binaries=True," \
+      "               name=name, debug=False, bootloader_ignore_signals=False," \
+      "               strip=False, upx=False, console=True)" \
+      "exe_check = make_exe(a_check, 'checkstatus')" \
+      "exe_gen = make_exe(a_gen, 'generate_template')" \
+      "coll = COLLECT(exe_check, a_check.binaries, a_check.datas," \
+      "               exe_gen, a_gen.binaries, a_gen.datas," \
+      "               strip=False, upx=False, upx_exclude=[], name='bin')" \
+      > /src/run_nhc_bin.spec && \
+    mkdir -p /src/pyi-work /out/node_check/log && \
+    python3 -m PyInstaller --clean --noconfirm \
+        --distpath /src/pyi --workpath /src/pyi-work \
+        /src/run_nhc_bin.spec && \
+    cp -a /src/pyi/bin /out/node_check/bin && \
     find /out/node_check/bin/_internal -type f -name 'readline*.so' -delete && \
     cp -a /src/run_nhc/node_check/etc /out/node_check/etc
 
@@ -127,11 +132,13 @@ ARG RCCL_GPU_TARGETS
 
 # pip 配置 + das-install (trusted-host 自动从 PIP_INDEX_URL 提取 host)
 RUN : "${PIP_INDEX_URL:?PIP_INDEX_URL build argument is required (如 .../nightly/dtk2604/+simple/)}" && \
+    PIP_HOST="$(python3 -c 'import sys; from urllib.parse import urlparse; print(urlparse(sys.argv[1]).hostname or "")' "${PIP_INDEX_URL}")" && \
+    if [ -z "${PIP_HOST}" ]; then echo "Error: cannot extract host from PIP_INDEX_URL"; exit 1; fi && \
     mkdir -p ~/.pip && \
     printf '%s\n' \
     '[global]' \
     "index-url = ${PIP_INDEX_URL}" \
-    "trusted-host = $(echo "${PIP_INDEX_URL}" | sed 's#^http\?://##; s#:.*##')" \
+    "trusted-host = ${PIP_HOST}" \
     > ~/.pip/pip.conf && \
     pip install --ignore-installed --no-cache-dir blinker && \
     printf '%s\n' \
@@ -147,14 +154,16 @@ RUN : "${PIP_INDEX_URL:?PIP_INDEX_URL build argument is required (如 .../nightl
 
 # AICC 编译器 (安装脚本从资源服务器拉取 Nightly 下对应大版本的最新包, 安装成功后
 # 会在 $DTK_DIR/hcu_llvm.info 写入本次完整版本/commit 等记录; 口径同 vllm-plugin)
-# AICC 大版本按基础镜像的 DTK_VERSION (token 格式) 派生, 显式传入 AICC_VERSION 时优先使用
+# AICC 大版本按基础镜像的 DTK_VERSION (token 格式) 派生
+# AICC_VERSION 只是完整构建号 (如 a33f28_202608121638), 可选
 ENV AICC_VERSION=${AICC_VERSION}
 
-RUN TOKEN="${AICC_VERSION:-${DTK_VERSION}}" && \
+RUN : "${RESOURCE_SERVER_URL:?RESOURCE_SERVER_URL build argument is required}" && \
+    TOKEN="${DTK_VERSION:?DTK_VERSION is not set in base image (expect token like dtk2610)}" && \
     case "${TOKEN}" in \
         dtk2604) MAJOR=1.0.0 ;; \
         dtk2610) MAJOR=2.0.0 ;; \
-        *) echo "Error: no AICC major mapping for DTK token ${TOKEN}" && exit 1 ;; \
+        *) echo "Error: no AICC major mapping for DTK token '${TOKEN}' (base image ENV DTK_VERSION should be a token like dtk2610)" && exit 1 ;; \
     esac && \
     wget -q "${RESOURCE_SERVER_URL}/ai_cc/Nightly/hcu_llvm_installer.sh" -O /tmp/hcu_llvm_installer.sh && \
     chmod +x /tmp/hcu_llvm_installer.sh && \
@@ -163,8 +172,7 @@ RUN TOKEN="${AICC_VERSION:-${DTK_VERSION}}" && \
 
 # ---layer---
 RUN TORCH_TAG="torch${TORCH_VERSION//./}" \
-    && pip install torch==${TORCH_VERSION} \
-    && pip install nvidia-resiliency-ext torch==${TORCH_VERSION} \
+    && pip install torch==${TORCH_VERSION} nvidia-resiliency-ext \
     && das-install torchvision ${TORCH_TAG} \
     && das-install flash_attn ${TORCH_TAG} \
     && das-install triton==3.6.0 ${TORCH_TAG} \
@@ -183,9 +191,12 @@ RUN TORCH_TAG="torch${TORCH_VERSION//./}" \
     && rm -f /usr/local/bin/das-install
 
 COPY requirements/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt \
-    && pip install --no-cache-dir ms-swift==4.6.0 \
-    && pip install --no-cache-dir mcore-bridge==1.6.5 \
+# requirements / ms-swift / mcore-bridge 一次交给 resolver, 避免后一次安装静默升降前一次装好的版本
+RUN pip install --no-cache-dir \
+        -r /tmp/requirements.txt \
+        ms-swift==4.6.0 \
+        mcore-bridge==1.6.5 \
+    && pip check \
     && pip cache purge \
     && rm -f /tmp/requirements.txt
 
@@ -198,7 +209,8 @@ COPY --from=run_nhc_builder /out/node_check /opt/run_nhc/node_check
 COPY --from=run_nhc_builder /out/run_nhc /usr/local/bin/run_nhc
 RUN chmod 4755 /usr/local/bin/run_nhc && \
     mkdir -p /opt/run_nhc/node_check/log && \
-    /opt/run_nhc/node_check/bin/checkstatus --version
+    /opt/run_nhc/node_check/bin/checkstatus --version && \
+    /usr/local/bin/run_nhc --version
 
 # rccl-tests (带 MPI 编译, 供 multi/rccltest/test_rccl.sh 做单机/多机通信单测)
 # 注意:
@@ -208,11 +220,13 @@ RUN chmod 4755 /usr/local/bin/run_nhc && \
 #      (/opt/hyhal 是宿主机驱动目录, 只在 run 时挂载)，链接期找不到该库。
 #      因此先造一个同名 SONAME 的空 stub 供链接, 运行时由真实的 /opt/hyhal 提供。
 RUN : "${RCCL_TEST:?RCCL_TEST build argument is required}" && \
+    : "${RCCL_TESTS_COMMIT:?RCCL_TESTS_COMMIT build argument is required}" && \
+    : "${RCCL_GPU_TARGETS:?RCCL_GPU_TARGETS build argument is required}" && \
     mkdir -p /tmp/hsastub && cd /tmp/hsastub && : > empty.c && \
     gcc -shared -fPIC -Wl,-soname,libhsa-runtime64.so.1 -o libhsa-runtime64.so.1 empty.c && \
     ln -sf libhsa-runtime64.so.1 libhsa-runtime64.so && \
     git clone "${RCCL_TEST}" /opt/rccl-test && \
-    cd /opt/rccl-test && git checkout ${RCCL_TESTS_COMMIT} && \
+    cd /opt/rccl-test && git checkout "${RCCL_TESTS_COMMIT}" && \
     LIBRARY_PATH=/tmp/hsastub:${LIBRARY_PATH} \
     make HIP_HOME=/opt/dtk \
          NCCL_HOME=/opt/dtk/rccl \
@@ -229,9 +243,10 @@ RUN rm -rf ~/.pip/pip.conf
 # /etc/image.info (口径同基础镜像 dtk 段: ASCII 字 + 名称/构建时间, 容器启动时由
 # ENTRYPOINT /usr/local/bin/hcu_image_info 打印); figlet 字体与基础镜像同源
 # (资源服务器 pkg/slant.flf), 构建后重新生成, 覆盖基础镜像的 dtk 记录
-RUN cd /tmp && \
+RUN : "${RESOURCE_SERVER_URL:?RESOURCE_SERVER_URL build argument is required}" && \
+    cd /tmp && \
     wget -q "${RESOURCE_SERVER_URL}/pkg/slant.flf" -O /tmp/slant.flf && \
-    { figlet -f slant -d /tmp -w 80 megaton; \
+    { figlet -f slant -d /tmp -w 80 megatron || exit 1; \
       echo "dtk    : ${DTK_VERSION}"; \
       echo "built  : ${BUILD_TIME:-$(date +%Y%m%d-%H%M)}"; } > /etc/image.info && \
     rm -f /tmp/slant.flf
