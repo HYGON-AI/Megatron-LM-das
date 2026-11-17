@@ -11,6 +11,7 @@ from contextlib import nullcontext
 import torch.distributed as dist
 from torch.autograd.function import once_differentiable
 
+
 class _LayerBoundary(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *values):
@@ -23,6 +24,7 @@ class _LayerBoundary(torch.autograd.Function):
         # release the preceding layer while this layer's weight A2A is pending.
         return tuple(gradients)
 
+
 def _inactive_home_weight(weight, fused):
     # TE versions that inspect weights[0].requires_grad need a trainable first
     # slot even when its m_split is zero. Never let this GEMM overwrite the real
@@ -33,6 +35,7 @@ def _inactive_home_weight(weight, fused):
         placeholder.grad_added_to_main_grad = False
         placeholder.zero_out_wgrad = True
     return placeholder
+
 
 def _exchange(output, input_, group, output_splits, input_splits):
     work = dist.all_to_all_single(
@@ -80,6 +83,7 @@ class _AfterEarlierWeight(torch.autograd.Function):
     def backward(ctx, gradient):
         return gradient, None
 
+
 def _start_weight_dispatch(dispatcher, metadata, preprocessed, stream, earlier=None):
     start = getattr(dispatcher, 'expert_dispatch_overlap_start', None)
     if start is not None:
@@ -94,6 +98,7 @@ def _start_weight_dispatch(dispatcher, metadata, preprocessed, stream, earlier=N
     )
     return received, ticket
 
+
 def _finish_weight_dispatch(dispatcher, metadata, preprocessed, received, ticket):
     finish = getattr(dispatcher, 'expert_dispatch_overlap_finish', None)
     if finish is not None:
@@ -107,8 +112,6 @@ def _finish_weight_dispatch(dispatcher, metadata, preprocessed, received, ticket
     )
     return [w.reshape(preprocessed['weight_shape']) if w.numel() else w
             for w in torch.split(received, metadata.has_experts_per_slot, dim=0)]
-
-
 
 
 def _apply_activation(experts, fc1_output, bias_parallel, permuted_probs):

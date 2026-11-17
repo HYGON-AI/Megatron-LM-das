@@ -480,6 +480,7 @@ def moe_layer_forward_wrapper(moe_layer_foward_func):
 
     return wrapper
 
+
 class MoELayer():
     """Mixture of Experts layer.
 

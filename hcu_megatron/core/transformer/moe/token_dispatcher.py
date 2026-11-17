@@ -3,8 +3,10 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # Some of this code was adopted from https://github.com/AMD-AGI/Primus
 
-from typing import List, Optional
 from contextlib import nullcontext
+from copy import copy
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +35,81 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 from hcu_megatron.core.transformer.moe.fused_a2a import fused_dispatch
 from hcu_megatron.training import get_args
+
+
+def _copy_state(owner):
+    """Copy Python state, never tensor storage, parameters or communicators."""
+    state = copy(owner)
+    # A few backends maintain Python bookkeeping containers in addition to
+    # assigning tensors. Those containers must not alias another forward.
+    for name, value in vars(owner).items():
+        if isinstance(value, (dict, list, set)):
+            setattr(state, name, copy(value))
+    return state
+
+
+@dataclass
+class MoEDispatchMetadata:
+    """Owned by one layer-state; captured locally by recompute closures."""
+
+    dispatcher: object
+    echo_weights: list = field(default_factory=list)
+
+    @property
+    def manager(self):
+        return self.dispatcher._comm_manager
+
+    def set_token_probs(self, probs):
+        self.manager.token_probs = probs
+
+    def set_dispatched_probs(self, probs):
+        self.manager.dispatched_probs = probs
+
+    def capture_echo_weights(self, experts, indices):
+        # Capture the installed TE-compatible tensors, including their gradient
+        # bridge attributes. Recreating Parameters here would sever autograd.
+        self.echo_weights = [
+            (getattr(experts, module), index,
+             getattr(getattr(experts, module), f"weight{index}"))
+            for module in ("linear_fc1", "linear_fc2")
+            for index in indices
+        ]
+
+    def install_echo_weights(self):
+        # Also called inside checkpoint closures: a later microbatch may have
+        # replaced the module's slots before this forward is recomputed.
+        for module, index, weight in self.echo_weights:
+            setattr(module, f"weight{index}", weight)
+
+    def detach_echo_weights(self, detach):
+        """Route weight gradients back through the pre-dispatch schedule node."""
+        detached_weights = []
+        for module, index, weight in self.echo_weights:
+            detached = detach(weight)
+            # TE's fused wgrad writes main_grad and returns a scheduling dummy.
+            # Keep the same per-forward bridge buffer on the detached tensor.
+            for name, value in vars(weight).items():
+                setattr(detached, name, value)
+            detached_weights.append((module, index, detached))
+        self.echo_weights = detached_weights
+
+
+def new_dispatch_metadata(dispatcher):
+    """Isolate dynamic dispatcher state before routing preprocess executes."""
+    local = _copy_state(dispatcher)
+    if hasattr(dispatcher, "_comm_manager"):
+        manager = _copy_state(dispatcher._comm_manager)
+        local._comm_manager = manager
+        # Primus aliases these two attributes to the same stateful object.
+        if getattr(dispatcher, "deepep_dispatcher", None) is dispatcher._comm_manager:
+            local.deepep_dispatcher = manager
+    if getattr(dispatcher, "shared_experts", None) is not None:
+        # SharedExpertMLP caches intermediate tensors across dispatch/combine.
+        # Parameters/submodules stay shared; the cache namespace is private.
+        local.shared_experts = _copy_state(dispatcher.shared_experts)
+    if hasattr(local, "cuda_sync_point"):
+        local.cuda_sync_point = "no_sync"
+    return MoEDispatchMetadata(local)
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
