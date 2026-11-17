@@ -271,7 +271,7 @@ def test_echo_wrapper_routes_once_and_preserves_sync_schedule(production, monkey
     )
     def unexpected(*args, **kwargs):
         pytest.fail('Echo must not invoke the original forward')
-    module = _definitions(MOE / 'moe_layer.py', {'moe_layer_forward_wrapper'}, wraps=wraps)
+    module = _definitions(MOE / 'moe_layer.py',{'moe_layer_forward_wrapper','echo_route_and_plan','echo_plan','_echo_dims','echo_install_expert_weights','_echo_dump_plan',},wraps=wraps,)
     x = torch.ones(2, 3, requires_grad=True)
     output, bias = module.moe_layer_forward_wrapper(unexpected)(layer, x)
     torch.testing.assert_close(output, (x + 2) * 3 + 1)
