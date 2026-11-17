@@ -383,7 +383,7 @@ class PrimusGroupedMLP(MegatronCoreTEGroupedMLP):
         # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         tokens_per_expert_cpu = tokens_per_expert.tolist()
 
-        return MegatronCoreTEGroupedMLP._apply_bias(
+        return super()._apply_bias(
             intermediate_parallel, bias_parallel, tokens_per_expert_cpu, permuted_probs
         )
 
@@ -563,6 +563,7 @@ class DummyFunction(torch.autograd.Function):
     `weight{i}` so TE's GroupedLinear doesn't crash. DummyFunction wraps an
     empty tensor into a graph node whose backward returns zero gradient.
     """
+
     @staticmethod
     def forward(ctx, x, weight_shape):
         ctx.input = x

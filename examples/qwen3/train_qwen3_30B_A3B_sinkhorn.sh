@@ -1,4 +1,6 @@
 #!/bin/bash
+
+
 INITIALIZATION_ARGS=( --num-workers 2)
 for para in $*
 do

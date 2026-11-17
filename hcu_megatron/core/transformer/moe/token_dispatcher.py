@@ -428,6 +428,7 @@ class MoEElasticExpertMetadata:
     """
     handle = None
     buffer_idx = 0  # 0=FC1, 1=FC2
+    materialized = False
 
 
 class MoEElasticExpertDispatcher:
@@ -477,6 +478,8 @@ class MoEElasticExpertDispatcher:
 
         Returns:
             MoEElasticExpertMetadata with lazy input_splits/output_splits.
+            The all_to_all backend materializes those lists; the DeepEP backend
+            only materializes has_experts_per_slot.
         """
         num_home_experts, num_spare_experts = routing_map.shape
         num_local_home_experts = num_home_experts // self.ep_size
@@ -507,18 +510,29 @@ class MoEElasticExpertDispatcher:
         flat = local_to_global_map.flatten(start_dim=1)
         return torch.nonzero(flat.T.cpu())[:, 1].tolist()
 
+    # The all_to_all backend splits its single flat exchange buffer with these
+    # lists (expert_dispatch_communication here, and the experts_overlap
+    # fallback), so it must materialize them. The DeepEP backend derives every
+    # split from the chunk indices it already carries, and only reads
+    # has_experts_per_slot. Each of those split computations ends in a
+    # device->host copy, so materialize them only where they are read.
+    _needs_alltoall_split_metadata = True
+
     def _materialize_dispatch_metadata(self, metadata: MoEElasticExpertMetadata):
         """Populate dispatch metadata if it was not filled by preprocess()."""
-        if metadata.input_splits is None:
+        if getattr(metadata, 'materialized', False):
+            return
+        metadata.materialized = True
+        if self._needs_alltoall_split_metadata and metadata.input_splits is None:
             metadata.input_splits = metadata.local_to_global_routing_map.sum(dim=[0, 2]).tolist()
             metadata.output_splits = metadata.global_to_local_routing_map.sum(dim=[1, 2]).tolist()
             metadata.num_out_experts = sum(metadata.input_splits)
             metadata.input_chunks_per_rank = (
                 metadata.global_to_local_routing_map.sum(dim=1).int().ravel().cpu()
             )
-            metadata.has_experts_per_slot = (
-                metadata.global_to_local_routing_map.sum(dim=[0, 1]).tolist()
-            )
+        metadata.has_experts_per_slot = (
+            metadata.global_to_local_routing_map.sum(dim=[0, 1]).tolist()
+        )
 
     def expert_dispatch_preprocess(
         self, metadata: MoEElasticExpertMetadata, *expert_weights
@@ -655,9 +669,12 @@ class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
     Uses the standard high-throughput Buffer API. Overlap launches asynchronous
     dispatch on a side stream and waits only when echo GEMM needs the weights.
     """
-    # Validated with simulated FC1 and FC2 weight matrices in DeepEP chunked communication benchmarks.
-    # With stable timings, 8192 performed well and similarly to larger chunks, so it remains the default.
+    # In the basic DeepEP chunking test with simulated FC1 and FC2 matrix shapes,
+    # a chunk size of 8192 provides good performance while keeping total runtime relatively stable.
     weight_chunk_size = 8192
+
+    # Splits ride along as chunk indices; see MoEElasticExpertDispatcher.
+    _needs_alltoall_split_metadata = False
 
     def __init__(self, config, pg_collection):
         super().__init__(config, pg_collection)
@@ -704,18 +721,36 @@ class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
         if any(count > 1 for count in metadata.has_experts_per_slot):
             raise ValueError('Each echo slot can receive at most one home expert')
 
-        # Each selected pair is a separate copy. Autograd's index_select backward
-        # sums gradients when a home expert has replicas on several target ranks.
-        local_map = metadata.local_to_global_routing_map.reshape(
-            len(expert_weights), -1,
-        )
-        pairs = local_map.nonzero(as_tuple=False)
-        stacked = torch.stack([w.reshape(-1) for w in expert_weights])
+        # FC1 and FC2 share the routing pairs. Materialize them once on CPU so
+        # only selected weights enter the packing graph, as in AlltoAll.
+        pairs = getattr(metadata, 'deepep_send_pairs', None)
+        if pairs is None:
+            local_map = metadata.local_to_global_routing_map.reshape(
+                len(expert_weights), -1,
+            )
+            pairs = local_map.cpu().nonzero(as_tuple=False).tolist()
+            metadata.deepep_send_pairs = pairs
+        if pairs:
+            # Repeated references deliberately create one copy per destination;
+            # stack backward sums replica gradients into the same home weight.
+            packed = torch.stack(
+                [expert_weights[owner].reshape(-1) for owner, _ in pairs]
+            )
+        else:
+            # Keep an empty exchange attached to autograd so a rank with no
+            # outgoing weights still joins the gradient combine collective.
+            packed = reference.reshape(1, -1)[:0]
+        numel = reference.numel()
         numel = reference.numel()
         chunks_per_weight = (numel + self.weight_chunk_size - 1) // self.weight_chunk_size
-        stacked = F.pad(stacked, (0, chunks_per_weight * self.weight_chunk_size - numel))
-        chunks = stacked.index_select(0, pairs[:, 0]).reshape(-1, self.weight_chunk_size)
-        indices = pairs[:, 1].repeat_interleave(chunks_per_weight).reshape(-1, 1).contiguous()
+        padding = chunks_per_weight * self.weight_chunk_size - numel
+        if padding:
+            packed = F.pad(packed, (0, padding))
+        chunks = packed.reshape(-1, self.weight_chunk_size)
+        slots = torch.tensor(
+            [slot for _, slot in pairs], dtype=torch.int64, device=reference.device
+        )
+        indices = slots.repeat_interleave(chunks_per_weight).reshape(-1, 1).contiguous()
         return dict(chunks=chunks, indices=indices, weight_shape=reference.shape,
                     weight_numel=numel, chunks_per_weight=chunks_per_weight)
 

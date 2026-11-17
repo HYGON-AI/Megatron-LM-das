@@ -82,6 +82,23 @@ class EchoExpertFeature(AbstractFeature):
                 f'by expert_model_parallel_size ({ep_size})'
             )
         args.moe_num_echo_experts = num_echo
+        if getattr(args, 'overlap_moe_expert_parallel_comm', False):
+            # The fine-grained (EP A2A overlap) callables run the echo planner and
+            # install the echo expert weights inside the pre-dispatch node, so the
+            # expert weight AlltoAll is already overlapped by the schedule itself.
+            if getattr(args, 'moe_echo_expert_dispatch_overlap', False):
+                warnings.warn(
+                    '--moe-echo-expert-dispatch-overlap has no effect with '
+                    '--overlap-moe-expert-parallel-comm; the echo expert weight '
+                    'dispatch runs synchronously inside the fine-grained schedule.'
+                )
+            if getattr(args, 'integrate_recompute_to_ep_comm_overlap', False):
+                raise ValueError(
+                    '--integrate-recompute-to-ep-comm-overlap is not supported with '
+                    '--moe-enable-echo: re-running the pre-dispatch node in the '
+                    'backward pass would replay the offloading planner collectives.'
+                )
+
         if dispatch_type == 'deepep' and ep_size <= 1:
             raise ValueError('--moe-echo-expert-dispatch-type deepep requires expert_model_parallel_size > 1')
 

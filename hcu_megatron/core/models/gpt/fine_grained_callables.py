@@ -33,6 +33,37 @@ except ImportError:
     HAVE_TE = False
 
 
+def route_and_preprocess(mlp, hidden_states, is_recompute=False):
+    """Router + dispatch preprocess for one MoE layer.
+
+    With `--moe-enable-echo` the router emits a home-only routing map while the
+    token dispatcher is sized for home+echo experts, so routing must go through
+    the echo offloading planner (and install the echo expert weights) instead of
+    feeding the raw router output to `preprocess`.
+    """
+    from hcu_megatron.core.transformer.moe.token_dispatcher import new_dispatch_metadata
+
+    if getattr(mlp.config, "cuda_graph_impl", "none") != "none":
+        raise NotImplementedError(
+            "EP overlap per-forward metadata currently requires --cuda-graph-impl none. "
+            "Graph capture/replay must also capture and restore the routing state."
+        )
+    metadata = new_dispatch_metadata(mlp.get_token_dispatcher(is_recompute))
+    if getattr(mlp.config, "moe_enable_echo", False):
+        from hcu_megatron.core.transformer.moe.moe_layer import echo_route_and_preprocess
+
+        tokens, probs = echo_route_and_preprocess(
+            mlp, hidden_states, is_recompute=is_recompute, metadata=metadata,
+        )
+    else:
+        probs, routing_map = mlp.route(hidden_states)
+        tokens, probs = mlp.preprocess(
+            hidden_states, probs, routing_map,
+            is_recompute=is_recompute, metadata=metadata,
+        )
+    return tokens, probs, metadata
+
+
 def build_transformer_layer_callables(layer: TransformerLayer):
     """Create callables for transformer layer nodes.
     Divides the transformer layer's operations into a sequence of smaller, independent
@@ -86,6 +117,11 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             and hasattr(layer, 'cuda_graphs')
             and layer.cuda_graphs
         ):
+            if isinstance(layer.mlp, MoELayer):
+                raise NotImplementedError(
+                    "EP overlap metadata requires eager fine-grained routing; "
+                    "CUDA graph replay of pre-dispatch is not supported."
+                )
             layer.set_te_cuda_graph_backward_dw_wrapper()
             forward_func = layer._te_cuda_graph_replay
         else:
@@ -137,10 +173,11 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                     pre_mlp_layernorm_output, hidden_states = pre_mlp_layernorm_output
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
-                local_tokens, probs = layer.mlp.preprocess(
-                    pre_mlp_layernorm_output, probs, routing_map, is_recompute=is_recompute
+                local_tokens, probs, metadata = route_and_preprocess(
+                    layer.mlp, pre_mlp_layernorm_output, is_recompute=is_recompute
                 )
+                metadata.detach_echo_weights(node.detach)
+                node.layer_state.dispatch_metadata = metadata
                 return hidden_states, local_tokens, probs, shared_expert_output
 
         hidden_states, local_tokens, probs, shared_expert_output = forward_func(
@@ -169,13 +206,14 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         Dispatches tokens to the experts based on the router output.
         """
-        token_dispatcher = layer.mlp.token_dispatcher
+        metadata = node.layer_state.dispatch_metadata
+        token_dispatcher = metadata.dispatcher
         if enable_deepep or enable_hybridep or enable_ncclep:
             # update token_probs to be the detached version, prevents
             # backward graph from connecting to pre_dispatch_computation submodule
-            token_dispatcher._comm_manager.token_probs = probs
+            metadata.set_token_probs(probs)
 
-        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs, is_recompute=is_recompute,)
+        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs, is_recompute=is_recompute, metadata=metadata)
 
         if enable_ncclep and layer.config.moe_ncclep_zero_copy:
             # Insert an identity node as the sole consumer of the dispatch output, so the
@@ -195,13 +233,14 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             post dispatch->experts->combine preprocess
         """
         dispatched_probs = node.layer_state.dispatched_probs
-        token_dispatcher = layer.mlp.token_dispatcher
+        metadata = node.layer_state.dispatch_metadata
+        token_dispatcher = metadata.dispatcher
         if enable_deepep or enable_hybridep or enable_ncclep:
             # update dispatched_probs to be detached version, prevents
             # backward graph from connecting to dispatch submodule
-            token_dispatcher._comm_manager.dispatched_probs = dispatched_probs
+            metadata.set_dispatched_probs(dispatched_probs)
 
-        expert_output, _ = layer.mlp.routed_experts_compute(dispatched_tokens, dispatched_probs, is_recompute=is_recompute,)
+        expert_output, _ = layer.mlp.routed_experts_compute(dispatched_tokens, dispatched_probs, is_recompute=is_recompute, metadata=metadata)
 
         # For HybridEP and NCCL EP, tokens_per_expert is generated on comm stream, as the
         # input to `routed_experts_compute`, a ref is needed to prevent it from being freed.
@@ -227,8 +266,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         residual = node.layer_state.residual
         shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
-        output = layer.mlp.combine(output, is_recompute=is_recompute,)
-        output = layer.mlp.postprocess(output, shared_expert_output, is_recompute=is_recompute,)
+        metadata = node.layer_state.dispatch_metadata
+        output = layer.mlp.combine(output, is_recompute=is_recompute, metadata=metadata)
+        output = layer.mlp.postprocess(output, shared_expert_output, is_recompute=is_recompute, metadata=metadata)
 
         mlp_output_with_bias = (output, None)
         if hasattr(layer, 'cuda_graphs') and layer.cuda_graphs:
@@ -257,6 +297,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         # release tensor reference after use
         node.layer_state.residual = None
         node.layer_state.shared_expert_output = None
+        node.layer_state.dispatch_metadata = None
 
         # final layer norm from decoder
         final_layernorm = node.chunk_state.model.decoder.final_layernorm
@@ -478,10 +519,11 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
             pre_mlp_layernorm_output, hidden_states = pre_mlp_layernorm_output
 
         shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-        probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
-        local_tokens, probs = layer.mlp.preprocess(
-            pre_mlp_layernorm_output, probs, routing_map, is_recompute=is_recompute
+        local_tokens, probs, metadata = route_and_preprocess(
+            layer.mlp, pre_mlp_layernorm_output, is_recompute=is_recompute
         )
+        metadata.detach_echo_weights(node.detach)
+        node.layer_state.dispatch_metadata = metadata
 
         # Detach here for mlp_bda residual connection
         node.layer_state.residual = node.detach(hidden_states)
@@ -497,13 +539,14 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         """
         Dispatches tokens to the experts based on the router output.
         """
-        token_dispatcher = layer.mlp.token_dispatcher
+        metadata = node.layer_state.dispatch_metadata
+        token_dispatcher = metadata.dispatcher
         if enable_deepep or enable_hybridep or enable_ncclep:
             # update token_probs to be the detached version, prevents
             # backward graph from connecting to attn submodule
-            token_dispatcher._comm_manager.token_probs = probs
+            metadata.set_token_probs(probs)
 
-        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs, is_recompute=is_recompute,)
+        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs, is_recompute=is_recompute, metadata=metadata)
 
         if enable_ncclep and layer.config.moe_ncclep_zero_copy:
             # Insert an identity node as the sole consumer of the dispatch output, so the
@@ -519,19 +562,21 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         """
         Performs a forward pass for the MLP submodule, including only routed-expert computations.
         """
+        metadata = node.layer_state.dispatch_metadata
+
         def custom_forward(
             dispatched_input, permuted_probs
         ):
-            expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs, is_recompute=is_recompute)
+            expert_output, mlp_bias = layer.mlp.routed_experts_compute(dispatched_input, permuted_probs, is_recompute=is_recompute, metadata=metadata)
             assert mlp_bias is None, f"mlp_bias is not supported for {type(layer.mlp.token_dispatcher)}"
             return expert_output
 
         dispatched_probs = node.layer_state.dispatched_probs
-        token_dispatcher = layer.mlp.token_dispatcher
+        token_dispatcher = metadata.dispatcher
         if enable_deepep or enable_hybridep or enable_ncclep:
             # update dispatched_probs to be detached version, prevents
             # backward graph from connecting to dispatch submodule
-            token_dispatcher._comm_manager.dispatched_probs = dispatched_probs
+            metadata.set_dispatched_probs(dispatched_probs)
 
         args = [
             dispatched_input,
@@ -581,8 +626,9 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         """
         residual = node.layer_state.residual
         shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
-        output = layer.mlp.combine(output, is_recompute=is_recompute,)
-        output = layer.mlp.postprocess(output, shared_expert_output, is_recompute=is_recompute,)
+        metadata = node.layer_state.dispatch_metadata
+        output = layer.mlp.combine(output, is_recompute=is_recompute, metadata=metadata)
+        output = layer.mlp.postprocess(output, shared_expert_output, is_recompute=is_recompute, metadata=metadata)
         mlp_output_with_bias = (output, None)
 
         with layer.bias_dropout_add_exec_handler():
@@ -609,6 +655,7 @@ def build_transformer_layer_callables_with_split_attn(layer: TransformerLayer):
         # release tensor reference after use
         node.layer_state.residual = None
         node.layer_state.shared_expert_output = None
+        node.layer_state.dispatch_metadata = None
 
         # final layer norm from decoder
         final_layernorm = node.chunk_state.model.decoder.final_layernorm
