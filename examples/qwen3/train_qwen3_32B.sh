@@ -63,7 +63,7 @@ MBS=1
 GBS=64
 
 # seq hyperparameters
-SEQ_LEN=8192
+SEQ_LEN=4096
 MAX_POSITION_EMBEDDINGS=40960
 
 # train iteration hyperparameters

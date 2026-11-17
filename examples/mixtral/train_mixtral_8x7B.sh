@@ -51,7 +51,7 @@ ETP=1
 
 # batch hyperparameters
 MBS=1
-GBS=256
+GBS=128
 
 # seq hyperparameters
 SEQ_LEN=4096
@@ -114,7 +114,7 @@ MOE_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
     --split 99990,8,2

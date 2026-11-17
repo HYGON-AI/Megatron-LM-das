@@ -195,6 +195,7 @@ from .edgc_utils import Utils, append_time_to_csv, append_data_to_csv, read_data
 from hcu_megatron.core.distributed.power_sgd import EFLayoutManager
 from hcu_megatron.core.parallel_state import set_train_iter
 from hcu_megatron.training import get_args
+from hcu_megatron.training.route_collector import get_route_collector, init_route_collector
 
 stimer = StragglerDetector()
 
@@ -1001,6 +1002,9 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             enable_tokens_per_expert_logging(model, args.save)
         if save_dgrads_in_this_iteration:
             enable_dgrad_logging(model, args.save)
+        route_collector = get_route_collector()
+        if route_collector is not None:
+            route_collector.begin_step(iteration)
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step_func,
             data_iterator=data_iterator,
@@ -1029,6 +1033,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
         tracer = get_moe_router_tracer()
         if tracer is not None:
             tracer.advance_step(iteration)
+        if route_collector is not None:
+            route_collector.end_step()
 
         # Reset force_all_reduce field.
         for model_chunk in model:
@@ -2002,6 +2008,9 @@ def train(
             dump_router_weights=getattr(args, 'moe_routing_trace_dump_weights', False),
         )
         get_moe_router_tracer().register_hooks(model)
+
+    # Expert-coupling route collection (enabled by EC_TRACE_ITERS); see route_collector.py.
+    init_route_collector(model)
 
     report_memory_flag = True
     pre_hook_enabled = False
