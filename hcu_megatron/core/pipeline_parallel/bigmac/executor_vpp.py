@@ -974,9 +974,6 @@ class LLMVPPExecutorWithVE(LLMVPPExecutor):
         if len(llm_inputs) == 0:
             raise RuntimeError(f"rank {dist.get_rank()} got all-fake VE encoder outputs for microbatch_id={microbatch_id}, cannot proceed with empty LLM inputs")
 
-        if forward_contains_fake:
-            assert len(llm_inputs) == self.num_microbatches
-        
         # llm_inputs are referenced twice: once by the per-chunk iterator that
         # feeds LLM forward, and once by first_pp_inputs for VE backward rebuild.
         # Both owners must release them to avoid keeping the graph alive.
@@ -1017,9 +1014,7 @@ class LLMVPPExecutorWithVE(LLMVPPExecutor):
         self.ve_send_forward_keepalives.append(send_keepalive)
         self.ve_send_forward_ready_events.append(send_ready_event)
         self.ve_forward_release_tensors.append(encoder_outputs)
-        if op.microbatch_id // self.pp_size >= 3:
-            torch.cuda.synchronize()
-
+    
     def encoder_send_backward_action(self, op: ScheduleOp):
         # Pull gradients from the original first-stage LLM inputs so VE backward
         # sees grads in encoder-output order instead of LLM-input dict order.

@@ -32,4 +32,5 @@ ADAPTOR_FEATURES = [
     UltraEPFeature(),
     DSAFeature(),
     MegaMoeFeature(),
+    BigMacFeature(),
 ]
