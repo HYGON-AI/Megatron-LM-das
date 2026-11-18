@@ -451,8 +451,11 @@ def breadth_first_allocation(
 
     Returns:
         tuple containing:
-            - count_tokens_offloaded_from_home_to_spare: Tokens offloaded in first pass
-                Shape: [num_home_experts, num_spare_experts]
+            - count_tokens_floors: First-pass token allocations from source EP ranks
+                to spare experts, rounded down from the proportional allocation.
+                Shape: [num_ep_ranks, num_spare_experts]
+                Description: Entry [r, s] is the number of tokens from source EP
+                           rank r offloaded to spare expert s in the first pass.
             - count_tokens_per_expert_from_ep_rank_after_offload: Remaining tokens after offload
                 Shape: [num_ep_ranks, num_experts]
             - capacity_spare_remaining: Remaining spare capacity
