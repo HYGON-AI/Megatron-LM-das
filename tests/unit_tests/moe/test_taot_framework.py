@@ -595,8 +595,18 @@ def test_deepep_chunk_pack_transport_and_stream_wait(deepep, production, monkeyp
         torch.testing.assert_close(unpacked[slot], weights[owner])
     sum(w.float().sum() for w in unpacked).backward()
     for owner, weight in enumerate(weights):
-        torch.testing.assert_close(weight.grad, torch.full_like(weight, send.count(owner)))
-    assert calls.count('combine') == 1
+        count = send.count(owner)
+        if count == 0 and weight.grad is None:
+            # Unselected weights may be disconnected from the transport graph.
+            continue
+
+        assert weight.grad is not None, (
+            f"Selected expert {owner} must receive a gradient"
+    )
+        torch.testing.assert_close(
+            weight.grad, torch.full_like(weight, count)
+        )
+        assert calls.count('combine') == 1
 
 
 def test_sync_replica_buffers_are_independent_and_transport_real_grad(production):
