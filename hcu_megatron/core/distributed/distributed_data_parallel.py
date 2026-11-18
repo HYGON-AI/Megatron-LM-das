@@ -2,11 +2,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 
+from functools import wraps
+
 import torch
 
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 
 from hcu_megatron.training import get_args
+
+
+def ultraep_backward_post_hook_wrapper(original):
+    """Wrap the selected Megatron/HCU hook for UltraEP; preserve baseline behavior."""
+    @wraps(original)
+    def wrapper(self, param):
+        original_hook = original(self, param)
+        if not getattr(param, 'is_eplb_master', False):
+            return original_hook
+        param._ddp_bucket_group = self.param_to_bucket_group[param]
+        if getattr(self.ddp_config, 'overlap_param_gather', False):
+            param._eplb_forward_pre_hook = self._make_forward_pre_hook()
+
+        def hook(*args):
+            if not getattr(getattr(param, '_eplb_manager', None), 'ultraep_active', True):
+                return original_hook(*args)
+            if is_graph_capturing():
+                return
+            if param.grad is not None:
+                if not getattr(param, 'grad_added_to_main_grad', False) or getattr(param, 'zero_out_wgrad', False):
+                    param.main_grad.add_(param.grad.data)
+                param.grad = None
+            # Replica reduction will signal this parameter's bucket readiness.
+
+        return hook
+
+    return wrapper
 
 
 class DistributedDataParallel():
@@ -23,8 +52,6 @@ class DistributedDataParallel():
                 return
 
             if param in self.param_to_bucket_group:
-                if getattr(param, 'is_eplb_master', False):
-                    return  # EPLB master grad ready is signalled manually after replica reduce
                 assert param.requires_grad
                 if self.ddp_config.overlap_grad_reduce:
                     # param.grad can temporarily be None in the following cases:

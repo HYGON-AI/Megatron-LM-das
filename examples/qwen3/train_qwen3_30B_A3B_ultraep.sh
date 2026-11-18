@@ -57,7 +57,7 @@ export HSA_FORCE_FINE_GRAIN_PCIE=1
 export OMP_NUM_THREADS=1
 export GPU_MAX_HW_QUEUES=10
 export NVTE_USE_HIPBLASLT_GROUPEDGEMM=1
-export LD_LIBRARY_PATH=/opt/rccl-rdma-sharp-plugins/lib:$LD_LIBRARY_PATH # multi-nodes 4!=3 bug
+export LD_LIBRARY_PATH=/opt/rccl-rdma-sharp-plugins/lib:$LD_LIBRARY_PATH # Add the RCCL RDMA plugin directory to the library search path.
 # split hyperparameters
 TP=1
 PP=1
@@ -77,12 +77,12 @@ MAX_POSITION_EMBEDDINGS=40960
 TRAIN_ITERS=50
 LR_WARMUP_ITERS=1
 
-# 拓扑与 rocSHMEM：建议必需（ultraep）
-export HSA_USE_SVM=0 # runtime和dtk那边的一个遗留bug的临时解决方案
+# UltraEP topology and rocSHMEM settings.
+export HSA_USE_SVM=0 # Runtime compatibility setting for the validated HCU configuration.
 export MAX_NUM_NVL_PEERS=8 # 单个节点/高速互联域内属于当前 EP group 的 rank 数
 export ROCSHMEM_BACKEND=gda # 机内default：ipc
 export ROCSHMEM_GDA_PROVIDER=shca # 机内default： unset ROCSHMEM_GDA_PROVIDER
-export ROCSHMEM_HEAP_SIZE=2147483648 # 小了报错
+export ROCSHMEM_HEAP_SIZE=2147483648 # Configure a 2 GiB rocSHMEM heap for this example.
 
 MPI_DISTRIBUTED_ARGS=(
     --rank ${RANK}
@@ -161,6 +161,7 @@ MOE_ARGS=(
     --moe-enable-ultraep
     --moe-num-redundant-experts-per-rank 2
     --moe-ultraep-autotune
+    --moe-ultraep-adaptive
 )
 
 MODEL_PARALLEL_ARGS=(
