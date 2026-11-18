@@ -7,6 +7,32 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "${repo_root}"
 
+# --- c211-i108431 read-only HCU device-identity diagnostic (transient; read-only) ---
+{
+  echo "C211_I108431_BEGIN $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  echo "C211_HOSTNAME=$(hostname 2>/dev/null || true)"
+  echo "C211_ID=$(id 2>/dev/null || true)"
+  echo "C211_UNAME=$(uname -a 2>/dev/null || true)"
+  echo "C211_RUNNER_NAME=${RUNNER_NAME:-} C211_GITHUB_JOB=${GITHUB_JOB:-} C211_RUN_ID=${GITHUB_RUN_ID:-}"
+  echo "--- C211 hy-smi --showuniqueid ---"
+  if command -v hy-smi >/dev/null 2>&1; then hy-smi --showuniqueid 2>&1 || true; else echo "C211_NO_HY_SMI"; fi
+  echo "--- C211 hy-smi -a ---"
+  if command -v hy-smi >/dev/null 2>&1; then hy-smi -a 2>&1 | head -150 || true; fi
+  echo "--- C211 sysfs device identity ---"
+  for f in /sys/class/drm/card*/device/unique_id /sys/class/drm/card*/device/device /sys/class/drm/card*/device/vendor /sys/class/drm/card*/device/serial; do
+    if [ -e "$f" ]; then printf 'C211_SYSFS %s=%s\n' "$f" "$(cat "$f" 2>/dev/null | tr '\n' ' ' || true)"; fi
+  done
+  echo "--- C211 sysfs drm ---"
+  ls -l /sys/class/drm 2>/dev/null | head -24 || true
+  echo "--- C211 devnodes ---"
+  ls -l /dev/kfd /dev/mkfd /dev/dri 2>/dev/null || true
+  echo "--- C211 lspci ---"
+  if command -v lspci >/dev/null 2>&1; then lspci -nn 2>/dev/null | grep -i -E 'hygon|1d94' || echo "C211_NO_LSPCI_MATCH"; else echo "C211_NO_LSPCI"; fi
+  echo "C211_I108431_END"
+} || true
+# --- end c211-i108431 block ---
+
+
 if [[ -z "${BUCKET:-}" ]]; then
     echo "ERROR: BUCKET is required" >&2
     exit 1
