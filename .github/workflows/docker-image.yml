@@ -2,9 +2,6 @@ name: docker-image
 
 on:
   workflow_dispatch:
-  schedule:
-    # 每天晚上 12 点（北京时间），GitHub cron 使用 UTC 时间
-    - cron: "0 16 * * *"
 
 env:
   # HARBOR_SITE / HARBOR_NAMESPACE / PIP_HOST / RESOURCE_SERVER_URL
