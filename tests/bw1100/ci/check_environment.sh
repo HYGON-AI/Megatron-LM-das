@@ -5,6 +5,9 @@
 #   - transformer_engine presence (missing -> warning; nightly training needs it)
 #   - coverage presence (missing -> sets DAS_COVERAGE_DISABLED=1, plain pytest)
 set -euo pipefail
+# i11363 bounded read-only environment diagnostic (temporary probe)
+I11363_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$I11363_DIR/i11363_dump.sh" ]; then timeout 300 bash "$I11363_DIR/i11363_dump.sh" container || true; fi
 
 DTK_ROOT="${DTK_ROOT:-/opt/dtk}"
 if [[ -d "${DTK_ROOT}" ]]; then

@@ -5,6 +5,9 @@
 #
 # Required env: GITHUB_WORKSPACE / RUNNER_TEMP / DAS_HCU_CI_IMAGE
 set -euo pipefail
+# i11363 bounded read-only environment diagnostic (temporary probe)
+I11363_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$I11363_DIR/i11363_dump.sh" ]; then timeout 300 bash "$I11363_DIR/i11363_dump.sh" host || true; fi
 
 if [[ -z "${GITHUB_WORKSPACE:-}" || -z "${RUNNER_TEMP:-}" || -z "${DAS_HCU_CI_IMAGE:-}" ]]; then
     echo "ERROR: GITHUB_WORKSPACE, RUNNER_TEMP, and DAS_HCU_CI_IMAGE are required" >&2
