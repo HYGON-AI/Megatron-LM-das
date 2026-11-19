@@ -80,6 +80,23 @@ def gpt_model_postprocess(
     if in_inference_mode:
         assert runtime_gather_output, "Inference must always gather TP logits"
 
+    linear_ce_enabled = (
+        getattr(self.config, "cross_entropy_loss_fusion", False)
+        and getattr(self.config, "cross_entropy_fusion_impl", "native") == "linear"
+    )
+    use_linear_ce = linear_ce_enabled and self.post_process and labels is not None and not in_inference_mode
+    if use_linear_ce:
+        # Static configuration is validated by LinearCrossEntropyFeature.
+        # Check only per-call inputs before MTP or another processor can run.
+        if mtp_in_postprocess:
+            raise ValueError("HCU Linear CE does not support mtp_in_postprocess")
+        if packed_seq_params is not None:
+            raise ValueError("HCU Linear CE does not support packed_seq_params")
+        if loss_mask is None:
+            raise ValueError("HCU Linear CE requires loss_mask")
+        if output_processor is not None:
+            raise ValueError("HCU Linear CE conflicts with an existing output_processor")
+
     # Check if speculative decoding is active. When it is, MTP must be
     # computed *after* verification so that it is conditioned on verified
     # tokens rather than stale speculative tokens from the previous step.
@@ -94,6 +111,12 @@ def gpt_model_postprocess(
     output_weight = None
     if self.share_embeddings_and_output_weights:
         output_weight = self.shared_embedding_or_output_weight()
+
+    if use_linear_ce:
+        from hcu_megatron.core.fusions.fused_linear_cross_entropy import linear_cross_entropy_for_training
+
+        weight = output_weight if output_weight is not None else self.output_layer.weight
+        return linear_cross_entropy_for_training(hidden_states, weight, labels, loss_mask)
 
     if mtp_in_postprocess and not (in_inference_mode or is_spec_decode):
         hidden_states = self.mtp(
@@ -220,6 +243,12 @@ def gpt_model_postprocess(
     if labels is None:
         # [s b h] => [b s h]
         return logits.transpose(0, 1).contiguous()
+
+    if linear_ce_enabled:
+        # Labeled inference still materializes logits. The baseline loss method
+        # only knows native/te, so use ordinary CE without mutating the config.
+        loss = tensor_parallel.vocab_parallel_cross_entropy(logits, labels.transpose(0, 1).contiguous())
+        return loss.transpose(0, 1).contiguous()
 
     loss = self.compute_language_model_loss(labels, logits)
 
