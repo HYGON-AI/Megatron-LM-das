@@ -1,8 +1,6 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
-import time
-import inspect
 from functools import wraps
 from collections import defaultdict
 from datetime import timedelta
@@ -25,7 +23,7 @@ from hcu_megatron.training.arguments import get_adaptor_args
 
 PARALLEL_GROUP_RANKS_MAP = defaultdict(list)
 _GROUP_MAP = {}
-_COMM_LOGS = []
+
 _GROUP_NAME_DICT = { 
     'tp_group' : 'TENSOR_MODEL_PARALLEL_GROUP',
     'pp_group' : 'PIPELINE_MODEL_PARALLEL_GROUP',
@@ -41,18 +39,6 @@ _GROUP_NAME_DICT = {
     'tp-dp-cp_group': 'TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP',
     'tp-pp_group': 'MODEL_PARALLEL_GROUP',
     'dp-cp_group':'DATA_PARALLEL_GROUP_WITH_CP',
-}
-
-_FUNC_NAME_DICT = {
-    'broadcast': 'broadcast',
-    'all_reduce': 'all_reduce',
-    'all_gather': 'all_gather',
-    'all_gather_into_tensor': 'all_gather',
-    'reduce_scatter': 'reduce_scatter',
-    'reduce_scatter_tensor': 'reduce_scatter',
-    'all_to_all_single': 'all_to_all',
-    'isend' : 'send_recv_pp', 
-    'irecv' : 'send_recv_pp', 
 }
 
 
@@ -174,44 +160,6 @@ def get_train_iter():
     global __TRAIN_ITER
     return __TRAIN_ITER
 
-
-def log_timing_wrapper(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        adaptor_args = get_adaptor_args()
-        log_time = (
-            adaptor_args.comm_time_log_iter is not None
-            and get_train_iter() is not None
-            and get_train_iter() == adaptor_args.comm_time_log_iter
-        )
-
-        if log_time:
-            sig = inspect.signature(fn)
-            bound_args = sig.bind(*args, **kwargs)
-            bound_args.apply_defaults()
-            arguments = bound_args.arguments
-
-            reversed_dict = {v: k for k, v in _GROUP_NAME_DICT.items()}
-            start_time = time.time()
-
-        result = fn(*args, **kwargs)
-
-        if log_time:
-            elapsed_time = time.time() - start_time
-
-            global _COMM_LOGS
-
-            group = arguments.get('group', None)
-            comm_group = reversed_dict[_GROUP_MAP[group]] if group is not None else "all"
-            _COMM_LOGS.append({
-                "type": _FUNC_NAME_DICT[fn.__name__],
-                "group": comm_group,
-                "time": elapsed_time
-            })
-
-        return result
-    
-    return wrapper
 
 
 # Vocabulary parallelism

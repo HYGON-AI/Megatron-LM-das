@@ -12,6 +12,7 @@ from .moe.sync_free_moe_feature import SyncFreeMoeFeature
 from .moe.ultraep_feature import UltraEPFeature
 from .transformer.dsa_feature import DSAFeature
 from .moe.mega_moe_feature import MegaMoeFeature
+from .moe.expert_placement_feature import ExpertPlacementFeature
 
 
 ADAPTOR_FEATURES = [
@@ -29,4 +30,5 @@ ADAPTOR_FEATURES = [
     UltraEPFeature(),
     DSAFeature(),
     MegaMoeFeature(),
+    ExpertPlacementFeature(),
 ]

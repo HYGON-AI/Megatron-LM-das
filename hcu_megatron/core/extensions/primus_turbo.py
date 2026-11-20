@@ -807,8 +807,6 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
     ):
 
         self.offload = False
-        assert not self.offload, "gemm offload still have some problems"
-
         super().__init__(
             num_gemms,
             input_size,

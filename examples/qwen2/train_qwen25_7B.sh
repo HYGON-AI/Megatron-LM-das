@@ -8,12 +8,12 @@ do
         data_path=${para#*=}
     elif [[ $para == --tokenizer_path* ]];then
         tokenizer_path=${para#*=}
-    elif [[ $para == --checkpoint_path* ]];then
-        checkpoint_path=${para#*=}
     elif [[ $para == --launch_with_binding* ]];then
         launch_with_binding=${para#*=}
     elif [[ $para == --launch_backend* ]];then
         launch_backend=${para#*=}
+    elif [[ $para == --checkpoint_path* ]];then
+        checkpoint_path=${para#*=}
     elif [[ $para == --profiling* ]];then
         profiling=${para#*=}
     elif [[ $para == --reproduce* ]];then
@@ -41,7 +41,7 @@ RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 export MEGATRON_LAUNCH_BACKEND=${launch_backend:-"mpirun"}
-MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
@@ -53,13 +53,13 @@ MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 export GPU_MAX_HW_QUEUES=4
 
 # split hyperparameters
-TP=2
+TP=1
 PP=2
 CP=1
 
 # batch hyperparameters
 MBS=1
-GBS=32
+GBS=64
 
 # seq hyperparameters
 SEQ_LEN=4096
@@ -88,35 +88,37 @@ GPT_MODEL_ARGS=(
     --seq-length ${SEQ_LEN}
     --num-layers 28
     --hidden-size 3584
-    --ffn-hidden-size 18944 
+    --ffn-hidden-size 18944
     --num-attention-heads 28
+    --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
     --num-query-groups 4
     --group-query-attention
-    --max-position-embeddings ${MAX_POSITION_EMBEDDINGS}
-    --position-embedding-type rope
-    --rotary-base 1000000
+
+    --swiglu
+    --add-qkv-bias
     --normalization RMSNorm
+    --position-embedding-type rope
     --untie-embeddings-and-output-weights
 )
 
 TRAINING_ARGS=(
     --transformer-impl transformer_engine
-    --use-mcore-models 
+    --use-mcore-models
     --micro-batch-size ${MBS}
     --global-batch-size ${GBS}
     --train-iters ${TRAIN_ITERS}
-    --weight-decay 0.1 
-    --adam-beta1 0.9 
-    --adam-beta2 0.95 
-    --init-method-std 0.006 
-    --clip-grad 1.0 
+    --weight-decay 0.1
+    --adam-beta1 0.9
+    --adam-beta2 0.95
+    --init-method-std 0.006
+    --clip-grad 1.0
     --bf16
     --disable-bias-linear
     --attention-dropout 0
     --hidden-dropout 0
-    --swiglu
-    --lr 3.0e-5 
-    --lr-decay-style cosine 
+    --rotary-base 1000000
+    --lr 3.0e-5
+    --lr-decay-style cosine
     --min-lr 3.0e-6
     --lr-warmup-iters ${LR_WARMUP_ITERS}
     --ckpt-format torch
@@ -129,18 +131,14 @@ MODEL_PARALLEL_ARGS=(
     --tensor-model-parallel-size ${TP}
     --pipeline-model-parallel-size ${PP}
     --context-parallel-size ${CP}
-    --use-distributed-optimizer 
+    --use-distributed-optimizer
     --sequence-parallel
 )
 
 DATA_ARGS=(
     --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
-    --dataloader-type external
-    --vlm-data-config-path ${DATA_PATH}
-    --model-arch qwen2.5vl
-    --processor-path ${TOKENIZER_MODEL_PATH}
-    # --data-path ${DATA_PATH}
+    --data-path ${DATA_PATH}
     --split 949,50,1
 )
 
@@ -148,11 +146,11 @@ EVAL_AND_LOGGING_ARGS=(
     --log-throughput
     --eval-iters 5
     --log-interval 1
-    --save-interval 1000 
-    --eval-interval 1000 
+    --save-interval 1000
+    --eval-interval 1000
     # --save $CHECKPOINT_PATH
     # --load $CHECKPOINT_PATH
-    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
+    --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard"
 )
 
 TORCH_PROFIE_ARGS=(
@@ -160,7 +158,7 @@ TORCH_PROFIE_ARGS=(
     --profile-ranks 0 1 2 3 4 5 6 7
     --profile-step-start 3
     --profile-step-end 4
-    --profile-dir torch_prof_qwen25vl_7B_tp${TP}-pp${PP}-cp${CP}
+    --profile-dir torch_prof_qwen25_7B_tp${TP}-pp${PP}-cp${CP}
     --use-pytorch-profiler
 )
 
@@ -173,7 +171,7 @@ HIP_PROFIE_ARGS=(
 )
 
 if [[ "$MEGATRON_LAUNCH_BACKEND" == "mpirun" ]]; then
-    APP="python -u ${MEGATRON_PATH}/pretrain_vlm.py \
+    APP="python -u ${MEGATRON_PATH}/pretrain_gpt.py \
         ${GPT_MODEL_ARGS[@]} \
         ${TRAINING_ARGS[@]} \
         ${MODEL_PARALLEL_ARGS[@]} \
@@ -184,7 +182,7 @@ if [[ "$MEGATRON_LAUNCH_BACKEND" == "mpirun" ]]; then
         "
 elif [[ "$MEGATRON_LAUNCH_BACKEND" == "torchrun" ]]; then
     APP="torchrun ${TORCH_DISTRIBUTED_ARGS[@]} \
-        ${MEGATRON_PATH}/pretrain_vlm.py \
+        ${MEGATRON_PATH}/pretrain_gpt.py \
         ${GPT_MODEL_ARGS[@]} \
         ${TRAINING_ARGS[@]} \
         ${MODEL_PARALLEL_ARGS[@]} \

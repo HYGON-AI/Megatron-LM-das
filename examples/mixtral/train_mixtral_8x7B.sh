@@ -29,7 +29,7 @@ RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 export MEGATRON_LAUNCH_BACKEND=${launch_backend:-"mpirun"}
-MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
@@ -51,7 +51,7 @@ ETP=1
 
 # batch hyperparameters
 MBS=1
-GBS=256
+GBS=128
 
 # seq hyperparameters
 SEQ_LEN=4096
@@ -114,7 +114,7 @@ MOE_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type HuggingFaceTokenizer
     --tokenizer-model ${TOKENIZER_MODEL_PATH}
     --data-path ${DATA_PATH}
     --split 99990,8,2

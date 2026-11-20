@@ -51,7 +51,10 @@ from megatron.core.utils import (
 
 from .ripipe_schedules import forward_backward_ripipe_pipelining
 from .seq1f1b.schedules import seq1f1b_forward_backward_pipelining_without_interleaving, seq1f1b_forward_backward_pipelining_with_interleaving
+from hcu_megatron.core.pipeline_parallel.pp_data_collector import schedule_wrapper
 from hcu_megatron.core.pipeline_parallel.schedule_timers import ScheduleTimers
+
+
 from hcu_megatron.core.parallel_state import get_dualpipe_chunk
 from hcu_megatron.training.arguments import get_adaptor_args
 
@@ -77,23 +80,27 @@ def get_forward_backward_func_wrapper(fn):
                 )
                 return forward_backward_pipelining_with_vocab_parallel
 
-            return fn(pp_size=pp_size, vp_size=vp_size, schedule_pg_collection=schedule_pg_collection)
+            forward_backward_func = fn(pp_size=pp_size, vp_size=vp_size, schedule_pg_collection=schedule_pg_collection)
         elif args.schedule_method == "dualpipev":
             if args.enable_vocab_parallel:
                 from .dualpipev.dualpipev_vocab_schedules import forward_backward_pipelining_with_cutinhalf
             else:
                 from .dualpipev.dualpipev_schedules import forward_backward_pipelining_with_cutinhalf
-            return forward_backward_pipelining_with_cutinhalf
+            forward_backward_func = forward_backward_pipelining_with_cutinhalf
         elif args.schedule_method == "seq1f1b":
-            return seq1f1b_forward_backward_pipelining_without_interleaving
+            forward_backward_func = seq1f1b_forward_backward_pipelining_without_interleaving
         elif args.schedule_method == "interleaved_seq1f1b":
-            return seq1f1b_forward_backward_pipelining_with_interleaving
+            forward_backward_func = seq1f1b_forward_backward_pipelining_with_interleaving
         elif args.schedule_method == "ripipe":
-            return forward_backward_ripipe_pipelining
+            forward_backward_func = forward_backward_ripipe_pipelining
         elif args.schedule_method == "zb_h1":
-            return forward_backward_pipelining_zbh1
+            forward_backward_func = forward_backward_pipelining_zbh1
         else:
             raise ValueError(f"schedule_method {args.schedule_method} is not supported")
+
+        if args.dump_pp_data:
+            forward_backward_func = schedule_wrapper(forward_backward_func)
+        return forward_backward_func
 
     return wrapper
 

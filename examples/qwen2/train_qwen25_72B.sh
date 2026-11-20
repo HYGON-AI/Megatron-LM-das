@@ -41,7 +41,7 @@ RANK=$OMPI_COMM_WORLD_RANK
 LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK
 WORLD_SIZE=$OMPI_COMM_WORLD_SIZE
 export MEGATRON_LAUNCH_BACKEND=${launch_backend:-"mpirun"}
-MASTER_ADDR=${MASTER_ADDR:-loadlhost}
+MASTER_ADDR=${MASTER_ADDR:-localhost}
 MASTER_PORT=${MASTER_PORT:-6000}
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-0}}}
@@ -54,15 +54,15 @@ export GPU_MAX_HW_QUEUES=4
 
 # split hyperparameters
 TP=4
-PP=4
-CP=2
+PP=8
+CP=1
 
 # batch hyperparameters
 MBS=1
 GBS=128
 
 # seq hyperparameters
-SEQ_LEN=8192
+SEQ_LEN=4096
 MAX_POSITION_EMBEDDINGS=131072
 
 # train iteration hyperparameters
@@ -125,15 +125,6 @@ TRAINING_ARGS=(
     --ddp-average-in-collective
     --overlap-grad-reduce
     --use-flash-attn
-
-    # --swap-attention
-
-    --optimizer-cpu-offload
-    # --optimizer-offload-fraction 1.0
-    --use-torch-optimizer-for-cpu-offload
-    --use-precision-aware-optimizer
-    --main-grads-dtype bf16 
-    --main-params-dtype fp16 
     
 )
 
@@ -158,8 +149,8 @@ EVAL_AND_LOGGING_ARGS=(
     --log-interval 1
     --save-interval 1000 
     --eval-interval 1000 
-    --save $CHECKPOINT_PATH
-    --load $CHECKPOINT_PATH
+    # --save $CHECKPOINT_PATH
+    # --load $CHECKPOINT_PATH
     --tensorboard-dir "${CHECKPOINT_PATH}/tensorboard" 
 )
 

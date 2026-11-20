@@ -138,5 +138,25 @@ Stage 3：在 Stage 2 基础上，进一步融合激活函数（use_turbo_fused_
 --turbo-deepep-use-comm-stream # 可选参数。在turbo-sync-free-moe-stage大于1并且sync-free-moe-backend=turbo时有效；启用后，turbo deepep 会使用内部流来执行 dispatch/combine。
 ```
 
+### 训练数据可视化
++ 项目支持对pipeline调度数据进行可视化，该功能参考[amd primus](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md)项目。使用该功能，需要增加以下参数:
+```
+--dump-pp-data
+--dump-pp-data-step-start  <int>                     # 开始迭代步，输出结果包含该步。可选参数，默认为3
+--dump-pp-data-step-end  <int>                       # 结束迭代步，输出结果不包含该步。可选参数，默认为4
+--dump-pp-data-dir <dir to write pp schedule data>   # 数据保存目录。可选参数，模型为<工作目录>/pp_data
+```
 
+### 项目支持 Mega Moe
++ 项目支持Mega Moe，将MoE层的all-to-all 通信与 grouped GEMM 融合，该功能参考[AMD Primus](https://github.com/AMD-AGI/Primus-Turbo/blob/main/docs/README_Mega_MoE.md)项目，使用如下参数开启：
+```
+--enable-mega-moe
+```
 
+### 项目支持 Muon优化器的Transformer Engine Newton–Schulz 实现
++ Muon 在更新二维权重时，需要对梯度执行 Newton–Schulz（NS）正交化。本特性为 Muon 的 `distributed` TP 模式接入 Transformer Engine（TE）的分布式 NS，作为现有实现的可选替代，在优化器更新占比较高的场景降低耗时，提高训练性能。开启方法：
+```
+--optimizer muon \
+--muon-tp-mode distributed \
+--newton-schulz-tp-impl transformer_engine
+```
