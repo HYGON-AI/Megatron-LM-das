@@ -160,3 +160,6 @@ Stage 3：在 Stage 2 基础上，进一步融合激活函数（use_turbo_fused_
 --muon-tp-mode distributed \
 --newton-schulz-tp-impl transformer_engine
 ```
+
+### 项目支持TAOT
++ 项目支持基于拓扑感知规划和临时专家副本的MoE专家并行负载均衡方案。具体使用说明见[TAOT](./docs/features/taot.md)
