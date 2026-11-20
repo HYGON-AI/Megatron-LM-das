@@ -118,6 +118,26 @@ def unpermute(
 3. recompute-layer-ids/recompute-mtp-layer-ids允许同时设置，或只设置一个。如不设置，相应网络层不进行重计算；
 4. 不允许设置recompute-method参数。
 
+### 项目支持sync-free moe
+MoE中的动态形状会触发CPU-GPU同步，造成显著的CPU开销，影响模型训练性能。本项目参考amd primus实现支持sync-free moe，通过分级融合策略，逐步消除MoE流水线中CPU-GPU同步开销，提升训练吞吐。本项目支持三种级别融合程度，级别越高，消除的同步环节越多。<br>
+Stage 1：启用 router 与 permutation 的融合，消除这两处的 CPU 同步。<br>
+Stage 2：在 Stage 1 基础上，加入无同步的 DeepEP dispatch 与 Turbo grouped GEMM。<br>
+Stage 3：在 Stage 2 基础上，进一步融合激活函数（use_turbo_fused_act_with_probs），实现全流水线无同步。<br>
+
+使用该特性需要在训练脚本中增加以下参数：
+```
+--enable-sync-free-moe
+--turbo-sync-free-moe-stage 1  # 表示融合级别，取值为1、2或3，默认为2
+```
+在turbo-sync-free-moe-stage大于1时，使用deepep或者turbo deepep，需要额外增加以下参数：
+```
+--moe-token-dispatcher-type flex
+--moe-flex-dispatcher-backend deepep
+--moe-flex-dispatcher-num-sms 36   # 整型。表示分配给 deepep/turbo deepep的sm数量，数值可调整；
+--sync-free-moe-backend turbo  # 指定moe通信后端，deepep: 使用deepep; turbo: 使用turbo deepep;
+--turbo-deepep-use-comm-stream # 可选参数。在turbo-sync-free-moe-stage大于1并且sync-free-moe-backend=turbo时有效；启用后，turbo deepep 会使用内部流来执行 dispatch/combine。
+```
+
 ### 训练数据可视化
 + 项目支持对pipeline调度数据进行可视化，该功能参考[amd primus](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md)项目。使用该功能，需要增加以下参数:
 ```

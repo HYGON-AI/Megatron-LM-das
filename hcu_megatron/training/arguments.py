@@ -262,19 +262,17 @@ def validate_args_func_decorator(validate_args_func):
                 "If overlap_p2p_comm is True, cuda graph replay will hang"
             )
 
-        if args.sync_free_moe_backend == "deepep":
-            args.moe_flex_dispatcher_backend = "deepep"
-            if args.moe_token_dispatcher_type != "flex":
-                warn_rank_0(f"DeepEP backend is only supported with flex token dispatcher.")
-                args.moe_token_dispatcher_type = "flex"
-            assert args.use_turbo_grouped_gemm, "--use-turbo-grouped-gemm should be set when enabling sync free moe with deepep."
-            assert not args.use_turbo_deepep, "--use-turbo-deepep should NOT be set when enabling sync free moe with deepep."
-
-        if args.use_turbo_deepep:
-            assert HAVE_DEEP_EP, "DeepEP is not available"
-            if args.moe_token_dispatcher_type != "flex":
-                warn_rank_0(f"Primus DeepEP backend is only supported with flex token dispatcher.")
-                args.moe_token_dispatcher_type = "flex"
+        if args.turbo_sync_free_moe_stage > 1:
+            if args.sync_free_moe_backend == "deepep":
+                args.moe_flex_dispatcher_backend = "deepep"
+                if args.moe_token_dispatcher_type != "flex":
+                    warn_rank_0(f"DeepEP backend is only supported with flex token dispatcher.")
+                    args.moe_token_dispatcher_type = "flex"
+            else:
+                assert HAVE_DEEP_EP, "DeepEP is not available"
+                if args.moe_token_dispatcher_type != "flex":
+                    warn_rank_0(f"Primus DeepEP backend is only supported with flex token dispatcher.")
+                    args.moe_token_dispatcher_type = "flex"
 
         args = validate_args_func(args, defaults)
 

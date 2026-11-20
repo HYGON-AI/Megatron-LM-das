@@ -172,7 +172,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
-            deepep_num_use_cu=args.turbo_deepep_num_cu,
+            deepep_num_use_cu=args.moe_flex_dispatcher_num_sms,
             deepep_num_worst_tokens=num_worst_tokens,
             deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_gemm,
         )

@@ -27,7 +27,6 @@ from hcu_megatron.training.utils import print_rank_message
 
 
 class GPTModelBuilder():
-
     def build_model(
         self,
         pg_collection: ProcessGroupCollection,

@@ -21,11 +21,7 @@ env:
 jobs:
   build:
     # 需要能访问内网 pip 源 / AICC 下载地址的自托管 runner
-    runs-on:
-      - self-hosted
-      - hcu
-      - hcu-ci-pr
-      - nmz36
+    runs-on: hygon-image-build
     steps:
       - name: Checkout
         uses: actions/checkout@v4
