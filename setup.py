@@ -9,7 +9,7 @@ if sys.version_info < (3,):
     raise Exception("Python 2 is not supported by hcu-megatron.")
 
 __description__ = 'hcu-megatron of Hygon'
-__version__ = '0.19.2+das.opt1.dtk2604'
+__version__ = '0.19.2+das'
 __author__ = 'Hygon'
 __keywords__ = 'hcu-megatron, language, deep learning, NLP'
 __package_name__ = 'hcu-megatron'
