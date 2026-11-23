@@ -8,10 +8,9 @@ on:
       - core_v0.18.2
       - core_v0.19.2
     types:
-      - opened
+      - labeled
       - synchronize
       - reopened
-      - ready_for_review
   workflow_dispatch:
 
 concurrency:
@@ -28,6 +27,11 @@ env:
 jobs:
   authorize:
     name: Authorize
+    # PR runs require the "ready hcu" label; adding any other label is a no-op.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'ready hcu') &&
+      (github.event_name != 'labeled' || github.event.label.name == 'ready hcu'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -280,7 +284,7 @@ jobs:
 
   finish:
     name: Finish
-    if: always()
+    if: always() && needs.authorize.result != 'skipped'
     needs:
       - authorize
       - check-changes
