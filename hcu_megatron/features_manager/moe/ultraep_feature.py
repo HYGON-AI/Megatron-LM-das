@@ -6,6 +6,23 @@ from functools import wraps
 from ..feature import AbstractFeature
 
 
+def _make_backward_post_hook_ultraep_wrapper(make_hook):
+    """Let UltraEP signal master gradients after replica reduction."""
+
+    @wraps(make_hook)
+    def wrapper(self, param):
+        if not getattr(param, 'is_eplb_master', False):
+            return make_hook(self, param)
+
+        def hook(*unused):
+            # UltraEP writes master gradients to main_grad and marks them ready.
+            return None
+
+        return hook
+
+    return wrapper
+
+
 def _get_param_groups_ultraep_wrapper(original_func):
     """Exclude temporary UltraEP replica parameters from optimizer groups."""
 
@@ -37,7 +54,7 @@ class UltraEPFeature(AbstractFeature):
             action='store_true',
             default=False,
             dest='moe_enable_ultraep',
-            help='Enable UltraEP expert-parallelism load balancing.',
+            help='Enable UltraEP load balancing for native MoE or MegaMoE experts.',
         )
         group.add_argument(
             '--moe-num-redundant-experts-per-rank',
@@ -111,29 +128,44 @@ class UltraEPFeature(AbstractFeature):
         if not getattr(args, 'moe_enable_ultraep', False):
             return
 
-        from hcu_megatron.core.extensions.transformer_engine import te_grouped_linear_sharded_state_dict_wrapper
         from hcu_megatron.core.distributed.param_and_grad_buffer import (
             _compute_full_param_layout_ultraep_wrapper,
             _distributed_data_parallel_init_wrapper,
             _param_and_grad_buffer_init_wrapper,
         )
-        from hcu_megatron.core.transformer.moe.experts import te_grouped_mlp_sharded_state_dict_wrapper
-        from hcu_megatron.core.transformer.moe.moe_layer_ultraep import (
-            moe_layer_ultraep_forward_wrapper,
-            moe_layer_ultraep_init_wrapper,
-        )
         from hcu_megatron.training.checkpointing import generate_state_dict_ultraep_wrapper
 
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
-            moe_layer_ultraep_init_wrapper,
-            apply_wrapper=True,
-        )
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.moe_layer.MoELayer.forward',
-            moe_layer_ultraep_forward_wrapper,
-            apply_wrapper=True,
-        )
+        # MegaMoE owns its packed-weight UltraEP path. Wrapping its methods with
+        # the native TEGroupedMLP implementation would depend on patch order and
+        # access fields that do not exist on the replacement layer.
+        if not getattr(args, 'mega_moe', False):
+            from hcu_megatron.core.extensions.transformer_engine import te_grouped_linear_sharded_state_dict_wrapper
+            from hcu_megatron.core.transformer.moe.experts import te_grouped_mlp_sharded_state_dict_wrapper
+            from hcu_megatron.core.transformer.moe.moe_layer_ultraep import (
+                moe_layer_ultraep_forward_wrapper,
+                moe_layer_ultraep_init_wrapper,
+            )
+
+            patch_manager.register_patch(
+                'megatron.core.transformer.moe.moe_layer.MoELayer.__init__',
+                moe_layer_ultraep_init_wrapper,
+                apply_wrapper=True,
+            )
+            patch_manager.register_patch(
+                'megatron.core.transformer.moe.moe_layer.MoELayer.forward',
+                moe_layer_ultraep_forward_wrapper,
+                apply_wrapper=True,
+            )
+            patch_manager.register_patch(
+                'megatron.core.extensions.transformer_engine.TEGroupedLinear._sharded_state_dict_grouped',
+                te_grouped_linear_sharded_state_dict_wrapper,
+                apply_wrapper=True,
+            )
+            patch_manager.register_patch(
+                'megatron.core.transformer.moe.experts.TEGroupedMLP.sharded_state_dict',
+                te_grouped_mlp_sharded_state_dict_wrapper,
+                apply_wrapper=True,
+            )
         patch_manager.register_patch(
             'megatron.core.distributed.param_and_grad_buffer._ParamAndGradBuffer.__init__',
             _param_and_grad_buffer_init_wrapper,
@@ -145,6 +177,11 @@ class UltraEPFeature(AbstractFeature):
             apply_wrapper=True,
         )
         patch_manager.register_patch(
+            'megatron.core.distributed.distributed_data_parallel.DistributedDataParallel._make_backward_post_hook',
+            _make_backward_post_hook_ultraep_wrapper,
+            apply_wrapper=True,
+        )
+        patch_manager.register_patch(
             'megatron.core.optimizer.distrib_optimizer.DistributedOptimizer.compute_full_param_layout',
             _compute_full_param_layout_ultraep_wrapper,
             apply_wrapper=True,
@@ -152,16 +189,6 @@ class UltraEPFeature(AbstractFeature):
         patch_manager.register_patch(
             'megatron.core.optimizer._get_param_groups',
             _get_param_groups_ultraep_wrapper,
-            apply_wrapper=True,
-        )
-        patch_manager.register_patch(
-            'megatron.core.extensions.transformer_engine.TEGroupedLinear._sharded_state_dict_grouped',
-            te_grouped_linear_sharded_state_dict_wrapper,
-            apply_wrapper=True,
-        )
-        patch_manager.register_patch(
-            'megatron.core.transformer.moe.experts.TEGroupedMLP.sharded_state_dict',
-            te_grouped_mlp_sharded_state_dict_wrapper,
             apply_wrapper=True,
         )
         patch_manager.register_patch(

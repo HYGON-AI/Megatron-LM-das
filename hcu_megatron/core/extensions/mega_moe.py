@@ -32,6 +32,9 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
+
+from .mega_moe_ultraep import MegaMoEUltraEPMixin
+
 try:
     from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
         fused_mega_moe_stage1,
@@ -140,13 +143,13 @@ class MegaMoEExperts(MegatronModule):
                 for expert_weight in weight.data:
                     init_method(expert_weight)
 
-    def forward(self, x, topk_idx, topk_weights):
+    def forward(self, x, topk_idx, topk_weights, weights=None):
         # Fetch w2 only after stage1 so DDP sees the same fc1-then-fc2 order.
-        w1 = self.fc1_weight()
+        w1 = self.fc1_weight() if weights is None else weights[0]
         l1_out, dispatch_weights, handle = fused_mega_moe_stage1(
             x, topk_idx, topk_weights, w1, self.ep_group
         )
-        w2 = self.fc2_weight()
+        w2 = self.fc2_weight() if weights is None else weights[1]
         return fused_mega_moe_stage2(
             l1_out,
             dispatch_weights,
@@ -166,12 +169,12 @@ class MegaMoEExperts(MegatronModule):
 class MegaMoEFP8Experts(MegaMoEExperts):
     """MXFP8 sibling using the FP8 MegaMoE stage pair."""
 
-    def forward(self, x, topk_idx, topk_weights):
-        w1 = self.fc1_weight()
+    def forward(self, x, topk_idx, topk_weights, weights=None):
+        w1 = self.fc1_weight() if weights is None else weights[0]
         l1_out, dispatch_weights, handle, state = fused_mega_moe_fp8_stage1(
             x, topk_idx, topk_weights, w1, self.ep_group
         )
-        w2 = self.fc2_weight()
+        w2 = self.fc2_weight() if weights is None else weights[1]
         return fused_mega_moe_fp8_stage2(
             l1_out,
             dispatch_weights,
@@ -184,7 +187,7 @@ class MegaMoEFP8Experts(MegaMoEExperts):
         )
 
 
-class PrimusTurboMegaMoELayer(MegatronModule):
+class PrimusTurboMegaMoELayer(MegaMoEUltraEPMixin, MegatronModule):
     """EP MoE layer: Megatron router -> fused experts -> optional shared expert."""
 
     def __init__(
@@ -255,6 +258,8 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         else:
             self.shared_experts = None
 
+        self._init_ultraep()
+
     def reset_parameters(self) -> None:
         self.experts.reset_parameters(self.ep_rank)
 
@@ -294,6 +299,9 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert intermediate_tensors is None, "MegaMoE does not support partial MoE execution"
+        if self.eplb_enabled:
+            return self._forward_ultraep(hidden_states, padding_mask), None
+
         input_shape = hidden_states.shape
         if padding_mask is not None:
             padding_mask = padding_mask.transpose(0, 1).bool()
