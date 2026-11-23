@@ -1,0 +1,1 @@
+recursive-include hcu_megatron/ops/csrc *.cpp *.h *.cu *.cuh

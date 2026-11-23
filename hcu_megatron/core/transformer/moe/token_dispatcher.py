@@ -3,9 +3,13 @@
 # Copyright (c) 2026 Hygon Information Technology Co., Ltd.
 # Some of this code was adopted from https://github.com/AMD-AGI/Primus
 
+from contextlib import nullcontext
+from copy import copy
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import torch
+import torch.nn.functional as F
 
 try:
     import primus_turbo.pytorch as primus_turbo_torch
@@ -31,6 +35,81 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 from hcu_megatron.core.transformer.moe.fused_a2a import fused_dispatch
 from hcu_megatron.training import get_args
+
+
+def _copy_state(owner):
+    """Copy Python state, never tensor storage, parameters or communicators."""
+    state = copy(owner)
+    # A few backends maintain Python bookkeeping containers in addition to
+    # assigning tensors. Those containers must not alias another forward.
+    for name, value in vars(owner).items():
+        if isinstance(value, (dict, list, set)):
+            setattr(state, name, copy(value))
+    return state
+
+
+@dataclass
+class MoEDispatchMetadata:
+    """Owned by one layer-state; captured locally by recompute closures."""
+
+    dispatcher: object
+    echo_weights: list = field(default_factory=list)
+
+    @property
+    def manager(self):
+        return self.dispatcher._comm_manager
+
+    def set_token_probs(self, probs):
+        self.manager.token_probs = probs
+
+    def set_dispatched_probs(self, probs):
+        self.manager.dispatched_probs = probs
+
+    def capture_echo_weights(self, experts, indices):
+        # Capture the installed TE-compatible tensors, including their gradient
+        # bridge attributes. Recreating Parameters here would sever autograd.
+        self.echo_weights = [
+            (getattr(experts, module), index,
+             getattr(getattr(experts, module), f"weight{index}"))
+            for module in ("linear_fc1", "linear_fc2")
+            for index in indices
+        ]
+
+    def install_echo_weights(self):
+        # Also called inside checkpoint closures: a later microbatch may have
+        # replaced the module's slots before this forward is recomputed.
+        for module, index, weight in self.echo_weights:
+            setattr(module, f"weight{index}", weight)
+
+    def detach_echo_weights(self, detach):
+        """Route weight gradients back through the pre-dispatch schedule node."""
+        detached_weights = []
+        for module, index, weight in self.echo_weights:
+            detached = detach(weight)
+            # TE's fused wgrad writes main_grad and returns a scheduling dummy.
+            # Keep the same per-forward bridge buffer on the detached tensor.
+            for name, value in vars(weight).items():
+                setattr(detached, name, value)
+            detached_weights.append((module, index, detached))
+        self.echo_weights = detached_weights
+
+
+def new_dispatch_metadata(dispatcher):
+    """Isolate dynamic dispatcher state before routing preprocess executes."""
+    local = _copy_state(dispatcher)
+    if hasattr(dispatcher, "_comm_manager"):
+        manager = _copy_state(dispatcher._comm_manager)
+        local._comm_manager = manager
+        # Primus aliases these two attributes to the same stateful object.
+        if getattr(dispatcher, "deepep_dispatcher", None) is dispatcher._comm_manager:
+            local.deepep_dispatcher = manager
+    if getattr(dispatcher, "shared_experts", None) is not None:
+        # SharedExpertMLP caches intermediate tensors across dispatch/combine.
+        # Parameters/submodules stay shared; the cache namespace is private.
+        local.shared_experts = _copy_state(dispatcher.shared_experts)
+    if hasattr(local, "cuda_sync_point"):
+        local.cuda_sync_point = "no_sync"
+    return MoEDispatchMetadata(local)
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
@@ -93,7 +172,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
-            deepep_num_use_cu=args.turbo_deepep_num_cu,
+            deepep_num_use_cu=args.moe_flex_dispatcher_num_sms,
             deepep_num_worst_tokens=num_worst_tokens,
             deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_gemm,
         )
@@ -416,3 +495,380 @@ class MoEFlexTokenDispatcher(MegatronCoreMoEFlexTokenDispatcher):
                 f"Invalid backend: {self.config.moe_flex_dispatcher_backend}"
                 "Please set --moe-flex-dispatcher-backend to deepep, hybridep, or ncclep"
             )
+
+
+class MoEElasticExpertMetadata:
+    """Metadata for the Elastic expert dispatcher.
+
+    Not a dataclass — attributes are set by MoEElasticExpertDispatcher.preprocess
+    and populated lazily by _materialize_dispatch_metadata.
+    """
+    handle = None
+    buffer_idx = 0  # 0=FC1, 1=FC2
+    materialized = False
+
+
+class MoEElasticExpertDispatcher:
+    """Dispatches expert weights to remote EP ranks based on offloading map.
+
+    Complementary to MoEAlltoAllTokenDispatcher: while the token dispatcher
+    routes tokens to experts, this dispatcher routes expert weights to ranks
+    that need them (i.e. copies home-expert weights into echo/spare slots on
+    other ranks so they can process the extra tokens auction/sinkhorn/greedy
+    assigned to them).
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        if pg_collection is None:
+            raise ValueError(
+                "MoEElasticExpertDispatcher requires pg_collection "
+                "with an expert-parallel process group."
+            )
+        self.config = config
+        self.ep_group = pg_collection.ep
+        self.ep_size = self.ep_group.size()
+        self.ep_rank = self.ep_group.rank()
+
+        self.num_local_experts = config.moe_num_echo_experts // self.ep_size
+        assert getattr(self.config, "moe_enable_echo", False), (
+            "Elastic expert dispatcher requires --moe-enable-echo"
+        )
+
+        self.permute_idx_device = "cpu"
+        input_chunk_idxs = torch.arange(
+            self.config.moe_num_echo_experts, device=self.permute_idx_device
+        )
+        # [num_local_experts, ep_size]. Sort input chunks by local experts.
+        self.sort_input_by_local_experts = (
+            input_chunk_idxs.reshape(-1, self.num_local_experts).T.ravel()
+        )
+
+    def preprocess(self, routing_map: torch.Tensor) -> MoEElasticExpertMetadata:
+        """Preprocesses the (home→echo) offloading map for expert dispatch.
+
+        Args:
+            routing_map: expert_offloading_map, shape [num_home, num_echo] bool.
+
+        Returns:
+            MoEElasticExpertMetadata with lazy input_splits/output_splits.
+            The all_to_all backend materializes those lists; the DeepEP backend
+            only materializes has_experts_per_slot.
+        """
+        num_home_experts, num_spare_experts = routing_map.shape
+        num_local_home_experts = num_home_experts // self.ep_size
+        num_local_spare_experts = num_spare_experts // self.ep_size
+        metadata = MoEElasticExpertMetadata()
+        metadata.global_routing_map = routing_map
+
+        metadata.local_to_global_routing_map = routing_map[
+            self.ep_rank * num_local_home_experts : (self.ep_rank + 1) * num_local_home_experts, :
+        ].reshape(num_local_home_experts, self.ep_size, num_local_spare_experts)
+        metadata.global_to_local_routing_map = routing_map[
+            :, self.ep_rank * num_local_spare_experts : (self.ep_rank + 1) * num_local_spare_experts
+        ].reshape(self.ep_size, num_local_home_experts, num_local_spare_experts)
+
+        metadata.input_splits = None
+        metadata.output_splits = None
+        metadata.num_out_experts = None
+        metadata.input_chunks_per_rank = None
+        metadata.has_experts_per_slot = None
+
+        return metadata
+
+    @staticmethod
+    def _send_order(local_to_global_map: torch.Tensor) -> List[int]:
+        """Local home-expert indices to send, in the same order as the
+        argsort-based permute() over the [num_local_home, num_echo] map:
+        echo column major, ascending home index within a column."""
+        flat = local_to_global_map.flatten(start_dim=1)
+        return torch.nonzero(flat.T.cpu())[:, 1].tolist()
+
+    # The all_to_all backend splits its single flat exchange buffer with these
+    # lists (expert_dispatch_communication here, and the experts_overlap
+    # fallback), so it must materialize them. The DeepEP backend derives every
+    # split from the chunk indices it already carries, and only reads
+    # has_experts_per_slot. Each of those split computations ends in a
+    # device->host copy, so materialize them only where they are read.
+    _needs_alltoall_split_metadata = True
+
+    def _materialize_dispatch_metadata(self, metadata: MoEElasticExpertMetadata):
+        """Populate dispatch metadata if it was not filled by preprocess()."""
+        if getattr(metadata, 'materialized', False):
+            return
+        metadata.materialized = True
+        if self._needs_alltoall_split_metadata and metadata.input_splits is None:
+            metadata.input_splits = metadata.local_to_global_routing_map.sum(dim=[0, 2]).tolist()
+            metadata.output_splits = metadata.global_to_local_routing_map.sum(dim=[1, 2]).tolist()
+            metadata.num_out_experts = sum(metadata.input_splits)
+            metadata.input_chunks_per_rank = (
+                metadata.global_to_local_routing_map.sum(dim=1).int().ravel().cpu()
+            )
+        metadata.has_experts_per_slot = (
+            metadata.global_to_local_routing_map.sum(dim=[0, 1]).tolist()
+        )
+
+    def expert_dispatch_preprocess(
+        self, metadata: MoEElasticExpertMetadata, *expert_weights
+    ) -> dict:
+        """Pack only the home-expert weights that are sent, in permute() order.
+
+        Equivalent to stack(all home weights) + permute(local_to_global map),
+        but skips stacking/permuting unsent experts, which also removes the
+        per-expert zero-grad accumulation in backward.
+        """
+        self._materialize_dispatch_metadata(metadata)
+        send_order = getattr(metadata, 'send_order', None)
+        if send_order is None:
+            send_order = self._send_order(metadata.local_to_global_routing_map)
+            metadata.send_order = send_order
+        assert len(send_order) == metadata.num_out_experts
+        assert metadata.local_to_global_routing_map.shape[0] == len(expert_weights)
+        weight_shape = expert_weights[0].shape
+        if send_order:
+            permuted_expert_weights = torch.stack(
+                [expert_weights[i].reshape(-1) for i in send_order], dim=0
+            )
+        else:
+            # Nothing to send: keep a [0, numel] tensor attached to the graph so
+            # this rank still joins the backward all_to_all.
+            permuted_expert_weights = expert_weights[0].reshape(1, -1)[:0]
+        return dict(permuted_weights=permuted_expert_weights, weight_shape=weight_shape)
+
+    def expert_dispatch_communication(
+        self, metadata: MoEElasticExpertMetadata, preprocessed: dict, *expert_weights
+    ) -> List[torch.Tensor]:
+        """AlltoAll the permuted weights + sort back into per-slot list."""
+        from megatron.core.tensor_parallel import all_to_all
+        from megatron.core.transformer.moe.moe_utils import sort_chunks_by_idxs
+
+        weight_shape = preprocessed['weight_shape']
+        permuted_expert_weights = preprocessed['permuted_weights']
+        dispatched_expert_weights = all_to_all(
+            self.ep_group,
+            permuted_expert_weights,
+            metadata.output_splits,
+            metadata.input_splits,
+        )
+        dispatched_expert_weights, _ = sort_chunks_by_idxs(
+            dispatched_expert_weights,
+            metadata.input_chunks_per_rank,
+            self.sort_input_by_local_experts,
+            fused=False,
+        )
+        expert_weights = torch.split(
+            dispatched_expert_weights, metadata.has_experts_per_slot, dim=0
+        )
+        weight_list = []
+        for weight in expert_weights:
+            if weight.numel() > 0:
+                weight_list.append(weight.reshape(weight_shape))
+            else:
+                weight_list.append(weight)
+        return weight_list
+
+    def expert_dispatch(
+        self, metadata: MoEElasticExpertMetadata, *expert_weights
+    ) -> List[torch.Tensor]:
+        """One-shot: preprocess + A2A + sort. Returns list of dispatched weights."""
+        preprocessed = self.expert_dispatch_preprocess(metadata, *expert_weights)
+        return self.expert_dispatch_communication(metadata, preprocessed, *expert_weights)
+
+
+# ============================================================================
+# DeepEP expert-weight dispatcher: BF16 chunks, synchronous and overlap paths.
+# Each (home expert, echo slot) copy is routed as rows with top-k=1.
+# ============================================================================
+class _DeepEPWeightDispatch(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, chunks, indices, num_experts, group, stream, ticket):
+        from megatron.core.transformer.moe.fused_a2a import get_buffer, get_hidden_bytes
+
+        # Retain this exact buffer until backward; FC1/FC2 or token dispatch may
+        # otherwise replace Megatron's global buffer with a differently sized one.
+        buffer = get_buffer(group, get_hidden_bytes(chunks))
+        overlap = stream is not None
+        if overlap:
+            stream.wait_stream(torch.cuda.current_stream(chunks.device))
+            chunks.record_stream(stream)
+            indices.record_stream(stream)
+        # apply() runs on the caller stream so backward joins the token/home
+        # gradient graph there. Only forward transport runs on the side stream.
+        with torch.cuda.stream(stream) if overlap else nullcontext():
+            previous = None
+            if overlap:
+                from megatron.core.transformer.moe.fused_a2a import EventHandle, EventOverlap
+                previous = EventOverlap(EventHandle())
+            per_rank, per_rdma_rank, per_expert, in_rank, layout_event = buffer.get_dispatch_layout(
+                indices, num_experts, previous_event=previous, async_finish=overlap,
+            )
+            received, received_indices, _, _, handle, done = buffer.dispatch(
+                chunks,
+                topk_idx=indices,
+                # Unit routing weights are metadata, not matrix multipliers.
+                topk_weights=torch.ones_like(indices, dtype=torch.float32),
+                num_tokens_per_rank=per_rank,
+                num_tokens_per_rdma_rank=per_rdma_rank,
+                num_tokens_per_expert=per_expert,
+                is_token_in_rank=in_rank,
+                previous_event=layout_event,
+                async_finish=overlap,
+            )
+            if overlap:
+                # DeepEP owns a communication stream. Bridge its completion to
+                # our side stream, never to the home-GEMM stream at launch time.
+                done.current_stream_wait()
+                ticket['done'] = torch.cuda.Event()
+                ticket['done'].record(stream)
+        if overlap:
+            received.record_stream(torch.cuda.current_stream(chunks.device))
+            received_indices.record_stream(torch.cuda.current_stream(chunks.device))
+        ctx.buffer = buffer
+        ctx.handle = handle
+        ctx.mark_non_differentiable(received_indices)
+        return received, received_indices
+
+    @staticmethod
+    def backward(ctx, grad_received, grad_indices):
+        # No probability factors: expert copies need the sum of replica wgrads.
+        grad_chunks, _, _ = ctx.buffer.combine(
+            grad_received.contiguous(), ctx.handle, async_finish=False,
+        )
+        return grad_chunks, None, None, None, None, None
+
+
+class MoEDeepEPExpertDispatcher(MoEElasticExpertDispatcher):
+    """Drop-in weight dispatcher using a DeepEP Buffer backend.
+
+    Uses the standard high-throughput Buffer API. Overlap launches asynchronous
+    dispatch on a side stream and waits only when echo GEMM needs the weights.
+    """
+    # In the basic DeepEP chunking test with simulated FC1 and FC2 matrix shapes,
+    # a chunk size of 8192 provides good performance while keeping total runtime relatively stable.
+    weight_chunk_size = 8192
+
+    # Splits ride along as chunk indices; see MoEElasticExpertDispatcher.
+    _needs_alltoall_split_metadata = False
+
+    def __init__(self, config, pg_collection):
+        super().__init__(config, pg_collection)
+        if self.ep_size <= 1:
+            raise ValueError('DeepEP echo expert dispatch requires EP size > 1')
+        from megatron.core.transformer.moe import fused_a2a
+
+        if not fused_a2a.HAVE_DEEP_EP:
+            raise RuntimeError(
+                'deep_ep package exposing Buffer; install it in the training '
+                'environment or select alltoall.'
+            )
+
+        # Megatron keeps ONE global DeepEP Buffer and rebuilds it whenever the
+        # group object differs or the buffer is too small. Across nodes every
+        # rebuild re-inits rocSHMEM and allocs/frees on the symmetric heap while
+        # the old Buffer is still alive (autograd ctx), which corrupts the heap.
+        # So share the token dispatcher's group object (tp_ep) and size the
+        # buffer for both weight chunks and tokens up front: it is never rebuilt.
+        self.comm_group = self.ep_group
+        tp_ep_group = getattr(pg_collection, 'tp_ep', None)
+        if tp_ep_group is not None and tp_ep_group.size() == self.ep_size:
+            self.comm_group = tp_ep_group
+        elif getattr(config, 'moe_flex_dispatcher_backend', None) == 'deepep':
+            raise ValueError(
+                'DeepEP echo expert dispatch together with the DeepEP token dispatcher '
+                'requires expert_tensor_parallel_size == 1 so both share one Buffer.'
+            )
+        token_hidden_bytes = config.hidden_size * max(config.params_dtype.itemsize, 2)
+        fused_a2a.get_buffer(
+            self.comm_group, max(self.weight_chunk_size * 2, token_hidden_bytes),
+        )
+
+    def expert_dispatch_preprocess(self, metadata, *expert_weights):
+        if not expert_weights:
+            raise ValueError('DeepEP echo expert dispatch requires home expert weights')
+        reference = expert_weights[0]
+        if reference.dtype != torch.bfloat16 or not reference.is_cuda:
+            raise ValueError('DeepEP echo expert dispatch requires BF16 weights on CUDA/ROCm/HCU')
+        if any(w.shape != reference.shape or w.dtype != reference.dtype
+               or w.device != reference.device for w in expert_weights):
+            raise ValueError('Home expert weights must have the same shape, dtype and device')
+        self._materialize_dispatch_metadata(metadata)
+        if any(count > 1 for count in metadata.has_experts_per_slot):
+            raise ValueError('Each echo slot can receive at most one home expert')
+
+        # FC1 and FC2 share the routing pairs. Materialize them once on CPU so
+        # only selected weights enter the packing graph, as in AlltoAll.
+        pairs = getattr(metadata, 'deepep_send_pairs', None)
+        if pairs is None:
+            local_map = metadata.local_to_global_routing_map.reshape(
+                len(expert_weights), -1,
+            )
+            pairs = local_map.cpu().nonzero(as_tuple=False).tolist()
+            metadata.deepep_send_pairs = pairs
+        if pairs:
+            # Repeated references deliberately create one copy per destination;
+            # stack backward sums replica gradients into the same home weight.
+            packed = torch.stack(
+                [expert_weights[owner].reshape(-1) for owner, _ in pairs]
+            )
+        else:
+            # Keep an empty exchange attached to autograd so a rank with no
+            # outgoing weights still joins the gradient combine collective.
+            packed = reference.reshape(1, -1)[:0]
+        numel = reference.numel()
+        numel = reference.numel()
+        chunks_per_weight = (numel + self.weight_chunk_size - 1) // self.weight_chunk_size
+        padding = chunks_per_weight * self.weight_chunk_size - numel
+        if padding:
+            packed = F.pad(packed, (0, padding))
+        chunks = packed.reshape(-1, self.weight_chunk_size)
+        slots = torch.tensor(
+            [slot for _, slot in pairs], dtype=torch.int64, device=reference.device
+        )
+        indices = slots.repeat_interleave(chunks_per_weight).reshape(-1, 1).contiguous()
+        return dict(chunks=chunks, indices=indices, weight_shape=reference.shape,
+                    weight_numel=numel, chunks_per_weight=chunks_per_weight)
+
+    def expert_dispatch_communication(self, metadata, preprocessed, *expert_weights):
+
+        received, indices = _DeepEPWeightDispatch.apply(
+            preprocessed['chunks'], preprocessed['indices'],
+            self.config.moe_num_echo_experts, self.comm_group, None, None,
+        )
+        return self._unpack_weights(metadata, preprocessed, received, indices)
+
+    def expert_dispatch_overlap_start(self, metadata, preprocessed, stream, earlier=None):
+        from .experts_overlap import _AfterEarlierWeight
+
+        chunks = preprocessed['chunks']
+        if earlier is not None:
+            # FC2 combine backward must finish before FC1 combine starts.
+            chunks = _AfterEarlierWeight.apply(chunks, earlier)
+        ticket = {}
+        received, indices = _DeepEPWeightDispatch.apply(
+            chunks, preprocessed['indices'], self.config.moe_num_echo_experts,
+            self.comm_group, stream, ticket,
+        )
+        ticket['indices'] = indices
+        return received, ticket
+
+    def expert_dispatch_overlap_finish(self, metadata, preprocessed, received, ticket):
+        if 'done' in ticket:
+            torch.cuda.current_stream(received.device).wait_event(ticket['done'])
+        return self._unpack_weights(metadata, preprocessed, received, ticket['indices'])
+
+    @staticmethod
+    def _unpack_weights(metadata, preprocessed, received, indices):
+        # DeepEP preserves source row order. A slot has at most one source, so a
+        # stable slot sort preserves chunk order within each reconstructed matrix.
+        order = torch.argsort(indices[:, 0], stable=True)
+        received = received.index_select(0, order)
+        sizes = [count * preprocessed['chunks_per_weight']
+                 for count in metadata.has_experts_per_slot]
+        weights = []
+        for chunks in torch.split(received, sizes, dim=0):
+            flat = chunks.reshape(-1)[:preprocessed['weight_numel']]
+            weights.append(flat.reshape(preprocessed['weight_shape']) if flat.numel() else flat)
+        return weights

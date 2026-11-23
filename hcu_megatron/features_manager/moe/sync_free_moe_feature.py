@@ -19,27 +19,23 @@ class SyncFreeMoeFeature(AbstractFeature):
                            dest='sync_free_moe',
                            help='use sync free moe')
         group.add_argument('--sync-free-moe-backend',
-                           type=str, default='primus', choices=['deepep', 'primus'],
+                           type=str, default=None, choices=['deepep', 'turbo'],
                            help='The backend to use for sync free moe')
         group.add_argument('--turbo-sync-free-moe-stage',
-                           type=int, default=None, choices=[1, 2, 3],
+                           type=int, default=2, choices=[1, 2, 3],
                            help='Sync-Free MoE optimization levels provided by primus')
         group.add_argument('--use-turbo-topk-router', action='store_true', default=False,
                            help='Replace TopKRouter with PrimusTopKRouter')
         group.add_argument('--use-turbo-moe-permute-fusion', action='store_true', default=False,
                            help='Patch TE and Megatron MoE with fused permutation implementations')
-        group.add_argument('--use-turbo-deepep', action='store_true', default=False,
-                           help='Replace MoE token dispatcher with PrimusTurbo DeepEP implementation')
         group.add_argument('--use-turbo-grouped-gemm', action='store_true', default=False,
                            help='use PrimusGroupedMLP')
         group.add_argument('--use-turbo-fused-act-with-probs', action='store_true', default=False,
                            help='use fused act with probs provided by primus turbo')
-        group.add_argument('--turbo-deepep-num-cu', type=int, default=32,
-                           help='the number of CUs to use for Primus-Turbo DeepEP')
         group.add_argument('--turbo-deepep-use-comm-stream', action='store_true', default=False,
                            help='Primus-Turbo DeepEP will use an internal stream to dispatch/combine when enabled, '
                                 'default used current_stream. Both set`sync_free_moe=True` and '
-                                '`use_turbo_deepep=True` first')
+                                '`sync_free_moe_backend=turbo` first')
         group.add_argument('--use-turbo-op-fuser', action='store_true', default=False,
                            help='use operation fuser API provided by turbo to enable advanced fusions')
 
@@ -51,13 +47,11 @@ class SyncFreeMoeFeature(AbstractFeature):
             },
             2: {
                 "use_turbo_topk_router": True,
-                "use_turbo_deepep": True,
                 "use_turbo_moe_permute_fusion": True,
                 "use_turbo_grouped_gemm": True,
             },
             3: {
                 "use_turbo_topk_router": True,
-                "use_turbo_deepep": True,
                 "use_turbo_moe_permute_fusion": True,
                 "use_turbo_grouped_gemm": True,
                 "use_turbo_fused_act_with_probs": True,
@@ -72,52 +66,43 @@ class SyncFreeMoeFeature(AbstractFeature):
 
         return sync_free_moe_options[stage]
 
+    def pre_validate_args(self, args):
+        if not args.sync_free_moe:
+            return args
+
+        if (
+            args.use_turbo_topk_router
+            or args.use_turbo_moe_permute_fusion
+            or args.use_turbo_grouped_gemm
+            or args.use_turbo_fused_act_with_probs
+        ):
+            warnings.warn("values of turbo-related parameters change with turbo_sync_free_moe_stage; "
+                          "directly setting turbo-related parameters may be ineffective.")
+
+        # prioritize the use of turbo_sync_free_moe_stage
+        options = self._get_sync_free_moe_options(args)
+        if args.turbo_sync_free_moe_stage > 1:
+            assert args.sync_free_moe_backend is not None, "sync_free_moe_backend should be specified when turbo_sync_free_moe_stage > 1"
+
+        for param in self.all_sync_free_moe_params:
+            if param in options:
+                setattr(args, param, options[param])
+
+            elif getattr(args, param, False):
+                warnings.warn(f"{param} is set to False when turbo_sync_free_moe_stage is {args.turbo_sync_free_moe_stage}")
+                setattr(args, param, False)
+
+        return args
+
     def validate_args(self, args):
         if args.sync_free_moe:
             if args.fp8 or args.fp4:
                 assert args.moe_router_padding_for_quantization, "moe_router_padding_for_quantization should be True if using fp8/fp4."
 
-        if not args.sync_free_moe:
-            if (
-                args.use_turbo_topk_router
-                or args.use_turbo_moe_permute_fusion
-                or args.use_turbo_deepep
-                or args.use_turbo_grouped_gemm
-                or args.use_turbo_fused_act_with_probs
-                or args.turbo_sync_free_moe_stage
-            ):
-                warnings.warn(f"parameters specific to sync free moe does not take effect when enable-sync-free-moe is not set.")
-
-            return args
-
-        if args.use_turbo_fused_act_with_probs:
-            if not args.use_turbo_grouped_gemm:
-                warnings.warn(f"use-turbo-fused-act-with-probs does not take effect when use_turbo_grouped_gemm is not set")
-
-        # prioritize the use of turbo_sync_free_moe_stage
-        if args.turbo_sync_free_moe_stage:
-            options = self._get_sync_free_moe_options(args)
-            for param in self.all_sync_free_moe_params:
-                if param in options:
-                    setattr(args, param, options[param])
-
-                elif getattr(args, param, False):
-                    warnings.warn(f"{param} is set to False when turbo_sync_free_moe_stage is {args.turbo_sync_free_moe_stage}")
-                    setattr(args, param, False)
-
-            return args
-
-        if args.use_turbo_fused_act_with_probs:
-            args.turbo_sync_free_moe_stage = 3
-        elif args.use_turbo_deepep or args.use_turbo_grouped_gemm:
-            args.turbo_sync_free_moe_stage = 2
-        elif args.use_turbo_topk_router or args.use_turbo_moe_permute_fusion:
-            args.turbo_sync_free_moe_stage = 1
-
         return args
 
     def register_patches(self, patch_manager, args):
-        args = self.validate_args(args)
+        args = self.pre_validate_args(args)
         if args.sync_free_moe:
             if args.use_turbo_topk_router:
                 from hcu_megatron.core.transformer.moe.router import PrimusTopKRouter
@@ -145,7 +130,7 @@ class SyncFreeMoeFeature(AbstractFeature):
                 patch_manager.register_patch("megatron.core.extensions.transformer_engine.fused_unpermute",
                                              moe_unpermute)
 
-            if args.use_turbo_deepep:
+            if args.turbo_sync_free_moe_stage > 1 and args.sync_free_moe_backend == "turbo":
                 from hcu_megatron.core.transformer.moe.token_dispatcher import PrimusTurboDeepEPTokenDispatcher
 
                 patch_manager.register_patch("megatron.core.transformer.moe.token_dispatcher.MoEFlexTokenDispatcher",
@@ -161,7 +146,7 @@ class SyncFreeMoeFeature(AbstractFeature):
                 patch_manager.register_patch('megatron.core.full_cuda_graph.FullCudaGraphWrapper.__call__',
                                             FullCudaGraphWrapper.__call__)
 
-            if args.sync_free_moe_backend == "deepep":
+            if args.turbo_sync_free_moe_stage > 1 and args.sync_free_moe_backend == "deepep":
                 from hcu_megatron.core.transformer.moe.token_dispatcher import MoEFlexTokenDispatcher
 
                 patch_manager.register_patch("megatron.core.transformer.moe.token_dispatcher.MoEFlexTokenDispatcher",

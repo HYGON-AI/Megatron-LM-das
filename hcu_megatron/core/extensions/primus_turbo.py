@@ -23,7 +23,6 @@ from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_pg_size
 from megatron.training import print_rank_0
-from megatron.training.global_vars import get_args
 
 try:
     import primus_turbo.pytorch as primus_turbo_torch
@@ -694,10 +693,8 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
             assert False, "Custom recipe is not supported for Primus-Turbo"
 
         elif qrecipe.fp8_quantization_recipe is not None:
-            from primus.backends.megatron.core.fp8_utils import (
-                MXFP8_SCALING_BLOCK_SIZE,
-                SCALING_BLOCK_SIZE,
-            )
+            SCALING_BLOCK_SIZE = 128
+            MXFP8_SCALING_BLOCK_SIZE = 32
 
             if qrecipe.fp8_format == "e4m3":
                 fp8_format = Format.E4M3
@@ -732,10 +729,7 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
             if qrecipe.fp4_quantization_recipe == Fp4Recipe.nvfp4:
                 assert False, "NVFP4 is not supported for Primus-Turbo"
             elif qrecipe.fp4_quantization_recipe == Fp4Recipe.mxfp4:
-                from primus.backends.megatron.core.fp4_utils import (
-                    MXFP4_SCALING_BLOCK_SIZE,
-                )
-
+                MXFP4_SCALING_BLOCK_SIZE = 32
                 quant_recipe = PrimusTurboQuantConfig(
                     granularity=ScalingGranularity.MX_BLOCKWISE,
                     format=Format.E2M1_X2,
@@ -812,10 +806,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         name: str | None = None,
     ):
 
-        args = get_args()
-        self.offload = False  # args.offload and "column_parallel_gemm" in args.offload_ops
-        assert not self.offload, "gemm offload still have some problems"
-
+        self.offload = False
         super().__init__(
             num_gemms,
             input_size,
@@ -913,7 +904,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         weights = self.weights
         is_first_microbatch = self.is_first_microbatch
         self.is_first_microbatch = False
-        fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern(self.config, weights)
+        # fuse_bgrad_accum_pattern=megatron is currently not supported
+        fuse_wgrad_accum_pattern = None # _fuse_wgrad_accum_pattern(self.config, weights)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
