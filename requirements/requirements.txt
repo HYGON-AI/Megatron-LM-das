@@ -34,3 +34,4 @@ emerging-optimizers
 nemo_run==0.4.0
 torchx
 diffusers
+qwen_vl_utils

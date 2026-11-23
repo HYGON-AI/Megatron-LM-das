@@ -13,7 +13,7 @@ env:
   DTK_VERSION: "26.10"    # dtk 版本号; 基础镜像 tag & 产物 tag 的 dtk 段 & pip nightly 源 token (dtk2604) 由此拼接
   OS_VERSION: "ubuntu22.04" # 基础镜像 tag 的系统版本段
   PY_VERSION: "py3.12"      # 基础镜像 tag 的 python 版本段
-  TORCH_VERSION: "2.11.0" # 框架依赖的 torch 大版本, Dockerfile 内 das-install 的 torch_tag 随此推导
+  TORCH_VERSION: "2.13.0" # 框架依赖的 torch 大版本, Dockerfile 内 das-install 的 torch_tag 随此推导
   RCCL_TESTS_COMMIT: "155f4748e6de7ce3ab54a0bf09931d9316262260" # rccl-tests 锁定 commit
   RCCL_GPU_TARGETS: "gfx936 gfx938"                             # rccl-tests 编译目标 GPU 架构
   RUN_NHC_COMMIT: "3e0016b4a999ca43638ff2009d8a315ede8f2f7f"    # run_nhc 锁定commit
@@ -44,7 +44,7 @@ jobs:
           # BUILD_TIME: image.info 的 built 段, 与产物 tag 的时间段保持一致
           echo "BUILD_TIME=${BUILD_TIME}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=megatron:${MEGATRON_VERSION}-ubuntu22.04-dtk${DTK_VERSION//./}-${PY}-${BUILD_TIME}" >> "$GITHUB_ENV"
-          echo "LATEST_TAG=megatron:${MEGATRON_VERSION}-latest" >> "$GITHUB_ENV"
+          echo "LATEST_TAG=megatron:latest" >> "$GITHUB_ENV"
 
       - name: Build
         id: build_image
