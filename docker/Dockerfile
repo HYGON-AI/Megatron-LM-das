@@ -172,7 +172,7 @@ RUN : "${RESOURCE_SERVER_URL:?RESOURCE_SERVER_URL build argument is required}" &
 
 # ---layer---
 RUN TORCH_TAG="torch${TORCH_VERSION//./}" \
-    && pip install torch==${TORCH_VERSION} nvidia-resiliency-ext==0.7.0.dev136 \
+    && pip install torch==${TORCH_VERSION} nvidia-resiliency-ext==0.7.0 \
     && das-install torchvision ${TORCH_TAG} \
     && das-install flash_attn ${TORCH_TAG} \
     && das-install triton ${TORCH_TAG} \
