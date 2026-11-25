@@ -68,7 +68,9 @@ NODE_RANK=${NODE_RANK:?"NODE_RANK must be set (or run under mpirun which provide
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
-MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
+# Respect an externally provided MEGATRON_PATH (CI runs this copy from
+# tests/bw1100/nightly, where the default computation resolves too shallow).
+MEGATRON_PATH=${MEGATRON_PATH:-$( dirname $( dirname ${CURRENT_DIR}))}
 
 # default env
 export GPU_MAX_HW_QUEUES=4
