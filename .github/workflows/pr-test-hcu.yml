@@ -241,9 +241,10 @@ jobs:
           docker run --rm --init -i --pull=always \
             --name "megatron-pr-$DAS_HCU_CI_RUN_ID" \
             --label "megatron.pr.unit=$GITHUB_REPOSITORY:$DAS_HCU_CI_RUN_ID" \
-            --user "$uid:$gid" --cap-drop=ALL --security-opt=no-new-privileges \
+            --user "$uid:$gid" --cap-drop=ALL --cap-add=SYS_PTRACE \
+            --security-opt=no-new-privileges --security-opt seccomp=unconfined \
             --device=/dev/kfd --device=/dev/mkfd --device=/dev/dri \
-            "${device_groups[@]}" --shm-size=64g \
+            "${device_groups[@]}" --shm-size=64g --ipc=host --ulimit memlock=-1:-1 \
             --mount "type=bind,src=$ws,dst=/ci-input,readonly" \
             --mount "type=bind,src=$logs,dst=/ci-logs" \
             --mount "type=bind,src=/opt/hyhal,dst=/opt/hyhal,readonly" \
