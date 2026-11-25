@@ -103,15 +103,3 @@ class ExpertPlacementFeature(AbstractFeature):
             moe_layer_sharded_state_dict_placement_wrapper,
             apply_wrapper=True,
         )
-        if getattr(args, 'use_bridge', False) and getattr(args, 'load_weights', False):
-            from hcu_megatron.core.transformer.moe.expert_placement import (
-                bridge_to_megatron_provider_placement_wrapper,
-            )
-
-            # Bridge imports HF expert i into local slot i; move experts to their placement slots
-            # right after the import, before DDP and the optimizer copy the parameters.
-            patch_manager.register_patch(
-                'megatron.bridge.models.conversion.auto_bridge.AutoBridge.to_megatron_provider',
-                bridge_to_megatron_provider_placement_wrapper,
-                apply_wrapper=True,
-            )
