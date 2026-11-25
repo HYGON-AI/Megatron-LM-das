@@ -100,24 +100,6 @@ def check_group_limited_routing(config, phys2log: Sequence[int], ep_size: int, l
             )
 
 
-def bridge_to_megatron_provider_placement_wrapper(to_megatron_provider_func):
-    """Permute HF-imported experts into their placement slots before DDP wrapping.
-
-    Bridge loads HF expert ``e`` into physical slot ``e`` (stock contiguous order). Physical
-    slot ``p`` must hold logical expert ``phys2log[p]``; the weights of logical expert e live
-    on rank ``e // per_rank`` after import, so they are exchanged across the EP group.
-    """
-
-    @wraps(to_megatron_provider_func)
-    def wrapper(self, *args, **kwargs):
-        provider = to_megatron_provider_func(self, *args, **kwargs)
-        if kwargs.get("load_weights", args[0] if args else True):
-            provider.register_pre_wrap_hook(permute_imported_experts)
-        return provider
-
-    return wrapper
-
-
 @torch.no_grad()
 def permute_imported_experts(model):
     """Pre-wrap hook: move every MoE layer's experts from logical to placement order."""

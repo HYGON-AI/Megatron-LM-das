@@ -35,7 +35,6 @@ def add_adaptor_args(parser):
     parser = _add_extra_training_args(parser)
     parser = _add_extra_initialization_args(parser)
     parser = _add_extra_tokenizer_args(parser)
-    parser = _add_extra_mbridge_args(parser)
 
     for feature in ADAPTOR_FEATURES:
         feature.register_args(parser)
@@ -199,37 +198,6 @@ def _add_extra_tokenizer_args(parser):
     return parser
 
 
-def _add_extra_mbridge_args(parser):
-    group = parser.add_argument_group(title='extra mbridge args')
-    group.add_argument('--use-bridge', action='store_true',
-                       help='Whether to use bridge module in the model')
-    group.add_argument('--bridge-hf-model', type=str, default=None,
-                       help='The HuggingFace model path for initializing the bridge module')
-    group.add_argument('--load-weights', action='store_true',
-                       help='Whether to load weights for the bridge module when initializing the model')
-    group.add_argument('--save-hf-weights', action='store_true',
-                       help='Also export the model in HuggingFace format next to each Megatron '
-                            'checkpoint, under ${save}/iter_XXXXXXX/hf/. Requires --use-bridge and '
-                            '--save. The exported directory contains config.json, tokenizer files '
-                            'and safetensors weights, and can be loaded with from_pretrained().')
-    group.add_argument('--save-hf-weights-distributed', action='store_true',
-                       help='Export HuggingFace weights in distributed mode, where each rank writes '
-                            'part of the safetensors shards instead of rank 0 writing all of them. '
-                            'Reduces export time and rank-0 memory for large models. '
-                            'Only takes effect together with --save-hf-weights.')
-    group.add_argument('--bridge-language-model-only', action='store_true',
-                       help='For VLM bridge providers, build only the language model (MCoreGPTModel) '
-                            'via provider.provide_language_model, skipping ViT / vision projector. '
-                            'No-op for pure LLM providers.')
-    group.add_argument('--image-tokens-per-sample', type=int, default=None,
-                       help='Number of image (post-merger) tokens per sample used to include '
-                            'ViT + patch-embed + projector FLOPs in throughput accounting. '
-                            'Only takes effect together with --use-bridge and a VLM provider that '
-                            'exposes vision_config. Leave unset (default None) to keep the '
-                            'LLM-only FLOPs baseline.')
-    return parser
-
-
 ORIGIN_ARG_VALUES = dict()
 
 def validate_args_func_decorator(validate_args_func):
@@ -275,21 +243,6 @@ def validate_args_func_decorator(validate_args_func):
                     args.moe_token_dispatcher_type = "flex"
 
         args = validate_args_func(args, defaults)
-
-        # HF-format export piggybacks on the bridge (it needs the HF config /
-        # tokenizer / weight mapping) and on the regular checkpoint schedule
-        # (it writes into ${save}/iter_XXXXXXX/hf).
-        if getattr(args, "save_hf_weights", False):
-            if not args.use_bridge:
-                raise ValueError("--save-hf-weights requires --use-bridge.")
-            if args.save is None:
-                raise ValueError("--save-hf-weights requires --save to be set.")
-        if getattr(args, "save_hf_weights_distributed", False) and not getattr(
-            args, "save_hf_weights", False
-        ):
-            raise ValueError(
-                "--save-hf-weights-distributed requires --save-hf-weights."
-            )
 
         # print env vars
         _print_env_vars("env vars", exclude_vars=["BASH_FUNC", "OMPI"])
