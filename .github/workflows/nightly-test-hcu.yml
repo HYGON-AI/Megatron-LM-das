@@ -178,10 +178,26 @@ jobs:
         shell: bash
         run: python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
 
+      - name: Check environment
+        shell: bash
+        run: bash tests/bw1100/ci/check_environment.sh
+
       - name: Run Qwen3-8B pretrain example
-        uses: ./.github/actions/run-test
-        with:
-          test_script: tests/bw1100/nightly/run_qwen3.sh
+        shell: bash
+        env:
+          TEST_SCRIPT: tests/bw1100/nightly/run_qwen3.sh
+        run: |
+          set -euo pipefail
+          export DAS_HCU_CI_LOG_DIR="${DAS_HCU_CI_LOG_DIR:-ci-logs/run}"
+          mkdir -p "${DAS_HCU_CI_LOG_DIR}"
+          source tests/bw1100/ci/prepare_workspace.sh
+          bash "${TEST_SCRIPT}" 2>&1 | tee -a "${DAS_HCU_CI_LOG_DIR}/test.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: bash tests/bw1100/ci/cleanup.sh || true
 
   sft:
     name: Qwen3-8B SFT (10 steps)
@@ -227,10 +243,26 @@ jobs:
         shell: bash
         run: python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
 
+      - name: Check environment
+        shell: bash
+        run: bash tests/bw1100/ci/check_environment.sh
+
       - name: Run Qwen3-8B SFT example
-        uses: ./.github/actions/run-test
-        with:
-          test_script: tests/bw1100/nightly/run_qwen3.sh
+        shell: bash
+        env:
+          TEST_SCRIPT: tests/bw1100/nightly/run_qwen3.sh
+        run: |
+          set -euo pipefail
+          export DAS_HCU_CI_LOG_DIR="${DAS_HCU_CI_LOG_DIR:-ci-logs/run}"
+          mkdir -p "${DAS_HCU_CI_LOG_DIR}"
+          source tests/bw1100/ci/prepare_workspace.sh
+          bash "${TEST_SCRIPT}" 2>&1 | tee -a "${DAS_HCU_CI_LOG_DIR}/test.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: bash tests/bw1100/ci/cleanup.sh || true
 
   qwen35_text_9b:
     name: Qwen3.5-9B text pretrain (bridge)
@@ -251,6 +283,7 @@ jobs:
     env:
       BRIDGE_ROOT: ${{ github.workspace }}/3rdparty/Megatron-bridge-das
       BRIDGE_RECIPE: qwen35_text_9b_pretrain_8gpu_bw1100_bf16_config
+      TRAIN_ITERS: "10"
       LOCAL_HF_PATH: ${{ vars.DAS_QWEN35_9B_MODEL_PATH }}
     steps:
       - name: Checkout repository

@@ -13,6 +13,8 @@
 #   LOCAL_HF_PATH Qwen3.5-9B HF snapshot; the recipe reads config.json and the
 #                 tokenizer from here, and loads no weights (mock dataset)
 #   BRIDGE_RECIPE recipe name; defaults to the 8-GPU BW1100 9B config
+#   TRAIN_ITERS   training iterations; defaults to 50. The bridge example
+#                 hardcodes 50, so this wrapper runs a patched copy.
 set -euo pipefail
 
 bridge_root="${BRIDGE_ROOT:-}"
@@ -32,10 +34,43 @@ local_hf_path="${LOCAL_HF_PATH:-}"
 export LOCAL_HF_PATH="${local_hf_path}"
 
 recipe="${BRIDGE_RECIPE:-qwen35_text_9b_pretrain_8gpu_bw1100_bf16_config}"
+train_iters="${TRAIN_ITERS:-50}"
+[[ "${train_iters}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: TRAIN_ITERS must be a positive integer, got '${train_iters}'" >&2
+    exit 1
+}
+
+# The bridge example hardcodes TRAIN_ITERS=50, so run a patched copy. Keep the
+# copy in the example's own directory: the example derives CURRENT_DIR and
+# MEGATRON_PATH from $0. Never edit the tracked checkout.
+train_dir="$(cd "$(dirname "${train_script}")" && pwd)"
+patched_script="${train_dir}/.train_qwen35_text_pretrain.ci.$$.sh"
+finish() {
+    rc=$?
+    trap - EXIT
+    rm -f -- "${patched_script}" || true
+    exit "${rc}"
+}
+trap finish EXIT
+
+cp -- "${train_script}" "${patched_script}"
+if grep -qx 'TRAIN_ITERS=50' "${patched_script}"; then
+    sed -i "s/^TRAIN_ITERS=50$/TRAIN_ITERS=${train_iters}/" "${patched_script}"
+    grep -qx "TRAIN_ITERS=${train_iters}" "${patched_script}" || {
+        echo "ERROR: cannot override TRAIN_ITERS in ${train_script}" >&2
+        exit 1
+    }
+elif grep -Eq '^TRAIN_ITERS=\$\{TRAIN_ITERS:-[0-9]+\}$' "${patched_script}"; then
+    export TRAIN_ITERS="${train_iters}"
+else
+    echo "ERROR: unsupported TRAIN_ITERS definition in ${train_script}" >&2
+    exit 1
+fi
 
 echo "=== bridge nightly launch ==="
 echo "bridge=${bridge_root}"
 echo "recipe=${recipe}"
+echo "iters=${train_iters}"
 echo "model=${LOCAL_HF_PATH}"
 
-exec bash "${train_script}" "${recipe}" train
+bash "${patched_script}" "${recipe}" train
