@@ -8,10 +8,9 @@ on:
       - core_v0.18.2
       - core_v0.19.2
     types:
-      - opened
+      - labeled
       - synchronize
       - reopened
-      - ready_for_review
   workflow_dispatch:
 
 concurrency:
@@ -28,6 +27,11 @@ env:
 jobs:
   authorize:
     name: Authorize
+    # PR runs require the "ready hcu" label; adding any other label is a no-op.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (contains(github.event.pull_request.labels.*.name, 'ready hcu') &&
+      (github.event_name != 'labeled' || github.event.label.name == 'ready hcu'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -173,77 +177,21 @@ jobs:
             exit 1
           }
 
-  restore-before-unit:
-    name: Restore workspace before unit tests
-    needs:
-      - check-changes
-      - validate-config
-    if: needs.check-changes.outputs.runtime == 'true' && needs.validate-config.result == 'success'
-    runs-on:
-      group: ci-general
-      labels: [self-hosted, ci, bw1100]
-    timeout-minutes: 10
-    env:
-      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
-    steps:
-      - name: Restore existing workspace ownership
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          workspace="$(realpath -m -- "${GITHUB_WORKSPACE}")"
-          runner_temp="$(realpath -m -- "${RUNNER_TEMP}")"
-          work_root="$(dirname -- "${runner_temp}")"
-          case "${workspace}" in
-            "${work_root}"/*/*) ;;
-            *) echo "ERROR: refusing to change ownership outside ${work_root}: ${workspace}" >&2; exit 1 ;;
-          esac
-
-          owner="$(stat -c '%u:%g' -- "${runner_temp}")"
-          [[ "${owner}" =~ ^[1-9][0-9]*:[0-9]+$ ]] || {
-            echo "ERROR: unsafe runner ownership: ${owner}" >&2
-            exit 1
-          }
-
-          docker run --rm \
-            --volume "${workspace}:/workspace" \
-            "${DAS_HCU_CI_IMAGE}" \
-            chown -R -- "${owner}" /workspace
-
   unit-tests:
     name: Unit tests
-    needs:
-      - check-changes
-      - linting
-      - restore-before-unit
+    needs: [check-changes, linting, validate-config]
     if: needs.check-changes.outputs.runtime == 'true'
     runs-on:
       group: ci-general
       labels: [self-hosted, ci, bw1100]
     timeout-minutes: 60
-    container:
-      image: ${{ vars.DAS_HCU_CI_IMAGE || 'invalid.local/das-hcu-unconfigured@sha256:0000000000000000000000000000000000000000000000000000000000000000' }}
-      options: >-
-        --privileged
-        --device=/dev/kfd
-        --device=/dev/mkfd
-        --device=/dev/dri
-        --group-add video
-        --cap-add=SYS_PTRACE
-        --security-opt seccomp=unconfined
-        --shm-size=64g
-        --ipc=host
-      volumes:
-        - /opt/hyhal:/opt/hyhal:ro
     env:
+      HCU_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       DAS_HCU_CI_RUN_ID: unit-${{ github.run_id }}-${{ github.run_attempt }}
-      DAS_HCU_CI_LOG_DIR: ci-logs/unit-${{ github.run_id }}-${{ github.run_attempt }}
-      BUCKET: tests/unit_tests
-      N_REPEAT: "1"
-      MEGATRON_PATH: ${{ github.workspace }}/3rdparty/Megatron-LM
-      DTK_ENV: /opt/dtk/env.sh
     steps:
-      - name: Checkout repository
+      # Only the pinned checkout action runs on the host. PR scripts run inside Docker.
+      - name: Checkout tested revision as the runner user
+        id: checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -251,44 +199,151 @@ jobs:
           fetch-depth: 0
           submodules: false
           clean: true
+          persist-credentials: false
 
-      - name: Install requirements
+      - name: Run HCU unit tests with this machine's UID and GID
+        id: test
         shell: bash
-        run: python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          uid=$(id -u); gid=$(id -g)
+          [[ "$uid" != 0 && "$HCU_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          ws=$(realpath -e -- "$GITHUB_WORKSPACE")
+          [[ "$ws" == "$GITHUB_WORKSPACE" && -d "$ws/.git" && ! -L "$ws/.git" ]]
+          printf 'Runner %s; host UID:GID=%s:%s; source=%s\n' "$RUNNER_NAME" "$uid" "$gid" "$HCU_SOURCE_SHA"
 
-      - name: Run unit tests
-        uses: ./.github/actions/run-test
-        with:
-          test_script: tests/bw1100/pr/run_unit_tests.sh
+          # Only this NEW log directory is writable from the container. Reject PR-supplied
+          # links or a pre-existing run directory; never chown the persistent checkout.
+          [[ ! -L "$ws/ci-logs" ]]
+          mkdir -p -- "$ws/ci-logs"
+          logs="$ws/ci-logs/$DAS_HCU_CI_RUN_ID"
+          mkdir -- "$logs"
 
-  restore-after-unit:
-    name: Restore workspace after unit tests
-    if: always() && needs.check-changes.outputs.runtime == 'true' && needs.unit-tests.result != 'skipped'
-    needs:
-      - check-changes
-      - unit-tests
-    runs-on:
-      group: ci-general
-      labels: [self-hosted, ci, bw1100]
-    timeout-minutes: 5
-    env:
-      DAS_HCU_CI_IMAGE: ${{ vars.DAS_HCU_CI_IMAGE }}
-    steps:
-      - name: Restore runner workspace ownership
+          # Map numeric HCU device groups, not the host user's other groups (e.g. docker).
+          device_groups=()
+          declare -A seen=()
+          shopt -s nullglob
+          for dev in /dev/kfd /dev/mkfd /dev/dri/card* /dev/dri/renderD*; do
+            [[ -c "$dev" ]] || continue
+            g=$(stat -Lc %g -- "$dev")
+            if [[ "$g" != 0 && "$g" != "$gid" && -z "${seen[$g]:-}" ]]; then
+              device_groups+=(--group-add "$g")
+              seen[$g]=1
+            fi
+          done
+
+          # Do not interpret GitHub workflow commands printed by the test process.
+          marker=$(< /proc/sys/kernel/random/uuid)
+          printf '::stop-commands::%s\n' "$marker"
+          trap 'printf "::%s::\n" "$marker"' EXIT
+
+          docker run --rm --init -i --pull=always \
+            --name "megatron-pr-$DAS_HCU_CI_RUN_ID" \
+            --label "megatron.pr.unit=$GITHUB_REPOSITORY:$DAS_HCU_CI_RUN_ID" \
+            --user "$uid:$gid" --cap-drop=ALL --security-opt=no-new-privileges \
+            --device=/dev/kfd --device=/dev/mkfd --device=/dev/dri \
+            "${device_groups[@]}" --shm-size=64g \
+            --mount "type=bind,src=$ws,dst=/ci-input,readonly" \
+            --mount "type=bind,src=$logs,dst=/ci-logs" \
+            --mount "type=bind,src=/opt/hyhal,dst=/opt/hyhal,readonly" \
+            --env HCU_SOURCE_SHA --env DAS_HCU_CI_RUN_ID --env DAS_HCU_MEGATRON_WHEEL \
+            --env BUCKET=tests/unit_tests --env N_REPEAT=1 --env DTK_ENV=/opt/dtk/env.sh \
+            --env DAS_HCU_CI_LOG_DIR=/ci-logs --workdir /tmp --entrypoint /bin/bash \
+            "$DAS_HCU_CI_IMAGE" --noprofile --norc -s <<'HCU_UNIT'
+          set -euo pipefail
+          scratch=$(mktemp -d /tmp/megatron-pr.XXXXXXXX)
+          export HOME="$scratch/home" GITHUB_WORKSPACE="$scratch/src" GITHUB_ENV="$scratch/step-env"
+          export DAS_HCU_CI_TMP_ROOT="$scratch/runtime"
+          mkdir -p -- "$HOME"
+          : > "$GITHUB_ENV"
+          [[ -w "$DAS_HCU_CI_LOG_DIR" && -x "$DAS_HCU_CI_LOG_DIR" ]]
+
+          # Use a writable, disposable Git worktree; do not run tests in /ci-input.
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git fetch --quiet --no-tags /ci-input HEAD
+          git checkout --quiet --detach FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$HCU_SOURCE_SHA" ]]
+          export MEGATRON_PATH="$GITHUB_WORKSPACE/3rdparty/Megatron-LM"
+
+          # Preserve the primary exit code; surface a cleanup failure on an otherwise green run.
+          finish_unit() {
+            rc=$?
+            trap - EXIT
+            set +e
+            bash tests/bw1100/ci/cleanup.sh
+            cleanup_rc=$?
+            if (( rc != 0 )); then exit "$rc"; fi
+            exit "$cleanup_rc"
+          }
+          trap finish_unit EXIT
+
+          # Honor the image's Conda interpreter, if configured, before constructing the
+          # venv. The test harness must not reactivate base and bypass that venv later.
+          if [[ -n "${CONDA_HOME:-}" && -f "$CONDA_HOME/etc/profile.d/conda.sh" ]]; then
+            source "$CONDA_HOME/etc/profile.d/conda.sh"
+            conda activate "${CONDA_ENV_NAME:-base}"
+          fi
+          unset CONDA_HOME
+          python3 -m venv --system-site-packages --without-pip "$scratch/venv"
+          source "$scratch/venv/bin/activate"
+          # Reuse the image's pip module (some images lack ensurepip). The repo also calls bare pip.
+          printf '%s\n' '#!/bin/sh' 'exec "$VIRTUAL_ENV/bin/python3" -m pip "$@"' > "$VIRTUAL_ENV/bin/pip"
+          chmod 0755 "$VIRTUAL_ENV/bin/pip"
+          ln -s pip "$VIRTUAL_ENV/bin/pip3"
+          python3 -c 'import os,sys; assert sys.prefix == os.environ["VIRTUAL_ENV"]'
+          python3 -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements/requirements.txt
+
+          # The same environment check, pinned submodule preparation, and test entry as run-test.
+          bash tests/bw1100/ci/check_environment.sh
+          if grep -qx 'DAS_COVERAGE_DISABLED=1' "$GITHUB_ENV"; then export DAS_COVERAGE_DISABLED=1; fi
+          source tests/bw1100/ci/prepare_workspace.sh
+          set +e
+          bash tests/bw1100/pr/run_unit_tests.sh 2>&1 | tee -a "$DAS_HCU_CI_LOG_DIR/test.log"
+          result=("${PIPESTATUS[@]}")
+          set -e
+          if (( result[0] != 0 )); then exit "${result[0]}"; fi
+          exit "${result[1]}"
+          HCU_UNIT
+
+      - name: Remove only this job's container and verify checkout permissions
+        if: always() && steps.checkout.outcome == 'success'
         shell: bash
-        run: bash tests/bw1100/ci/restore_runner_permissions.sh
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          # --rm covers normal exits. On cancellation, never touch other jobs' containers.
+          filters=(--filter "name=^/megatron-pr-$DAS_HCU_CI_RUN_ID$"
+                   --filter "label=megatron.pr.unit=$GITHUB_REPOSITORY:$DAS_HCU_CI_RUN_ID")
+          cid=$(docker ps -aq --no-trunc "${filters[@]}")
+          if [[ -n "$cid" ]]; then
+            [[ "$cid" =~ ^[0-9a-f]{64}$ ]]
+            if ! docker rm -f "$cid" >/dev/null; then
+              remaining=$(docker ps -aq --no-trunc "${filters[@]}")
+              [[ -z "$remaining" ]] || exit 1
+            fi
+          fi
+
+          ws=$(realpath -e -- "$GITHUB_WORKSPACE")
+          [[ "$ws" == "$GITHUB_WORKSPACE" && -d "$ws/.git" && ! -L "$ws/.git" ]]
+          # Unlink needs write + search on the parent; matching ownership alone is insufficient.
+          bad=$(find -P "$ws" -xdev \( ! -uid "$(id -u)" -o \
+            \( -type d \( ! -writable -o ! -executable \) \) \) -print -quit)
+          if [[ -n "$bad" ]]; then
+            printf 'ERROR: workspace not cleanable by the runner: %q\n' "$bad" >&2
+            exit 1
+          fi
 
   finish:
     name: Finish
-    if: always()
+    if: always() && needs.authorize.result != 'skipped'
     needs:
       - authorize
       - check-changes
       - linting
       - validate-config
-      - restore-before-unit
       - unit-tests
-      - restore-after-unit
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -300,9 +355,7 @@ jobs:
           CHECK_RESULT: ${{ needs.check-changes.result }}
           LINT_RESULT: ${{ needs.linting.result }}
           VALIDATE_RESULT: ${{ needs.validate-config.result }}
-          RESTORE_BEFORE_RESULT: ${{ needs.restore-before-unit.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          RESTORE_AFTER_RESULT: ${{ needs.restore-after-unit.result }}
         run: |
           set -euo pipefail
           [[ "${AUTH_RESULT}" == "success" ]]
@@ -311,15 +364,11 @@ jobs:
           if [[ "${RUNTIME_CHANGED}" == "true" ]]; then
             [[ "${LINT_RESULT}" == "success" ]]
             [[ "${VALIDATE_RESULT}" == "success" ]]
-            [[ "${RESTORE_BEFORE_RESULT}" == "success" ]]
             [[ "${UNIT_RESULT}" == "success" ]]
-            [[ "${RESTORE_AFTER_RESULT}" == "success" ]]
           else
             [[ "${LINT_RESULT}" == "skipped" ]]
             [[ "${VALIDATE_RESULT}" == "skipped" ]]
-            [[ "${RESTORE_BEFORE_RESULT}" == "skipped" ]]
             [[ "${UNIT_RESULT}" == "skipped" ]]
-            [[ "${RESTORE_AFTER_RESULT}" == "skipped" ]]
           fi
 
           {

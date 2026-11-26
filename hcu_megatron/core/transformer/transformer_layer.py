@@ -934,8 +934,11 @@ class HyperConnectionTransformerLayer(MegatronCoreTransformerLayer):
             # If EP overlap is enabled, remaining of mlp will be called as fine_grained_callables
             # and should be skipped here.
             if self.config.overlap_moe_expert_parallel_comm:
-                probs, routing_map = self.mlp.route(hidden_states)
-                hidden_states, probs = self.mlp.preprocess(hidden_states, probs, routing_map)
+                from hcu_megatron.core.models.gpt.fine_grained_callables import (
+                    route_and_preprocess,
+                )
+
+                hidden_states, probs = route_and_preprocess(self.mlp, hidden_states)
                 nvtx_range_pop(suffix="mlp")
                 return residual, hidden_states, probs, shared_expert_output
             mlp_output_with_bias = self.mlp(hidden_states)

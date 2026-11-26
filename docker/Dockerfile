@@ -172,15 +172,15 @@ RUN : "${RESOURCE_SERVER_URL:?RESOURCE_SERVER_URL build argument is required}" &
 
 # ---layer---
 RUN TORCH_TAG="torch${TORCH_VERSION//./}" \
-    && pip install torch==${TORCH_VERSION} nvidia-resiliency-ext \
+    && pip install torch==${TORCH_VERSION} nvidia-resiliency-ext==0.7.0 \
     && das-install torchvision ${TORCH_TAG} \
     && das-install flash_attn ${TORCH_TAG} \
-    && das-install triton==3.6.0 ${TORCH_TAG} \
+    && das-install triton ${TORCH_TAG} \
     && das-install apex ${TORCH_TAG} \
     && das-install deepspeed ${TORCH_TAG} \
     && das-install transformer-engine ${TORCH_TAG} \
     && das-install deep-ep ${TORCH_TAG} \
-    && das-install fast-hadamard-transform-cuda ${TORCH_TAG} \
+    && das-install fast-hadamard-transform ${TORCH_TAG} \
     && das-install hip-dsa ${TORCH_TAG} \
     && das-install mhc-fused-kernel ${TORCH_TAG} \
     && das-install flash-mla ${TORCH_TAG} \
