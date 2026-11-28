@@ -81,6 +81,10 @@ def _distributed_data_parallel_init_wrapper(_ddp_init_func):
                     toggled.append(param)
         try:
             _ddp_init_func(self, *args, **kwargs)
+            # UltraEP signals master gradients only after replica reduction.
+            for param, bucket_group in getattr(self, 'param_to_bucket_group', {}).items():
+                if getattr(param, 'is_eplb_master', False):
+                    param._ddp_bucket_group = bucket_group
         finally:
             for param in toggled:
                 param.requires_grad_(True)
