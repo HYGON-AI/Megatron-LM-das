@@ -262,7 +262,7 @@ def validate_args_func_decorator(validate_args_func):
                 "If overlap_p2p_comm is True, cuda graph replay will hang"
             )
 
-        if args.turbo_sync_free_moe_stage > 1:
+        if args.sync_free_moe and args.turbo_sync_free_moe_stage > 1:
             if args.sync_free_moe_backend == "deepep":
                 args.moe_flex_dispatcher_backend = "deepep"
                 if args.moe_token_dispatcher_type != "flex":
